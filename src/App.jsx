@@ -616,8 +616,8 @@ function parseText(text) {
   const contentMatch = text.match(/[●•]\s*내용\s*[:：]\s*([^\n●•]+)/);
   if (contentMatch) {
     const content = contentMatch[1].trim();
-    const htMatch = content.match(/\[기일\]\s*([^(\（\n]+)/);
-    if (htMatch) result.hearingType = htMatch[1].trim();
+    const htMatch = content.match(/\[([^\]]+)\]\s*([^(\（\n]+)/);
+    if (htMatch) result.hearingType = htMatch[2].trim() || htMatch[1].trim();
     result.timelineContent = content;
   }
 
@@ -629,7 +629,8 @@ function parseText(text) {
 
   // ●결과: 기일변경
   const resultMatch = text.match(/[●•]\s*결과\s*[:：]\s*([^\n●•]+)/);
-  if (resultMatch) result.memo = `결과: ${resultMatch[1].trim()}`;
+  const resultVal = resultMatch ? resultMatch[1].trim() : "";
+  if (resultVal && resultVal !== "-") result.memo = `결과: ${resultVal}`;
 
   // 사건번호로 유형 추론
   if (result.caseNumber) {
