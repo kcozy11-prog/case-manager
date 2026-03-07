@@ -662,13 +662,13 @@ function AiParseModal({ cases, onClose, onApply }) {
         return;
       }
       setResult(parsed);
-      const nameToMatch = (parsed.client || "").toLowerCase();
-      const numToMatch = (parsed.caseNumber || "").toLowerCase();
+      const nameToMatch = (parsed.client || "").trim();
+      const digitsOnly = (s) => (s || "").replace(/\D/g, "");
+      const numToMatch = digitsOnly(parsed.caseNumber);
       const found = cases.find(c => {
-        const cName = c.client.toLowerCase();
-        const cNum = (c.caseNumber || "").toLowerCase();
-        const nameMatch = nameToMatch && (cName.includes(nameToMatch) || nameToMatch.includes(cName));
-        const numMatch = numToMatch && (cNum.includes(numToMatch) || numToMatch.includes(cNum));
+        const nameMatch = nameToMatch && c.client.includes(nameToMatch);
+        const cDigits = digitsOnly(c.caseNumber);
+        const numMatch = numToMatch.length >= 4 && cDigits.includes(numToMatch);
         return nameMatch || numMatch;
       });
       setMatchedCase(found || null);
