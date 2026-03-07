@@ -911,7 +911,14 @@ function FormSection({ title, children }) {
 
 // ── 메인 앱 ───────────────────────────────────────────────────────────────────
 export default function App() {
-  const [cases, setCases] = useState(SAMPLE_CASES);
+  const [cases, setCases] = useState(() => {
+    try {
+      const saved = localStorage.getItem("case_manager_cases");
+      return saved ? JSON.parse(saved) : SAMPLE_CASES;
+    } catch {
+      return SAMPLE_CASES;
+    }
+  });
   const [selectedId, setSelectedId] = useState("c1");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("전체");
@@ -935,8 +942,11 @@ export default function App() {
   const saveCase = useCallback((c) => {
     setCases(prev => {
       const idx = prev.findIndex(x => x.id === c.id);
-      if (idx >= 0) { const next = [...prev]; next[idx] = c; return next; }
-      return [c, ...prev];
+      const next = idx >= 0
+        ? prev.map((x, i) => i === idx ? c : x)
+        : [c, ...prev];
+      try { localStorage.setItem("case_manager_cases", JSON.stringify(next)); } catch {}
+      return next;
     });
     setSelectedId(c.id);
   }, []);
