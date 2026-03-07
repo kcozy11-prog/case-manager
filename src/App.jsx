@@ -629,7 +629,7 @@ JSON 형식으로만 응답하고, 다른 텍스트는 포함하지 마세요.
 ${text}`;
 
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey.trim()}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey.trim()}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
