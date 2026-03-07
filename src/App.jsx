@@ -593,9 +593,21 @@ function AiParseModal({ cases, onClose, onApply }) {
   const [result, setResult] = useState(null);
   const [matchedCase, setMatchedCase] = useState(null);
   const [error, setError] = useState("");
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("anthropic_api_key") || "");
+  const [showApiKey, setShowApiKey] = useState(false);
+
+  const saveApiKey = (val) => {
+    setApiKey(val);
+    localStorage.setItem("anthropic_api_key", val);
+  };
 
   const parse = async () => {
     if (!text.trim()) return;
+    if (!apiKey.trim()) {
+      setError("API 키를 입력해 주세요.");
+      setShowApiKey(true);
+      return;
+    }
     setLoading(true); setResult(null); setError(""); setMatchedCase(null);
     try {
       const prompt = `다음 텍스트를 분석하여 법률 사건 관련 정보를 추출해 주세요.
@@ -618,16 +630,28 @@ ${text}`;
 
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey.trim(),
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          model: "claude-opus-4-5",
           max_tokens: 1000,
           messages: [{ role: "user", content: prompt }],
         }),
       });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error?.message || `API 오류 (${res.status})`);
+      }
+
       const data = await res.json();
       const raw = data.content?.find(b => b.type === "text")?.text || "";
-      const cleaned = raw.replace(/```json|```/g, "").trim();
+      if (!raw) throw new Error("AI 응답이 비어 있습니다.");
+      const cleaned = raw.replace(/```json[\s\S]*?```|```/g, "").trim();
       const parsed = JSON.parse(cleaned);
       setResult(parsed);
 
@@ -663,6 +687,28 @@ ${text}`;
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>
         <div className="p-5 space-y-4">
+          {/* API 키 설정 */}
+          <div>
+            <button
+              onClick={() => setShowApiKey(p => !p)}
+              className="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1 mb-1"
+            >
+              <span>{showApiKey ? "▾" : "▸"}</span>
+              <span>Anthropic API 키 {apiKey ? "(설정됨 ✓)" : "(미설정)"}</span>
+            </button>
+            {showApiKey && (
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  className="input-sm flex-1"
+                  placeholder="sk-ant-..."
+                  value={apiKey}
+                  onChange={e => saveApiKey(e.target.value)}
+                />
+              </div>
+            )}
+          </div>
+
           <textarea
             className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-300"
             rows={6} placeholder="카카오톡 대화, 메모 등을 붙여넣으세요..."
