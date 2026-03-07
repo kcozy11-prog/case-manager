@@ -586,84 +586,90 @@ function TodosTab({ c, onUpdate }) {
   );
 }
 
+// ── 로컬 파싱 (법원 알림 / 카카오톡 등) ──────────────────────────────────────
+function parseText(text) {
+  const result = {
+    client: null, title: null, type: null, court: null, caseNumber: null,
+    hearingDate: null, hearingType: null, timelineContent: null, memo: null, opponent: null,
+  };
+
+  // ●사건: 대전지방법원-2025구합200477 [전자] 손실보상금 등
+  const caseMatch = text.match(/[●•]\s*사건\s*[:：]\s*([^\n●•]+)/);
+  if (caseMatch) {
+    const caseStr = caseMatch[1].trim();
+    const courtCaseMatch = caseStr.match(/^(.+?(?:법원|검찰청|경찰서))[- ](\S+)/);
+    if (courtCaseMatch) {
+      result.court = courtCaseMatch[1].trim();
+      result.caseNumber = courtCaseMatch[2].trim();
+      const rest = caseStr.slice(courtCaseMatch[0].length).replace(/\[전자\]/g, "").trim();
+      if (rest) result.title = rest;
+    } else {
+      result.title = caseStr;
+    }
+  }
+
+  // ●당사자명: 아둘람
+  const clientMatch = text.match(/[●•]\s*당사자명\s*[:：]\s*([^\n●•]+)/);
+  if (clientMatch) result.client = clientMatch[1].trim();
+
+  // ●내용: [기일] 변론기일(...)
+  const contentMatch = text.match(/[●•]\s*내용\s*[:：]\s*([^\n●•]+)/);
+  if (contentMatch) {
+    const content = contentMatch[1].trim();
+    const htMatch = content.match(/\[기일\]\s*([^(\（\n]+)/);
+    if (htMatch) result.hearingType = htMatch[1].trim();
+    result.timelineContent = content;
+  }
+
+  // ●일시/장소: 2026. 01. 29. 15:30 별관 제332호 법정
+  const dateMatch = text.match(/[●•]\s*일시[^:：]*\s*[:：]\s*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\./);
+  if (dateMatch) {
+    result.hearingDate = `${dateMatch[1]}-${String(dateMatch[2]).padStart(2,"0")}-${String(dateMatch[3]).padStart(2,"0")}`;
+  }
+
+  // ●결과: 기일변경
+  const resultMatch = text.match(/[●•]\s*결과\s*[:：]\s*([^\n●•]+)/);
+  if (resultMatch) result.memo = `결과: ${resultMatch[1].trim()}`;
+
+  // 사건번호로 유형 추론
+  if (result.caseNumber) {
+    const cn = result.caseNumber;
+    if (/가합|가단|가소/.test(cn)) result.type = "민사";
+    else if (/고합|고단|고정/.test(cn)) result.type = "형사(재판)";
+    else if (/형제|형사/.test(cn)) result.type = "형사(고소)";
+    else if (/구합|구단/.test(cn)) result.type = "민사";
+  }
+
+  return result;
+}
+
 // ── AI 파싱 모달 ──────────────────────────────────────────────────────────────
 function AiParseModal({ cases, onClose, onApply }) {
   const [text, setText] = useState("");
-  const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [matchedCase, setMatchedCase] = useState(null);
   const [error, setError] = useState("");
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem("gemini_api_key") || "");
-  const [showApiKey, setShowApiKey] = useState(false);
 
-  const saveApiKey = (val) => {
-    setApiKey(val);
-    localStorage.setItem("gemini_api_key", val);
-  };
-
-  const parse = async () => {
+  const parse = () => {
     if (!text.trim()) return;
-    if (!apiKey.trim()) {
-      setError("Google AI Studio API 키를 입력해 주세요.");
-      setShowApiKey(true);
-      return;
-    }
-    setLoading(true); setResult(null); setError(""); setMatchedCase(null);
+    setError(""); setResult(null); setMatchedCase(null);
     try {
-      const prompt = `다음 텍스트를 분석하여 법률 사건 관련 정보를 추출해 주세요.
-JSON 형식으로만 응답하고, 다른 텍스트는 포함하지 마세요.
-
-추출 항목:
-- client: 의뢰인 이름 (없으면 null)
-- title: 사건명 또는 사건 요약 (없으면 null)
-- type: 사건 유형 (민사/형사(고소)/형사(피의)/형사(재판)/자문 중 하나, 모르면 null)
-- court: 법원/수사기관 (없으면 null)
-- caseNumber: 사건번호 (없으면 null)
-- hearingDate: 기일 날짜 ISO 형식 YYYY-MM-DD (없으면 null)
-- hearingType: 기일 종류 (없으면 null)
-- timelineContent: 진행 경과 내용 요약 (없으면 null)
-- memo: 기타 메모로 남길 내용 (없으면 null)
-- opponent: 상대방 (없으면 null)
-
-텍스트:
-${text}`;
-
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey.trim()}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0, maxOutputTokens: 1000 },
-          }),
-        }
-      );
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error?.message || `API 오류 (${res.status})`);
+      const parsed = parseText(text);
+      const hasAny = Object.values(parsed).some(v => v !== null);
+      if (!hasAny) {
+        setError("인식할 수 있는 항목이 없습니다. 법원 알림 형식(●사건: / ●당사자명: 등)을 확인해 주세요.");
+        return;
       }
-
-      const data = await res.json();
-      const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      if (!raw) throw new Error("AI 응답이 비어 있습니다.");
-      const cleaned = raw.replace(/```json[\s\S]*?```|```/g, "").trim();
-      const parsed = JSON.parse(cleaned);
       setResult(parsed);
-
-      // 사건 매칭
       const nameToMatch = (parsed.client || "").toLowerCase();
-      const titleToMatch = (parsed.title || "").toLowerCase();
+      const numToMatch = (parsed.caseNumber || "").toLowerCase();
       const found = cases.find(c =>
         (nameToMatch && c.client.toLowerCase().includes(nameToMatch)) ||
-        (titleToMatch && c.title.toLowerCase().includes(titleToMatch))
+        (numToMatch && (c.caseNumber || "").toLowerCase().includes(numToMatch))
       );
       setMatchedCase(found || null);
     } catch (e) {
       setError("파싱 중 오류가 발생했습니다: " + e.message);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -684,28 +690,9 @@ ${text}`;
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>
         <div className="p-5 space-y-4">
-          {/* API 키 설정 */}
-          <div>
-            <button
-              onClick={() => setShowApiKey(p => !p)}
-              className="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1 mb-1"
-            >
-              <span>{showApiKey ? "▾" : "▸"}</span>
-              <span>Google AI API 키 {apiKey ? "(설정됨 ✓)" : "(미설정)"}</span>
-            </button>
-            {showApiKey && (
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  className="input-sm flex-1"
-                  placeholder="AIza..."
-                  value={apiKey}
-                  onChange={e => saveApiKey(e.target.value)}
-                />
-              </div>
-            )}
+          <div className="text-xs text-slate-400 bg-slate-50 rounded px-3 py-2">
+            💡 법원 알림 문자(●사건: / ●당사자명: / ●일시 등)를 붙여넣으면 자동으로 파싱합니다.
           </div>
-
           <textarea
             className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-300"
             rows={6} placeholder="카카오톡 대화, 메모 등을 붙여넣으세요..."
@@ -738,8 +725,8 @@ ${text}`;
           <div className="flex gap-2 justify-end">
             <button onClick={onClose} className="btn-ghost">취소</button>
             {!result ? (
-              <button onClick={parse} disabled={loading || !text.trim()} className="btn-primary">
-                {loading ? "분석 중…" : "파싱하기"}
+              <button onClick={parse} disabled={!text.trim()} className="btn-primary">
+                파싱하기
               </button>
             ) : (
               <button onClick={apply} className="btn-primary">적용하기</button>
