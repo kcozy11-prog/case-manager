@@ -593,18 +593,18 @@ function AiParseModal({ cases, onClose, onApply }) {
   const [result, setResult] = useState(null);
   const [matchedCase, setMatchedCase] = useState(null);
   const [error, setError] = useState("");
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem("anthropic_api_key") || "");
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("gemini_api_key") || "");
   const [showApiKey, setShowApiKey] = useState(false);
 
   const saveApiKey = (val) => {
     setApiKey(val);
-    localStorage.setItem("anthropic_api_key", val);
+    localStorage.setItem("gemini_api_key", val);
   };
 
   const parse = async () => {
     if (!text.trim()) return;
     if (!apiKey.trim()) {
-      setError("API 키를 입력해 주세요.");
+      setError("Google AI Studio API 키를 입력해 주세요.");
       setShowApiKey(true);
       return;
     }
@@ -628,20 +628,17 @@ JSON 형식으로만 응답하고, 다른 텍스트는 포함하지 마세요.
 텍스트:
 ${text}`;
 
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey.trim(),
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        body: JSON.stringify({
-          model: "claude-opus-4-5",
-          max_tokens: 1000,
-          messages: [{ role: "user", content: prompt }],
-        }),
-      });
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey.trim()}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0, maxOutputTokens: 1000 },
+          }),
+        }
+      );
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -649,7 +646,7 @@ ${text}`;
       }
 
       const data = await res.json();
-      const raw = data.content?.find(b => b.type === "text")?.text || "";
+      const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
       if (!raw) throw new Error("AI 응답이 비어 있습니다.");
       const cleaned = raw.replace(/```json[\s\S]*?```|```/g, "").trim();
       const parsed = JSON.parse(cleaned);
@@ -694,14 +691,14 @@ ${text}`;
               className="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1 mb-1"
             >
               <span>{showApiKey ? "▾" : "▸"}</span>
-              <span>Anthropic API 키 {apiKey ? "(설정됨 ✓)" : "(미설정)"}</span>
+              <span>Google AI API 키 {apiKey ? "(설정됨 ✓)" : "(미설정)"}</span>
             </button>
             {showApiKey && (
               <div className="flex gap-2">
                 <input
                   type="password"
                   className="input-sm flex-1"
-                  placeholder="sk-ant-..."
+                  placeholder="AIza..."
                   value={apiKey}
                   onChange={e => saveApiKey(e.target.value)}
                 />
