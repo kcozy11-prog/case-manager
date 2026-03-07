@@ -663,10 +663,13 @@ function AiParseModal({ cases, onClose, onApply }) {
       setResult(parsed);
       const nameToMatch = (parsed.client || "").toLowerCase();
       const numToMatch = (parsed.caseNumber || "").toLowerCase();
-      const found = cases.find(c =>
-        (nameToMatch && c.client.toLowerCase().includes(nameToMatch)) ||
-        (numToMatch && (c.caseNumber || "").toLowerCase().includes(numToMatch))
-      );
+      const found = cases.find(c => {
+        const cName = c.client.toLowerCase();
+        const cNum = (c.caseNumber || "").toLowerCase();
+        const nameMatch = nameToMatch && (cName.includes(nameToMatch) || nameToMatch.includes(cName));
+        const numMatch = numToMatch && (cNum.includes(numToMatch) || numToMatch.includes(cNum));
+        return nameMatch || numMatch;
+      });
       setMatchedCase(found || null);
     } catch (e) {
       setError("파싱 중 오류가 발생했습니다: " + e.message);
