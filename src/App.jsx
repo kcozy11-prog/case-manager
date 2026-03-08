@@ -586,51 +586,106 @@ function TodosTab({ c, onUpdate }) {
   );
 }
 
-// ── 로컬 파싱 (법원 알림 / 카카오톡 등) ──────────────────────────────────────
-function parseText(text) {
+// ── 내용 유형 분류 ────────────────────────────────────────────────────────────
+function classifyContentType(text) {
+  const t = text;
+  if (/준비서면|답변서|항소장|상고장|의견서/.test(t) && /제출|냈|올렸|보냈/.test(t)) return "SUBMITTED_DOC";
+  if (/소장/.test(t) && /제출|냈|올렸|접수/.test(t)) return "SUBMITTED_DOC";
+  if (/기일통지|결정문|판결문|통지서/.test(t) && /수령|받았|송달|왔|도착/.test(t)) return "RECEIVED_DOC";
+  if (/소장/.test(t) && /수령|받았|송달|왔|도착/.test(t)) return "RECEIVED_DOC";
+  if (/기일|변론기일|심문기일|선고기일|조정기일|변론|심문|선고/.test(t)) return "HEARING";
+  if (/위임|맡겼|부탁|지시했|시켰/.test(t)) return "DELEGATED";
+  return "PROGRESS";
+}
+
+const CONTENT_TYPE_LABEL = {
+  SUBMITTED_DOC: "제출한 서면",
+  HEARING: "기일/재판",
+  RECEIVED_DOC: "수령 문서",
+  DELEGATED: "위임 업무",
+  PROGRESS: "진행경과",
+};
+
+// ── 로컬 파싱 (법원 알림 / 카카오톡 / 자유형식) ──────────────────────────────
+function parseText(text, cases = []) {
   const result = {
     client: null, title: null, type: null, court: null, caseNumber: null,
     hearingDate: null, hearingType: null, timelineContent: null, memo: null, opponent: null,
+    contentType: "PROGRESS",
   };
 
-  // ●사건: 대전지방법원-2025구합200477 [전자] 손실보상금 등
-  const caseMatch = text.match(/[●•]\s*사건\s*[:：]\s*([^\n●•]+)/);
-  if (caseMatch) {
-    const caseStr = caseMatch[1].trim();
-    const courtCaseMatch = caseStr.match(/^(.+?(?:법원|검찰청|경찰서))[- ](\S+)/);
-    if (courtCaseMatch) {
-      result.court = courtCaseMatch[1].trim();
-      result.caseNumber = courtCaseMatch[2].trim();
-      const rest = caseStr.slice(courtCaseMatch[0].length).replace(/\[전자\]/g, "").trim();
-      if (rest) result.title = rest;
+  const hasBullet = /[●•]/.test(text);
+
+  if (hasBullet) {
+    // ── ● 형식 파싱 ──
+    // ●사건: 대전지방법원-2025구합200477 [전자] 손실보상금 등
+    const caseMatch = text.match(/[●•]\s*사건\s*[:：]\s*([^\n●•]+)/);
+    if (caseMatch) {
+      const caseStr = caseMatch[1].trim();
+      const courtCaseMatch = caseStr.match(/^(.+?(?:법원|검찰청|경찰서))[- ](\S+)/);
+      if (courtCaseMatch) {
+        result.court = courtCaseMatch[1].trim();
+        result.caseNumber = courtCaseMatch[2].trim();
+        const rest = caseStr.slice(courtCaseMatch[0].length).replace(/\[전자\]/g, "").trim();
+        if (rest) result.title = rest;
+      } else {
+        result.title = caseStr;
+      }
+    }
+
+    // ●당사자명: 아둘람
+    const clientMatch = text.match(/[●•]\s*당사자명\s*[:：]\s*([^\n●•]+)/);
+    if (clientMatch) result.client = clientMatch[1].trim();
+
+    // ●내용: [기일] 변론기일(...)
+    const contentMatch = text.match(/[●•]\s*내용\s*[:：]\s*([^\n●•]+)/);
+    if (contentMatch) {
+      const content = contentMatch[1].trim();
+      const htMatch = content.match(/\[([^\]]+)\]\s*([^(\（\n]+)/);
+      if (htMatch) result.hearingType = htMatch[2].trim() || htMatch[1].trim();
+      result.timelineContent = content;
+    }
+
+    // ●일시/장소: 2026. 01. 29. 15:30 별관 제332호 법정
+    const dateMatch = text.match(/[●•]\s*일시[^:：]*\s*[:：]\s*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\./);
+    if (dateMatch) {
+      result.hearingDate = `${dateMatch[1]}-${String(dateMatch[2]).padStart(2,"0")}-${String(dateMatch[3]).padStart(2,"0")}`;
+    }
+
+    // ●결과: 기일변경
+    const resultMatch = text.match(/[●•]\s*결과\s*[:：]\s*([^\n●•]+)/);
+    const resultVal = resultMatch ? resultMatch[1].trim() : "";
+    if (resultVal && resultVal !== "-") result.memo = `결과: ${resultVal}`;
+
+  } else {
+    // ── 자유 형식 파싱 ──
+
+    // 카카오톡 형식: [이름] [오전/오후 시:분] 내용
+    const kakaoMatch = text.match(/^\[(.+?)\]\s*\[(오전|오후)\s*(\d{1,2}):(\d{2})\]\s*(.+)$/m);
+    if (kakaoMatch) {
+      const [, , ampm, hStr, mStr, content] = kakaoMatch;
+      let h = parseInt(hStr);
+      if (ampm === "오후" && h < 12) h += 12;
+      if (ampm === "오전" && h === 12) h = 0;
+      result.timelineContent = content.trim();
     } else {
-      result.title = caseStr;
+      result.timelineContent = text.trim();
+    }
+
+    // 사건번호 추출: 2024가합1234, 2025나5678, 2024구합200477 등
+    const caseNumMatch = text.match(/\d{2,4}[가나다라마바사아자차카타파하구고형][합단소정고제]+\d+/);
+    if (caseNumMatch) result.caseNumber = caseNumMatch[0];
+
+    // 당사자명 추출: cases 목록의 client와 전체 일치
+    if (cases.length > 0) {
+      for (const c of cases) {
+        if (c.client && c.client.trim() && text.includes(c.client.trim())) {
+          result.client = c.client.trim();
+          break;
+        }
+      }
     }
   }
-
-  // ●당사자명: 아둘람
-  const clientMatch = text.match(/[●•]\s*당사자명\s*[:：]\s*([^\n●•]+)/);
-  if (clientMatch) result.client = clientMatch[1].trim();
-
-  // ●내용: [기일] 변론기일(...)
-  const contentMatch = text.match(/[●•]\s*내용\s*[:：]\s*([^\n●•]+)/);
-  if (contentMatch) {
-    const content = contentMatch[1].trim();
-    const htMatch = content.match(/\[([^\]]+)\]\s*([^(\（\n]+)/);
-    if (htMatch) result.hearingType = htMatch[2].trim() || htMatch[1].trim();
-    result.timelineContent = content;
-  }
-
-  // ●일시/장소: 2026. 01. 29. 15:30 별관 제332호 법정
-  const dateMatch = text.match(/[●•]\s*일시[^:：]*\s*[:：]\s*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\./);
-  if (dateMatch) {
-    result.hearingDate = `${dateMatch[1]}-${String(dateMatch[2]).padStart(2,"0")}-${String(dateMatch[3]).padStart(2,"0")}`;
-  }
-
-  // ●결과: 기일변경
-  const resultMatch = text.match(/[●•]\s*결과\s*[:：]\s*([^\n●•]+)/);
-  const resultVal = resultMatch ? resultMatch[1].trim() : "";
-  if (resultVal && resultVal !== "-") result.memo = `결과: ${resultVal}`;
 
   // 사건번호로 유형 추론
   if (result.caseNumber) {
@@ -640,6 +695,9 @@ function parseText(text) {
     else if (/형제|형사/.test(cn)) result.type = "형사(고소)";
     else if (/구합|구단/.test(cn)) result.type = "민사";
   }
+
+  // 내용 유형 분류
+  result.contentType = classifyContentType(text);
 
   return result;
 }
@@ -655,10 +713,10 @@ function AiParseModal({ cases, onClose, onApply }) {
     if (!text.trim()) return;
     setError(""); setResult(null); setMatchedCase(null);
     try {
-      const parsed = parseText(text);
-      const hasAny = Object.values(parsed).some(v => v !== null);
+      const parsed = parseText(text, cases);
+      const hasAny = Object.values(parsed).some(v => v !== null && v !== "PROGRESS");
       if (!hasAny) {
-        setError("인식할 수 있는 항목이 없습니다. 법원 알림 형식(●사건: / ●당사자명: 등)을 확인해 주세요.");
+        setError("인식할 수 있는 항목이 없습니다. 내용을 확인해 주세요.");
         return;
       }
       setResult(parsed);
@@ -695,11 +753,12 @@ function AiParseModal({ cases, onClose, onApply }) {
         </div>
         <div className="p-5 space-y-4">
           <div className="text-xs text-slate-400 bg-slate-50 rounded px-3 py-2">
-            💡 법원 알림 문자(●사건: / ●당사자명: / ●일시 등)를 붙여넣으면 자동으로 파싱합니다.
+            💡 법원 알림 문자(●사건: / ●당사자명: 등) 또는 자유 형식 텍스트를 붙여넣으면 자동으로 파싱합니다.<br/>
+            예) &quot;아둘람 준비서면 제출했습니다&quot; / &quot;2024가합1234 변론기일 완료&quot;
           </div>
           <textarea
             className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-300"
-            rows={6} placeholder="카카오톡 대화, 메모 등을 붙여넣으세요..."
+            rows={6} placeholder="법원 알림 문자, 카카오톡 내용, 자유 메모 등을 붙여넣으세요..."
             value={text} onChange={e => setText(e.target.value)}
           />
           {error && <div className="text-xs text-red-500 bg-red-50 px-3 py-2 rounded">{error}</div>}
@@ -707,20 +766,26 @@ function AiParseModal({ cases, onClose, onApply }) {
           {result && (
             <div className="bg-slate-50 rounded-lg p-3 border border-slate-200 space-y-2">
               <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">추출 결과</div>
-              {Object.entries(result).filter(([, v]) => v).map(([k, v]) => (
+              {Object.entries(result).filter(([k, v]) => v && k !== "contentType").map(([k, v]) => (
                 <div key={k} className="flex gap-2 text-sm">
                   <span className="text-slate-400 w-28 flex-shrink-0">{k}</span>
                   <span className="text-slate-700 font-medium">{String(v)}</span>
                 </div>
               ))}
+              {result.contentType && (
+                <div className="flex gap-2 text-sm">
+                  <span className="text-slate-400 w-28 flex-shrink-0">추가될 항목</span>
+                  <span className="text-indigo-600 font-semibold">{CONTENT_TYPE_LABEL[result.contentType]}</span>
+                </div>
+              )}
               <div className="border-t border-slate-200 pt-2 mt-2">
                 {matchedCase ? (
                   <div className="flex items-center gap-2 text-sm text-emerald-600">
-                    <span>✓</span>
-                    <span>일치 사건: <strong>{matchedCase.title}</strong>에 적용됩니다.</span>
+                    <span>✅</span>
+                    <span>일치 사건: <strong>{matchedCase.title}</strong> → <strong>{CONTENT_TYPE_LABEL[result.contentType]}</strong>에 추가됩니다.</span>
                   </div>
                 ) : (
-                  <div className="text-sm text-amber-600">일치 사건 없음 → 새 사건으로 등록됩니다.</div>
+                  <div className="text-sm text-amber-600">⚠️ 일치 사건 없음 → 새 사건으로 등록됩니다.</div>
                 )}
               </div>
             </div>
@@ -945,7 +1010,10 @@ export default function App() {
       const next = idx >= 0
         ? prev.map((x, i) => i === idx ? c : x)
         : [c, ...prev];
-      try { localStorage.setItem("case_manager_cases", JSON.stringify(next)); } catch {}
+      try {
+        localStorage.setItem("case_manager_cases", JSON.stringify(next));
+        localStorage.setItem("law_journal_cases", JSON.stringify(next));
+      } catch {}
       return next;
     });
     setSelectedId(c.id);
@@ -956,14 +1024,22 @@ export default function App() {
       // 기존 사건에 적용
       const updated = { ...matchedCase };
       if (result.memo) updated.memo = (updated.memo ? updated.memo + "\n" : "") + result.memo;
-      if (result.hearingDate && result.hearingType) {
+      if (result.contentType === "HEARING" && result.hearingDate && result.hearingType) {
         updated.hearings = [...updated.hearings, {
           id: Date.now(), date: result.hearingDate, type: result.hearingType, result: ""
         }];
       }
       if (result.timelineContent) {
+        const prefix = {
+          SUBMITTED_DOC: "서면 제출",
+          RECEIVED_DOC: "수령",
+          DELEGATED: "위임",
+          HEARING: "기일",
+          PROGRESS: "",
+        }[result.contentType] || "";
+        const content = prefix ? `[${prefix}] ${result.timelineContent}` : result.timelineContent;
         updated.timeline = [...updated.timeline, {
-          id: Date.now(), date: todayStr, content: result.timelineContent
+          id: Date.now(), date: todayStr, content
         }];
       }
       saveCase(updated);
