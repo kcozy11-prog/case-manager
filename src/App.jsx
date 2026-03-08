@@ -676,14 +676,22 @@ function parseText(text, cases = []) {
     const caseNumMatch = text.match(/\d{2,4}[가나다라마바사아자차카타파하구고형][합단소정고제]+\d+/);
     if (caseNumMatch) result.caseNumber = caseNumMatch[0];
 
-    // 당사자명 추출: cases 목록의 client와 전체 일치
+    // 당사자명 추출: cases 목록의 client와 전체 일치 (님/씨 등 호칭 제거 후 비교)
+    const textNorm = text.replace(/님|씨|씨는|은|는/g, " ");
     if (cases.length > 0) {
       for (const c of cases) {
-        if (c.client && c.client.trim() && text.includes(c.client.trim())) {
-          result.client = c.client.trim();
+        const clientName = (c.client || "").trim();
+        if (clientName && (text.includes(clientName) || textNorm.includes(clientName))) {
+          result.client = clientName;
           break;
         }
       }
+    }
+
+    // 한국어 날짜 형식: 2026년 3월 16일
+    const korDateMatch = text.match(/(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일/);
+    if (korDateMatch) {
+      result.hearingDate = `${korDateMatch[1]}-${String(korDateMatch[2]).padStart(2,"0")}-${String(korDateMatch[3]).padStart(2,"0")}`;
     }
   }
 
