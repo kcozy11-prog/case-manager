@@ -1,4 +1,75 @@
-import { useState, useMemo, useCallback, useRef } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect } from "react";
+
+// ── 비밀번호 설정 (여기서 변경하세요) ────────────────────────────────────────
+const APP_PASSWORD = "lawfirm2024";
+const SESSION_KEY = "cm_auth_ok";
+
+function LockScreen({ onUnlock }) {
+  const [pw, setPw] = useState("");
+  const [error, setError] = useState(false);
+  const [shake, setShake] = useState(false);
+
+  const tryUnlock = () => {
+    if (pw === APP_PASSWORD) {
+      sessionStorage.setItem(SESSION_KEY, "1");
+      onUnlock();
+    } else {
+      setError(true);
+      setShake(true);
+      setPw("");
+      setTimeout(() => setShake(false), 500);
+    }
+  };
+
+  return (
+    <div style={{background:"#0F172A",height:"100dvh"}} className="flex items-center justify-center p-4">
+      <div className={`bg-slate-800 rounded-2xl p-8 w-full max-w-sm shadow-2xl border border-slate-700 ${shake?"animate-shake":""}`}
+           style={shake?{animation:"shake 0.4s ease"}:{}}>
+        <style>{`@keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}`}</style>
+        <div className="flex flex-col items-center gap-5">
+          <div className="w-14 h-14 rounded-2xl bg-indigo-600 flex items-center justify-center">
+            <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+              <rect width="32" height="32" rx="8" fill="#4F46E5"/>
+              <line x1="16" y1="7" x2="16" y2="25" stroke="white" strokeWidth="1.6" strokeLinecap="round"/>
+              <line x1="7" y1="12" x2="25" y2="12" stroke="white" strokeWidth="1.6" strokeLinecap="round"/>
+              <line x1="8.5" y1="12" x2="7" y2="17" stroke="white" strokeWidth="1.3" strokeLinecap="round"/>
+              <line x1="7" y1="12" x2="8.5" y2="17" stroke="white" strokeWidth="1.3" strokeLinecap="round"/>
+              <line x1="23.5" y1="12" x2="25" y2="17" stroke="white" strokeWidth="1.3" strokeLinecap="round"/>
+              <line x1="25" y1="12" x2="23.5" y2="17" stroke="white" strokeWidth="1.3" strokeLinecap="round"/>
+              <path d="M5.5 17 Q8.5 20 11.5 17" stroke="white" strokeWidth="1.4" strokeLinecap="round" fill="none"/>
+              <path d="M20.5 17 Q23.5 20 26.5 17" stroke="white" strokeWidth="1.4" strokeLinecap="round" fill="none"/>
+              <line x1="13" y1="25" x2="19" y2="25" stroke="white" strokeWidth="1.6" strokeLinecap="round"/>
+              <circle cx="16" cy="7" r="1.3" fill="white"/>
+            </svg>
+          </div>
+          <div className="text-center">
+            <div className="text-white font-bold text-xl">사건 관리</div>
+            <div className="text-slate-400 text-sm mt-1">접근하려면 비밀번호를 입력하세요</div>
+          </div>
+          <div className="w-full space-y-3">
+            <input
+              type="password"
+              className="w-full bg-slate-700 border border-slate-600 rounded-xl px-4 py-3 text-white text-center text-lg tracking-widest outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30 transition-all"
+              placeholder="••••••••"
+              value={pw}
+              onChange={e=>{setPw(e.target.value);setError(false);}}
+              onKeyDown={e=>e.key==="Enter"&&tryUnlock()}
+              autoFocus
+            />
+            {error && <div className="text-red-400 text-sm text-center">비밀번호가 틀렸습니다.</div>}
+            <button
+              onClick={tryUnlock}
+              className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-3 rounded-xl transition-colors"
+            >
+              입력
+            </button>
+          </div>
+          <div className="text-slate-600 text-xs">법무법인 이신 · 내부 전용</div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ── 날짜 유틸 ──────────────────────────────────────────────────────────────────
 const today = new Date(); today.setHours(0,0,0,0);
@@ -800,6 +871,10 @@ ${memos.map(m=>`<div class="memo"><span class="badge">${m.type}</span><span styl
 
 // ── 메인 앱 ───────────────────────────────────────────────────────────────────
 export default function App() {
+  const [authed,setAuthed]=useState(()=>sessionStorage.getItem(SESSION_KEY)==="1");
+
+  if(!authed) return <LockScreen onUnlock={()=>setAuthed(true)}/>;
+
   const [cases,setCases]=useState(SAMPLE_CASES);
   const [selectedId,setSelectedId]=useState("c1");
   const [search,setSearch]=useState("");
@@ -898,6 +973,9 @@ export default function App() {
             </button>
             <button onClick={()=>setShowAI(true)} className="flex items-center gap-1 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-2.5 py-1.5 rounded-lg transition-colors">
               ✨<span className="hidden sm:inline">AI 파싱</span>
+            </button>
+            <button onClick={()=>{sessionStorage.removeItem(SESSION_KEY);setAuthed(false);}} title="잠금" className="text-slate-400 hover:text-white border border-slate-700 hover:border-slate-500 p-1.5 rounded-lg transition-colors">
+              <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clipRule="evenodd"/></svg>
             </button>
             <button onClick={()=>setShowSettings(true)} title="설정" className="text-slate-400 hover:text-white border border-slate-700 hover:border-slate-500 p-1.5 rounded-lg transition-colors">
               <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd"/></svg>
