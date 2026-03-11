@@ -34,12 +34,12 @@ const TYPE_STYLE = {
   "강제집행":   {dot:"#F97316",badge:"bg-orange-50 text-orange-700 border-orange-200"},
   "자문":      {dot:"#10B981",badge:"bg-emerald-50 text-emerald-700 border-emerald-200"},
 };
-const MEMO_TYPES = ["공식결과","의뢰인요청","기일진행","재판결발언","기일후요청","기타"];
+// ── 수정3: MEMO_TYPES에서 "재판결발언" 제거 ──────────────────────────
+const MEMO_TYPES = ["공식결과","의뢰인요청","기일진행","기일후요청","기타"];
 const MEMO_STYLE = {
   "공식결과":   {badge:"bg-slate-100 text-slate-700 border-slate-300",  dot:"#647488"},
   "의뢰인요청": {badge:"bg-blue-50 text-blue-700 border-blue-200",      dot:"#3B82F6"},
   "기일진행":   {badge:"bg-violet-50 text-violet-700 border-violet-200",dot:"#8B5CF6"},
-  "재판결발언": {badge:"bg-amber-50 text-amber-700 border-amber-200",   dot:"#F59E0B"},
   "기일후요청": {badge:"bg-emerald-50 text-emerald-700 border-emerald-200",dot:"#10B981"},
   "기타":      {badge:"bg-slate-50 text-slate-500 border-slate-200",   dot:"#94A3B8"},
 };
@@ -53,6 +53,9 @@ const DEADLINE_TYPES = [
   {label:"집행이의",days:7,base:"집행일"},
   {label:"직접입력",days:0,base:""},
 ];
+
+// ── 기일 유형 목록 ───────────────────────────────────────────────────
+const HEARING_TYPES = ["변론기일","변론준비기일","공판기일","공판준비기일","선고기일","심문기일","조정기일","피의자조사동행","고소인진술","기타"];
 
 // ── 초기 샘플 데이터 ─────────────────────────────────────────────────
 const INITIAL_CASES = [
@@ -73,7 +76,6 @@ const INITIAL_CASES = [
       {id:1,type:"공식결과",   date:"2026-02-10",content:"수임 및 고소장 작성 착수.",createdAt:"2026-02-10T09:00:00Z"},
       {id:2,type:"공식결과",   date:"2026-02-25",content:"고소장 접수 완료.",createdAt:"2026-02-25T10:00:00Z"},
       {id:3,type:"의뢰인요청", date:"2026-02-10",content:"[의뢰인 회의]\n• 확인 전달사항: 피고인 주소 5회\n• 기타: 확인 필요",createdAt:"2026-02-10T10:00:00Z"},
-      {id:4,type:"자료요청",   date:"2026-02-15",content:"[자료 요청]\n• 요청 자료: 금융거래내역서\n• 기타",createdAt:"2026-02-15T09:00:00Z"},
     ],
     deadlines:[],
     documents:[{id:1,title:"고소장",date:"2026-02-25",url:"https://drive.google.com/file/d/sample3",note:""}],
@@ -120,9 +122,8 @@ const INITIAL_CASES = [
     memos:[
       {id:1,type:"공식결과",  date:"2025-11-01",content:"수임.",createdAt:"2025-11-01T09:00:00Z"},
       {id:2,type:"공식결과",  date:"2025-12-05",content:"공소장 수령 및 검토 완료.",createdAt:"2025-12-05T10:00:00Z"},
-      {id:3,type:"기일진행",  date:addDays(today,-15),content:"[기일 진행]\n• 출석: 피고인 및 변호인, 검사\n• 진행 사항: 기일 목록 교환",createdAt:"2025-12-10T09:00:00Z"},
-      {id:4,type:"재판결발언",date:addDays(today,-15),content:"[재판장 발언]\n• 발언 내용: 피고인 진술이 중요하니 잘 준비할 것",createdAt:"2025-12-10T10:00:00Z"},
-      {id:5,type:"기일후요청",date:addDays(today,-15),content:"[기일 후 의뢰인 대화]\n• 요청 결과: 충분히 설명",createdAt:"2025-12-10T11:00:00Z"},
+      {id:3,type:"기일진행",  date:addDays(today,-15),content:"[기일 진행]\n변론요지:\n\n상대방 주장:\n\n재판장 관심사안:\n",createdAt:"2025-12-10T09:00:00Z"},
+      {id:4,type:"기일후요청",date:addDays(today,-15),content:"[기일 후 의뢰인 대화]\n• 요청 결과: 충분히 설명",createdAt:"2025-12-10T11:00:00Z"},
     ],
     deadlines:[],
     documents:[
@@ -226,6 +227,9 @@ function Field({ label, value, edit, onChange, type="text", wide=false }) {
 function OverviewTab({ c, editing, onUpdate }) {
   const [addingDL, setAddingDL] = useState(false);
   const [newDL, setNewDL]       = useState({label:"항소",note:"",baseDate:"",dueDate:""});
+  // ── 수정1: 기일 추가 상태 ────────────────────────────────────────
+  const [addingHearing, setAddingHearing] = useState(false);
+  const [newHearing, setNewHearing]       = useState({date:todayStr, type:"변론기일", result:""});
 
   const handleDLType = (label) => {
     const t = DEADLINE_TYPES.find(d=>d.label===label);
@@ -240,6 +244,14 @@ function OverviewTab({ c, editing, onUpdate }) {
     onUpdate({...c, deadlines:[...c.deadlines,{id:Date.now(),...newDL}]});
     setNewDL({label:"항소",note:"",baseDate:"",dueDate:""});
     setAddingDL(false);
+  };
+
+  // ── 기일 추가 핸들러 ─────────────────────────────────────────────
+  const addHearing = () => {
+    if (!newHearing.date) return;
+    onUpdate({...c, hearings:[...c.hearings,{id:Date.now(),...newHearing}]});
+    setNewHearing({date:todayStr, type:"변론기일", result:""});
+    setAddingHearing(false);
   };
 
   return (
@@ -329,8 +341,40 @@ function OverviewTab({ c, editing, onUpdate }) {
         )}
       </Section>
 
-      <Section title="기일">
-        {c.hearings.length===0
+      {/* ── 수정1: 기일 섹션 + 기일 추가 버튼/폼 ── */}
+      <Section
+        title="기일"
+        action={<button onClick={()=>setAddingHearing(true)} className="text-xs text-indigo-400 hover:text-indigo-300">+ 기일 추가</button>}
+      >
+        {addingHearing && (
+          <div className="border border-indigo-700 rounded-xl p-3 bg-slate-900 space-y-2 m-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <div className="text-xs text-slate-400 mb-1">날짜</div>
+                <input type="date" className="input-sm w-full" value={newHearing.date}
+                       onChange={e=>setNewHearing(p=>({...p,date:e.target.value}))}/>
+              </div>
+              <div>
+                <div className="text-xs text-slate-400 mb-1">기일 유형</div>
+                <select className="input-sm w-full" value={newHearing.type}
+                        onChange={e=>setNewHearing(p=>({...p,type:e.target.value}))}>
+                  {HEARING_TYPES.map(t=><option key={t}>{t}</option>)}
+                </select>
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-400 mb-1">결과 (선택)</div>
+              <input className="input-sm w-full" placeholder="기일 결과 또는 메모"
+                     value={newHearing.result}
+                     onChange={e=>setNewHearing(p=>({...p,result:e.target.value}))}/>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button onClick={()=>setAddingHearing(false)} className="btn-ghost text-xs">취소</button>
+              <button onClick={addHearing} className="text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1 rounded-lg">저장</button>
+            </div>
+          </div>
+        )}
+        {c.hearings.length===0 && !addingHearing
           ? <div className="px-4 py-3 text-sm text-slate-500 italic">등록된 기일이 없습니다.</div>
           : c.hearings.map(h=><HearingRow key={h.id} h={h} c={c} onUpdate={onUpdate} editing={editing}/>)
         }
@@ -372,8 +416,16 @@ function MemosTab({ c, onUpdate }) {
   const [editId, setEditId]       = useState(null);
   const [editContent, setEditContent] = useState("");
   const [sheetsStatus, setSheetsStatus] = useState("");
+  // ── 수정4: 메모 종류별 필터 ─────────────────────────────────────
+  const [memoFilter, setMemoFilter] = useState("전체");
 
-  const handleTypeChange = (type) => setNewType(type);
+  // ── 수정1(메모): 기일진행 선택 시 기본 템플릿 삽입 ──────────────
+  const handleTypeChange = (type) => {
+    setNewType(type);
+    if (type === "기일진행" && !newContent.trim()) {
+      setNewContent("변론요지:\n\n상대방 주장:\n\n재판장 관심사안:\n");
+    }
+  };
 
   const addMemo = () => {
     if (!newContent.trim()) return;
@@ -389,13 +441,12 @@ function MemosTab({ c, onUpdate }) {
 
   const syncToSheets = async () => {
     if (!APPS_SCRIPT_URL) {
-      setSheetsStatus("⚠ Apps Script URL이 설정되지 않았습니다. 설정(⚙) 버튼을 눌러주세요.");
+      setSheetsStatus("⚠ Apps Script URL이 설정되지 않았습니다.");
       setTimeout(()=>setSheetsStatus(""),4000);
       return;
     }
     setSheetsStatus("동기화 중...");
     try {
-      // This would need to be called from parent with all cases
       setSheetsStatus("✓ 동기화 완료");
       setTimeout(()=>setSheetsStatus(""),3000);
     } catch(e) {
@@ -404,20 +455,35 @@ function MemosTab({ c, onUpdate }) {
     }
   };
 
+  // ── 필터 적용 ─────────────────────────────────────────────────
+  const filteredMemos = memoFilter === "전체" ? c.memos : c.memos.filter(m=>m.type===memoFilter);
+
   return (
     <div>
       {sheetsStatus && <div className="mb-2 text-xs text-center text-slate-400">{sheetsStatus}</div>}
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-2">
         <span className="text-xs text-slate-400">{c.memos.length}건</span>
         <div className="flex gap-2">
           <button onClick={syncToSheets} className="text-xs text-teal-400 hover:text-teal-300 border border-teal-700 px-2 py-1 rounded-lg">
             ↑ Sheets 저장
           </button>
-          <button onClick={()=>setAdding(true)} className="text-xs text-indigo-400 hover:text-indigo-300 border border-indigo-700 px-2 py-1 rounded-lg">
+          <button onClick={()=>{setAdding(true);setNewContent("");setNewType("공식결과");}} className="text-xs text-indigo-400 hover:text-indigo-300 border border-indigo-700 px-2 py-1 rounded-lg">
             + 메모 추가
           </button>
         </div>
       </div>
+
+      {/* ── 수정4: 메모 종류별 필터 버튼 ── */}
+      <div className="flex flex-wrap gap-1 mb-3">
+        {["전체", ...MEMO_TYPES].map(t => (
+          <button key={t} onClick={()=>setMemoFilter(t)}
+                  className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${memoFilter===t?"bg-indigo-600 border-indigo-500 text-white":"border-slate-600 text-slate-400 hover:border-slate-400"}`}>
+            {t}
+            {t!=="전체" && <span className="ml-1 opacity-60">{c.memos.filter(m=>m.type===t).length}</span>}
+          </button>
+        ))}
+      </div>
+
       {adding && (
         <div className="bg-slate-800 border border-indigo-700 rounded-xl p-3 mb-3">
           <div className="flex flex-wrap gap-1 mb-2">
@@ -432,7 +498,7 @@ function MemosTab({ c, onUpdate }) {
                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-slate-100 text-sm mb-2 focus:outline-none focus:border-indigo-500"/>
           <textarea value={newContent} onChange={e=>setNewContent(e.target.value)}
                     placeholder="메모 내용..."
-                    rows={4}
+                    rows={5}
                     className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-indigo-500 resize-none"/>
           <div className="flex gap-2 justify-end mt-2">
             <button onClick={()=>setAdding(false)} className="text-xs text-slate-400 hover:text-slate-300 px-3 py-1">취소</button>
@@ -440,7 +506,8 @@ function MemosTab({ c, onUpdate }) {
           </div>
         </div>
       )}
-      {c.memos.map(m=>{
+
+      {filteredMemos.map(m=>{
         const st = MEMO_STYLE[m.type]||MEMO_STYLE["기타"];
         return (
           <div key={m.id} className="bg-slate-800/50 border border-slate-700 rounded-xl p-3 mb-2">
@@ -456,7 +523,7 @@ function MemosTab({ c, onUpdate }) {
             </div>
             {editId===m.id
               ? <>
-                  <textarea value={editContent} onChange={e=>setEditContent(e.target.value)} rows={4}
+                  <textarea value={editContent} onChange={e=>setEditContent(e.target.value)} rows={5}
                             className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm focus:outline-none resize-none"/>
                   <div className="flex gap-2 justify-end mt-1">
                     <button onClick={()=>setEditId(null)} className="text-xs text-slate-400">취소</button>
@@ -468,7 +535,7 @@ function MemosTab({ c, onUpdate }) {
           </div>
         );
       })}
-      {c.memos.length===0&&!adding&&<div className="text-sm text-slate-500 italic py-4 text-center">메모가 없습니다.</div>}
+      {filteredMemos.length===0&&!adding&&<div className="text-sm text-slate-500 italic py-4 text-center">{memoFilter==="전체"?"메모가 없습니다.":`'${memoFilter}' 메모가 없습니다.`}</div>}
     </div>
   );
 }
@@ -660,7 +727,6 @@ ${text}
       const jsonMatch = raw.match(/\{[\s\S]*\}/);
       if (!jsonMatch) throw new Error("JSON 파싱 실패 — 응답: " + raw.substring(0, 100));
       const parsed = JSON.parse(jsonMatch[0]);
-      // retainerAmount/Date → retainer 객체로 변환
       if (parsed.retainerAmount || parsed.retainerDate) {
         parsed.retainer = { amount: parsed.retainerAmount||"", date: parsed.retainerDate||"", successFee: parsed.successFee||"" };
         delete parsed.retainerAmount; delete parsed.retainerDate; delete parsed.successFee;
@@ -711,7 +777,6 @@ function SettingsModal({ onClose, onSave, currentUrl }) {
         </div>
 
         <div className="space-y-4">
-          {/* API 키 상태 (읽기 전용) */}
           <div className="bg-slate-700/50 rounded-xl p-3">
             <div className="text-xs text-slate-300 font-semibold mb-1">Anthropic API 키</div>
             <div className={`text-xs ${apiKeySet ? "text-emerald-400" : "text-red-400"}`}>
@@ -724,7 +789,6 @@ function SettingsModal({ onClose, onSave, currentUrl }) {
             )}
           </div>
 
-          {/* Apps Script URL */}
           <div>
             <div className="text-xs text-slate-400 mb-1 font-semibold">Google Sheets 연동 URL (선택)</div>
             <div className="text-xs text-slate-500 mb-2">
@@ -737,7 +801,6 @@ function SettingsModal({ onClose, onSave, currentUrl }) {
                    className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-indigo-500"/>
           </div>
 
-          {/* 현재 상태 요약 */}
           <div className="bg-slate-700/50 rounded-xl p-3 text-xs text-slate-400 space-y-1">
             <div className="font-semibold text-slate-300">현재 상태</div>
             <div>• AI 파싱: {apiKeySet ? "✓ 직접 호출 (Anthropic API)" : "✗ API 키 미설정"}</div>
@@ -825,7 +888,6 @@ function NewCaseModal({ onClose, onCreate, prefill }) {
 export default function App() {
   const [unlocked, setUnlocked] = useState(!!sessionStorage.getItem(SESSION_KEY));
 
-  // ── 데이터: localStorage로 영속성 확보 + 멀티유저는 Sheets 동기화
   const loadCases = () => {
     try {
       const saved = localStorage.getItem("cm_cases_v2");
@@ -837,7 +899,6 @@ export default function App() {
   const [cases, setCasesRaw]   = useState(loadCases);
   const [appsScriptUrl, setAppsScriptUrl] = useState(() => localStorage.getItem("cm_apps_script_url") || APPS_SCRIPT_URL);
 
-  // cases 변경 시 localStorage에 자동 저장
   const setCases = useCallback((newCases) => {
     setCasesRaw(newCases);
     try { localStorage.setItem("cm_cases_v2", JSON.stringify(newCases)); } catch(e) {}
@@ -853,16 +914,14 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showNewCase, setShowNewCase]   = useState(false);
   const [aiPrefill, setAiPrefill] = useState(null);
-  const [syncStatus, setSyncStatus] = useState(""); // "loading" | "ok" | "error" | ""
+  const [syncStatus, setSyncStatus] = useState("");
 
-  // Apps Script URL 변경 시 저장
   const saveAppsScriptUrl = (url) => {
     setAppsScriptUrl(url);
     localStorage.setItem("cm_apps_script_url", url);
     setShowSettings(false);
   };
 
-  // ── Sheets에서 데이터 로드 ───────────────────────────────────────
   const loadFromSheets = useCallback(async () => {
     const url = appsScriptUrl || APPS_SCRIPT_URL;
     if (!url) return;
@@ -884,7 +943,6 @@ export default function App() {
     }
   }, [appsScriptUrl, setCases]);
 
-  // ── Sheets에 데이터 저장 ─────────────────────────────────────────
   const saveToSheets = useCallback(async (casesToSave) => {
     const url = appsScriptUrl || APPS_SCRIPT_URL;
     if (!url) return;
@@ -909,19 +967,16 @@ export default function App() {
     }
   }, [appsScriptUrl]);
 
-  // 앱 로드 시 Sheets에서 최신 데이터 가져오기
   useEffect(() => {
     if (unlocked && (appsScriptUrl || APPS_SCRIPT_URL)) {
       loadFromSheets();
     }
   }, [unlocked]); // eslint-disable-line
 
-  // ── 사건 업데이트 ─────────────────────────────────────────────────
   const updateCase = useCallback((updated) => {
     const next = cases.map(c => c.id===updated.id ? updated : c);
     setCases(next);
     if (selected?.id===updated.id) setSelected(updated);
-    // 자동으로 Sheets에도 저장
     saveToSheets(next);
   }, [cases, selected, setCases, saveToSheets]);
 
@@ -962,6 +1017,45 @@ export default function App() {
     const pendingTodos = active.reduce((sum,c)=>sum+c.todos.filter(t=>!t.done).length,0);
     return { active: active.length, upcoming7: upcoming7.length, urgentDL: urgentDL.length, pendingTodos };
   }, [cases]);
+
+  // ── 수정2: 대시보드 클릭 필터 핸들러 ────────────────────────────
+  const handleStatClick = (statType) => {
+    setSelected(null);
+    if (statType === "active") {
+      setFilterStatus("진행중");
+      setFilterType("전체");
+      setSearch("");
+    } else if (statType === "upcoming7") {
+      setFilterStatus("진행중");
+      setFilterType("전체");
+      setSearch("__upcoming7__");
+    } else if (statType === "urgentDL") {
+      setFilterStatus("진행중");
+      setFilterType("전체");
+      setSearch("__urgentDL__");
+    } else if (statType === "pendingTodos") {
+      setFilterStatus("진행중");
+      setFilterType("전체");
+      setSearch("__pendingTodos__");
+    }
+  };
+
+  // ── 수정2: 특수 필터 처리 ────────────────────────────────────────
+  const filteredWithSpecial = useMemo(() => {
+    if (search === "__upcoming7__") {
+      return cases.filter(c => c.status==="진행중" && c.hearings.some(h=>{const n=dday(h.date);return n!==null&&n>=0&&n<=7;}));
+    }
+    if (search === "__urgentDL__") {
+      return cases.filter(c => c.status==="진행중" && c.deadlines.some(d=>{const n=dday(d.dueDate);return n!==null&&n>=0&&n<=7;}));
+    }
+    if (search === "__pendingTodos__") {
+      return cases.filter(c => c.status==="진행중" && c.todos.some(t=>!t.done));
+    }
+    return filtered;
+  }, [filtered, cases, search]);
+
+  // ── 수정2: 특수 필터 활성 여부 ──────────────────────────────────
+  const specialFilterLabel = search==="__upcoming7__" ? "7일 내 기일" : search==="__urgentDL__" ? "불변기간 임박" : search==="__pendingTodos__" ? "미완료 할 일" : null;
 
   // ── CaseItem ──────────────────────────────────────────────────────
   const CaseItem = useCallback(({ c }) => {
@@ -1026,14 +1120,18 @@ export default function App() {
         </div>
 
         {/* 검색 */}
-        <div className="flex-1 max-w-xs">
-          <input value={search} onChange={e=>setSearch(e.target.value)}
-                 placeholder="사건명, 의뢰인, 사건번호..."
+        <div className="flex-1 max-w-xs relative">
+          <input value={specialFilterLabel ? "" : search}
+                 onChange={e=>{setSearch(e.target.value);}}
+                 placeholder={specialFilterLabel ? `필터: ${specialFilterLabel}` : "사건명, 의뢰인, 사건번호..."}
                  className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-1.5 text-slate-100 text-sm focus:outline-none focus:border-indigo-500 placeholder-slate-400"/>
+          {specialFilterLabel && (
+            <button onClick={()=>setSearch("")}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 text-xs">✕</button>
+          )}
         </div>
 
         <div className="flex items-center gap-2 ml-auto">
-          {/* Sync 상태 */}
           {syncStatus==="loading" && <span className="text-xs text-slate-400 animate-pulse">동기화 중...</span>}
           {syncStatus==="ok"      && <span className="text-xs text-emerald-400">✓ 저장됨</span>}
           {syncStatus==="error"   && <span className="text-xs text-red-400">✗ 저장 실패</span>}
@@ -1059,32 +1157,46 @@ export default function App() {
         </div>
       </div>
 
-      {/* 대시보드 바 */}
+      {/* ── 수정2: 대시보드 바 — 클릭 필터 ── */}
       <div style={{background:"#1E293B",borderBottom:"1px solid #334155"}} className="px-4 py-2 flex gap-6">
         {[
-          {label:"진행 중 사건",val:stats.active,    color:"text-indigo-400"},
-          {label:"7일 내 기일", val:stats.upcoming7, color:"text-amber-400"},
-          {label:"불변기간 임박",val:stats.urgentDL,  color:"text-orange-400"},
-          {label:"미완료 할 일",val:stats.pendingTodos,color:"text-emerald-400"},
-        ].map(s=>(
-          <div key={s.label} className="text-center">
-            <div className={`text-lg font-bold ${s.color}`}>{s.val}</div>
-            <div className="text-xs text-slate-500">{s.label}</div>
-          </div>
-        ))}
+          {label:"진행 중 사건", val:stats.active,      color:"text-indigo-400", key:"active",       activeColor:"bg-indigo-900/40"},
+          {label:"7일 내 기일",  val:stats.upcoming7,   color:"text-amber-400",  key:"upcoming7",    activeColor:"bg-amber-900/40"},
+          {label:"불변기간 임박", val:stats.urgentDL,    color:"text-orange-400", key:"urgentDL",     activeColor:"bg-orange-900/40"},
+          {label:"미완료 할 일", val:stats.pendingTodos, color:"text-emerald-400",key:"pendingTodos", activeColor:"bg-emerald-900/40"},
+        ].map(s => {
+          const isActive = (s.key==="active" && filterStatus==="진행중" && !specialFilterLabel) ||
+                           (s.key==="upcoming7"    && search==="__upcoming7__") ||
+                           (s.key==="urgentDL"     && search==="__urgentDL__") ||
+                           (s.key==="pendingTodos" && search==="__pendingTodos__");
+          return (
+            <button key={s.label}
+                    onClick={()=>handleStatClick(s.key)}
+                    className={`text-center px-2 py-1 rounded-lg transition-colors hover:opacity-80 ${isActive?s.activeColor:""}`}>
+              <div className={`text-lg font-bold ${s.color}`}>{s.val}</div>
+              <div className="text-xs text-slate-500">{s.label}</div>
+            </button>
+          );
+        })}
       </div>
 
       {/* 메인 레이아웃 */}
-      <div className="flex h-[calc(100dvh-100px)]">
+      <div className="flex h-[calc(100dvh-108px)]">
 
         {/* 사건 목록 사이드바 */}
         <div style={{width:"280px",borderRight:"1px solid #334155",overflowY:"auto"}} className="flex-shrink-0">
           {/* 필터 */}
           <div className="p-3 border-b border-slate-700/50 space-y-2">
+            {specialFilterLabel && (
+              <div className="flex items-center gap-1 text-xs text-indigo-300 bg-indigo-900/30 border border-indigo-700/50 rounded-lg px-2 py-1">
+                <span>필터: {specialFilterLabel}</span>
+                <button onClick={()=>setSearch("")} className="ml-auto text-indigo-400 hover:text-white">✕</button>
+              </div>
+            )}
             <div className="flex flex-wrap gap-1">
               {STATUSES.map(s=>(
-                <button key={s} onClick={()=>setFilterStatus(s)}
-                        className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${filterStatus===s?"bg-indigo-600 border-indigo-500 text-white":"border-slate-600 text-slate-400 hover:border-slate-400"}`}>
+                <button key={s} onClick={()=>{setFilterStatus(s);setSearch("");}}
+                        className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${filterStatus===s&&!specialFilterLabel?"bg-indigo-600 border-indigo-500 text-white":"border-slate-600 text-slate-400 hover:border-slate-400"}`}>
                   {s}
                 </button>
               ))}
@@ -1099,9 +1211,9 @@ export default function App() {
             </div>
           </div>
           {/* 사건 리스트 */}
-          {filtered.length===0
+          {filteredWithSpecial.length===0
             ? <div className="p-4 text-slate-500 text-sm italic text-center">조건에 맞는 사건이 없습니다.</div>
-            : filtered.map(c=><CaseItem key={c.id} c={c}/>)
+            : filteredWithSpecial.map(c=><CaseItem key={c.id} c={c}/>)
           }
         </div>
 
