@@ -10,7 +10,7 @@ const ANTHROPIC_API_KEY = "여기에_API_키_입력"; // sk-ant-...
 // ── Google Apps Script Web App URL (Sheets 저장용) ───────────────────
 // 설정 방법: apps_script_server.js를 script.google.com에 배포 후 URL 입력
 // AI 파싱은 위 API 키로 직접 처리하므로 Apps Script에는 AI 코드 불필요
-const APPS_SCRIPT_URL = ""; // 예: "https://script.google.com/macros/s/AKfy.../exec"
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxWeBed5ZQ59NDblTJAHWqrGGGbpsev6bMGs5c0CoP4F8liAvlVa3yWlt4Cnj1SIGOSuA/exec";
 
 // ── 날짜 유틸 ────────────────────────────────────────────────────────
 const today        = new Date(); today.setHours(0,0,0,0);
