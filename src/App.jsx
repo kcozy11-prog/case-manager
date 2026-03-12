@@ -4,8 +4,10 @@ import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 const APP_PASSWORD = "lawfirm2024";
 const SESSION_KEY  = "cm_auth_ok";
 
-// ── Anthropic API 키 (비공개 레포 전용 — 외부에 노출 금지) ──────────
-const ANTHROPIC_API_KEY = "여기에_API_키_입력"; // sk-ant-...
+// ── Anthropic API 키: localStorage에서 런타임에 로드 (코드에 키 없음) ──
+// 설정 방법: 앱 실행 후 ⚙ 설정 → API 키 입력란에 sk-ant-... 입력
+let ANTHROPIC_API_KEY = "";
+try { ANTHROPIC_API_KEY = localStorage.getItem("cm_api_key") || ""; } catch(e) {}
 
 // ── Google Apps Script Web App URL (Sheets 저장용) ───────────────────
 // 설정 방법: apps_script_server.js를 script.google.com에 배포 후 URL 입력
@@ -105,6 +107,52 @@ const INITIAL_CASES = [
     todos:[
       {id:1,text:"수사기록 열람 신청",done:false,priority:"높음",dueDate:""},
     ],
+  },
+  {
+    id:"c4", title:"강제집행정지 신청 — 강진원", type:"강제집행", status:"진행중",
+    client:"강진원", clientContact:"", clientEmail:"", clientAddr:"",
+    clientNote:"신청인",
+    opponent:"김도후", opponentCounsel:"",
+    court:"서울북부지방법원", caseNumber:"2024카정10176",
+    tribunal:{name:"", judge:"", panel:"", contact:"", clerk:""},
+    manager:"", managerOrg:"", managerContact:"",
+    retainer:{amount:"",date:"2024-11-28",successFee:"",successFeeAmount:""},
+    hearings:[],
+    memos:[
+      {id:1,type:"공식결과",date:"2024-11-28",content:"신청서, 위임장 제출",createdAt:"2024-11-28T09:00:00Z"},
+      {id:2,type:"공식결과",date:"2024-12-09",content:"담보제공명령 마감 (4,000만원 현금, 4,000만원 보험증권)",createdAt:"2024-12-09T09:00:00Z"},
+      {id:3,type:"공식결과",date:"2024-12-09",content:"담보제공허가신청서 제출",createdAt:"2024-12-09T10:00:00Z"},
+      {id:4,type:"공식결과",date:"2024-12-09",content:"담보물변경결정(증권 8,000만원)",createdAt:"2024-12-09T11:00:00Z"},
+      {id:5,type:"공식결과",date:"2024-12-12",content:"담보변경허가신청서 제출",createdAt:"2024-12-12T09:00:00Z"},
+      {id:6,type:"공식결과",date:"2024-12-13",content:"결정",createdAt:"2024-12-13T09:00:00Z"},
+    ],
+    deadlines:[],
+    documents:[],
+    todos:[],
+  },
+  {
+    id:"c5", title:"구상금 청구 (항소심) — 엠에스종합건설", type:"민사", status:"진행중",
+    client:"(유)엠에스종합건설", clientContact:"", clientEmail:"", clientAddr:"",
+    clientNote:"피고",
+    opponent:"삼성화재해상보험㈜", opponentCounsel:"",
+    court:"서울중앙지방법원", caseNumber:"2024나56872",
+    tribunal:{name:"항소 5-1민사부", judge:"", panel:"", contact:"", clerk:""},
+    manager:"", managerOrg:"", managerContact:"",
+    retainer:{amount:"",date:"2024-11-28",successFee:"",successFeeAmount:""},
+    hearings:[
+      {id:1,date:"2025-04-09",type:"선고기일",result:"1별관 312호 14:00"},
+    ],
+    memos:[
+      {id:1,type:"공식결과",date:"2024-11-28",content:"신청서, 위임장 제출",createdAt:"2024-11-28T09:00:00Z"},
+      {id:2,type:"공식결과",date:"2024-12-09",content:"담보제공명령 마감 (4,000만원 현금, 4,000만원 보험증권)",createdAt:"2024-12-09T09:00:00Z"},
+      {id:3,type:"공식결과",date:"2024-12-09",content:"담보제공허가신청서 제출",createdAt:"2024-12-09T10:00:00Z"},
+      {id:4,type:"공식결과",date:"2024-12-09",content:"담보물변경결정(증권 8,000만원)",createdAt:"2024-12-09T11:00:00Z"},
+      {id:5,type:"공식결과",date:"2024-12-12",content:"담보변경허가신청서 제출",createdAt:"2024-12-12T09:00:00Z"},
+      {id:6,type:"공식결과",date:"2024-12-13",content:"결정",createdAt:"2024-12-13T09:00:00Z"},
+    ],
+    deadlines:[],
+    documents:[],
+    todos:[],
   },
   {
     id:"c3", title:"업무상 횡령 형사 자문", type:"형사(자문)", status:"진행중",
@@ -666,96 +714,390 @@ function DocumentsTab({ c, onUpdate }) {
   );
 }
 
-// ── AI 파싱 Modal ────────────────────────────────────────────────────
-function AIModal({ onClose, onResult }) {
-  const [text, setText]     = useState("");
-  const [loading, setLoading] = useState(false);
-  const [err, setErr]       = useState("");
+// ── AI 파싱 Modal (신규등록 + 기존사건 업데이트) ─────────────────────
+function AIModal({ onClose, onResult, onBulkResult, onUpdateResult, existingCases }) {
+  const [text, setText]             = useState("");
+  const [loading, setLoading]       = useState(false);
+  const [err, setErr]               = useState("");
+  const [parsedList, setParsedList] = useState([]);
+  const [step, setStep]             = useState("input"); // "input" | "preview"
+  const [progress, setProgress]     = useState("");
 
+  // ── 프롬프트 ────────────────────────────────────────────────────
+  const PROMPT_BULK = (txt) => `아래 텍스트에서 법률 사건 정보를 추출해줘. 사건이 여러 개일 수도 있어.
+엑셀 표, 목록, 자유형식 등 어떤 형태든 최대한 파싱해.
+
+텍스트:
+${txt}
+
+JSON 배열만 출력 (설명·마크다운 없이):
+[
+  {
+    "title": "사건명 (없으면 의뢰인+사건유형으로 생성)",
+    "type": "민사|형사(고소)|형사(피의)|형사(재판)|행정|가사|강제집행|자문",
+    "court": "법원명",
+    "caseNumber": "사건번호 (있으면 반드시 포함)",
+    "client": "의뢰인 이름",
+    "clientContact": "연락처",
+    "opponent": "상대방 이름",
+    "opponentCounsel": "상대방 대리인",
+    "judge": "담당 판사",
+    "panel": "재판부명",
+    "retainerAmount": 0,
+    "retainerDate": "YYYY-MM-DD 또는 빈 문자열",
+    "successFee": "성공보수 조건",
+    "manager": "담당자 이름",
+    "managerOrg": "담당자 소속",
+    "managerContact": "담당자 연락처",
+    "newHearings": [{"date":"YYYY-MM-DD","type":"기일유형","result":"결과(없으면 빈 문자열)"}],
+    "newDocuments": [{"title":"서면명","date":"YYYY-MM-DD","note":"비고"}],
+    "memoContent": "진행경과·특이사항 (있는 경우, 없으면 빈 문자열)"
+  }
+]`;
+
+  // ── API 호출 ────────────────────────────────────────────────────
+  const callAPI = async (prompt, maxTokens=4000) => {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: maxTokens,
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+    if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || `HTTP ${res.status}`); }
+    const data = await res.json();
+    return data.content?.[0]?.text?.trim() || "";
+  };
+
+  // ── 기존 사건 매칭: 사건번호 > 의뢰인명 순으로 시도 ──────────────
+  const matchExisting = (parsed) => {
+    if (!existingCases?.length) return null;
+    if (parsed.caseNumber) {
+      const m = existingCases.find(c => c.caseNumber && c.caseNumber.trim() === parsed.caseNumber.trim());
+      if (m) return m;
+    }
+    if (parsed.client) {
+      const m = existingCases.find(c => c.client && c.client.trim() === parsed.client.trim());
+      if (m) return m;
+    }
+    return null;
+  };
+
+  // ── 파싱 결과 정규화 ─────────────────────────────────────────────
+  const normalize = (parsed, idx) => {
+    const c = {...parsed};
+    // retainer 통합
+    if (c.retainerAmount || c.retainerDate || c.successFee) {
+      c.retainer = { amount: c.retainerAmount||"", date: c.retainerDate||"", successFee: c.successFee||"", successFeeAmount:"" };
+      delete c.retainerAmount; delete c.retainerDate; delete c.successFee;
+    }
+    // 기존 사건 매칭 여부
+    const matched = matchExisting(c);
+    // 업데이트 항목 계산 (변경된 필드만)
+    const updates = {};
+    if (matched) {
+      if (c.court      && c.court      !== matched.court)      updates.court      = c.court;
+      if (c.opponent   && c.opponent   !== matched.opponent)   updates.opponent   = c.opponent;
+      if (c.opponentCounsel && c.opponentCounsel !== matched.opponentCounsel) updates.opponentCounsel = c.opponentCounsel;
+      if (c.judge      && c.judge      !== matched.tribunal?.judge)  updates.judge      = c.judge;
+      if (c.panel      && c.panel      !== matched.tribunal?.name)   updates.panel      = c.panel;
+      if (c.manager    && c.manager    !== matched.manager)    updates.manager    = c.manager;
+      if (c.managerOrg && c.managerOrg !== matched.managerOrg) updates.managerOrg = c.managerOrg;
+      if (c.managerContact && c.managerContact !== matched.managerContact) updates.managerContact = c.managerContact;
+      if (c.retainer?.amount && String(c.retainer.amount) !== String(matched.retainer?.amount)) updates.retainerAmount = c.retainer.amount;
+    }
+    return {
+      ...c,
+      _key: idx,
+      _checked: true,
+      _matchedCase: matched || null,  // null이면 신규
+      _updates: updates,              // 기존 사건 변경 필드
+      _newHearings:  (c.newHearings  || []).filter(h=>h.date),
+      _newDocuments: (c.newDocuments || []).filter(d=>d.title),
+      _memoContent:  c.memoContent || "",
+    };
+  };
+
+  // ── 파싱 실행 ─────────────────────────────────────────────────
   const run = async () => {
     if (!text.trim()) return;
     if (!ANTHROPIC_API_KEY || ANTHROPIC_API_KEY === "여기에_API_키_입력") {
-      setErr("API 키가 설정되지 않았습니다. App.jsx 상단의 ANTHROPIC_API_KEY를 입력하세요.");
-      return;
+      setErr("API 키가 설정되지 않았습니다."); return;
     }
-    setLoading(true); setErr("");
+    setLoading(true); setErr(""); setProgress("AI 분석 중...");
     try {
-      const prompt = `아래 텍스트에서 법률 사건 정보를 JSON으로 추출해줘.
-
-텍스트:
-${text}
-
-아래 JSON 형식만 출력 (설명 없이):
-{
-  "title": "사건명",
-  "type": "민사|형사(고소)|형사(피의)|형사(재판)|행정|가사|강제집행|자문",
-  "court": "법원명",
-  "caseNumber": "사건번호",
-  "client": "의뢰인 이름",
-  "clientContact": "연락처",
-  "opponent": "상대방 이름",
-  "opponentCounsel": "상대방 대리인",
-  "judge": "담당 판사",
-  "panel": "재판부명",
-  "retainerAmount": 0,
-  "retainerDate": "YYYY-MM-DD",
-  "successFee": "성공보수 조건"
-}`;
-
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": ANTHROPIC_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 1000,
-          messages: [{ role: "user", content: prompt }]
-        })
-      });
-
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error?.message || `HTTP ${res.status}`);
-      }
-
-      const data = await res.json();
-      const raw = data.content?.[0]?.text?.trim() || "";
-      const jsonMatch = raw.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error("JSON 파싱 실패 — 응답: " + raw.substring(0, 100));
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (parsed.retainerAmount || parsed.retainerDate) {
-        parsed.retainer = { amount: parsed.retainerAmount||"", date: parsed.retainerDate||"", successFee: parsed.successFee||"" };
-        delete parsed.retainerAmount; delete parsed.retainerDate; delete parsed.successFee;
-      }
-      onResult(parsed);
-      onClose();
-    } catch(e) {
-      setErr("오류: " + e.message);
-    }
-    setLoading(false);
+      const raw = await callAPI(PROMPT_BULK(text));
+      const arrMatch = raw.match(/\[[\s\S]*\]/);
+      if (!arrMatch) throw new Error("파싱 결과를 찾지 못했습니다.");
+      const arr = JSON.parse(arrMatch[0]);
+      if (!Array.isArray(arr) || arr.length === 0) throw new Error("파싱된 사건이 없습니다.");
+      setParsedList(arr.map((c,i) => normalize(c, i)));
+      setStep("preview");
+    } catch(e) { setErr("오류: " + e.message); }
+    setLoading(false); setProgress("");
   };
 
-  return (
+  const toggleCheck = (key) => setParsedList(p => p.map(c => c._key===key ? {...c,_checked:!c._checked} : c));
+  const toggleAll   = (v)   => setParsedList(p => p.map(c => ({...c,_checked:v})));
+  const updateField = (key, field, val) => setParsedList(p => p.map(c => c._key===key ? {...c,[field]:val} : c));
+
+  // ── 적용 ─────────────────────────────────────────────────────
+  const applySelected = () => {
+    const selected = parsedList.filter(c => c._checked);
+    if (!selected.length) return;
+
+    const toCreate = [];
+    const toUpdate = [];
+
+    selected.forEach(c => {
+      const { _key, _checked, _matchedCase, _updates, _newHearings, _newDocuments, _memoContent, newHearings, newDocuments, memoContent, judge, panel, ...caseData } = c;
+
+      if (_matchedCase) {
+        // ── 기존 사건 업데이트 ──────────────────────────────────
+        let updated = {..._matchedCase};
+        // 기본정보 변경
+        if (_updates.court)           updated.court = _updates.court;
+        if (_updates.opponent)        updated.opponent = _updates.opponent;
+        if (_updates.opponentCounsel) updated.opponentCounsel = _updates.opponentCounsel;
+        if (_updates.judge || _updates.panel) {
+          updated.tribunal = {...(updated.tribunal||{}),
+            judge: _updates.judge || updated.tribunal?.judge || "",
+            name:  _updates.panel || updated.tribunal?.name  || "",
+          };
+        }
+        // 담당자
+        if (_updates.manager)        updated.manager        = _updates.manager;
+        if (_updates.managerOrg)     updated.managerOrg     = _updates.managerOrg;
+        if (_updates.managerContact) updated.managerContact = _updates.managerContact;
+        // 착수금
+        if (_updates.retainerAmount) updated.retainer = {...(updated.retainer||{}), amount: _updates.retainerAmount};
+        // 새 기일 추가
+        if (_newHearings.length) {
+          const newH = _newHearings.map(h => ({id:Date.now()+Math.random()*1000|0, ...h}));
+          updated.hearings = [...(updated.hearings||[]), ...newH];
+        }
+        // 상대방 제출서면 → 문서 탭에 추가
+        if (_newDocuments.length) {
+          const newD = _newDocuments.map(d => ({id:Date.now()+Math.random()*1000|0, url:"", ...d}));
+          updated.documents = [...(updated.documents||[]), ...newD];
+        }
+        // 메모 추가
+        if (_memoContent.trim()) {
+          updated.memos = [{id:Date.now()+Math.random()*1000|0, type:"공식결과", date:todayStr, content:_memoContent.trim(), createdAt:new Date().toISOString()}, ...(updated.memos||[])];
+        }
+        toUpdate.push(updated);
+      } else {
+        // ── 신규 사건 등록 ──────────────────────────────────────
+        const memos = _memoContent.trim()
+          ? [{id:Date.now()+Math.random()*1000|0, type:"공식결과", date:todayStr, content:_memoContent.trim(), createdAt:new Date().toISOString()}]
+          : [];
+        const hearings = _newHearings.map(h => ({id:Date.now()+Math.random()*1000|0, ...h}));
+        const documents = _newDocuments.map(d => ({id:Date.now()+Math.random()*1000|0, url:"", ...d}));
+        toCreate.push({
+          id: "c"+Date.now()+Math.random().toString(36).slice(2,6),
+          status: "진행중",
+          clientEmail:"", clientAddr:"", clientNote:"",
+          opponentCounsel: caseData.opponentCounsel||"",
+          tribunal:{name: panel||"", judge: judge||"", panel:"", contact:"", clerk:""},
+          manager: caseData.manager||"", managerOrg: caseData.managerOrg||"", managerContact: caseData.managerContact||"",
+          retainer: caseData.retainer || {amount:"",date:todayStr,successFee:"",successFeeAmount:""},
+          deadlines:[], todos:[],
+          hearings, documents, memos,
+          ...caseData,
+        });
+      }
+    });
+
+    onUpdateResult({ toCreate, toUpdate });
+    onClose();
+  };
+
+  // ── 입력 화면 ────────────────────────────────────────────────────
+  if (step === "input") return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-      <div className="bg-slate-800 border border-slate-600 rounded-2xl p-5 w-full max-w-lg">
-        <div className="flex items-center justify-between mb-3">
+      <div className="bg-slate-800 border border-slate-600 rounded-2xl p-5 w-full max-w-2xl">
+        <div className="flex items-center justify-between mb-2">
           <h2 className="text-white font-semibold">✨ AI 파싱</h2>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-200">✕</button>
         </div>
-        <p className="text-xs text-slate-400 mb-3">사건 정보를 자유롭게 입력하면 AI가 자동으로 정리합니다.</p>
-        <textarea value={text} onChange={e=>setText(e.target.value)} rows={8}
-                  placeholder="예) 원고 김민준, 서울중앙지방법원 2026가합12345, 분양대금 반환 청구, 상대방 한강건설..."
-                  className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-indigo-500 resize-none"/>
+        <p className="text-xs text-slate-400 mb-1">
+          텍스트를 붙여넣으면 AI가 <span className="text-violet-400 font-semibold">신규 사건 등록</span> 또는 <span className="text-amber-400 font-semibold">기존 사건 업데이트</span>를 자동으로 구분합니다.
+        </p>
+        <div className="flex gap-3 text-xs text-slate-500 mb-3">
+          <span>• 새 기일 일정</span>
+          <span>• 재판부·상대방 변경</span>
+          <span>• 담당자 변경</span>
+          <span>• 상대방 제출서면</span>
+        </div>
+        <textarea value={text} onChange={e=>setText(e.target.value)} rows={10}
+                  placeholder={"[신규 사건 예시]\n강진원 vs 김도후, 서울북부지방법원 2024카정10176, 강제집행정지\n\n[기존 사건 업데이트 예시]\n2024나56872 구상금\n다음 기일: 2025-04-09 선고기일, 1별관 312호\n상대방 제출서면: 2025-03-10 준비서면\n재판장: 김민수 부장판사"}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-indigo-500 resize-none font-mono"/>
         {err && <div className="text-red-400 text-xs mt-2">{err}</div>}
+        {progress && <div className="text-violet-400 text-xs mt-2 animate-pulse">{progress}</div>}
         <div className="flex gap-2 justify-end mt-3">
           <button onClick={onClose} className="text-xs text-slate-400 hover:text-slate-200 px-4 py-2">취소</button>
           <button onClick={run} disabled={loading}
-                  className="text-xs bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white px-4 py-2 rounded-xl">
-            {loading ? "분석 중..." : "파싱하기"}
+                  className="text-xs bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white px-4 py-2 rounded-xl">
+            {loading ? "분석 중..." : "✨ 파싱하기"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ── 미리보기 화면 ────────────────────────────────────────────────
+  const checkedCount = parsedList.filter(c=>c._checked).length;
+  const newCount     = parsedList.filter(c=>c._checked && !c._matchedCase).length;
+  const updateCount  = parsedList.filter(c=>c._checked && c._matchedCase).length;
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div className="bg-slate-800 border border-slate-600 rounded-2xl p-5 w-full max-w-3xl flex flex-col" style={{maxHeight:"90vh"}}>
+        {/* 헤더 */}
+        <div className="flex items-center justify-between mb-2 flex-shrink-0">
+          <div>
+            <h2 className="text-white font-semibold">✨ 파싱 결과 — {parsedList.length}건</h2>
+            <div className="flex gap-3 mt-0.5">
+              {newCount>0    && <span className="text-xs text-indigo-400">신규 {newCount}건</span>}
+              {updateCount>0 && <span className="text-xs text-amber-400">업데이트 {updateCount}건</span>}
+            </div>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-200 flex-shrink-0 ml-4">✕</button>
+        </div>
+
+        {/* 전체 선택 */}
+        <div className="flex items-center gap-3 mb-2 flex-shrink-0">
+          <button onClick={()=>toggleAll(true)}  className="text-xs text-indigo-400 hover:text-indigo-300">전체 선택</button>
+          <button onClick={()=>toggleAll(false)} className="text-xs text-slate-500 hover:text-slate-300">전체 해제</button>
+          <span className="text-xs text-slate-500 ml-auto">{checkedCount}/{parsedList.length}건 선택됨</span>
+        </div>
+
+        {/* 카드 목록 */}
+        <div className="overflow-y-auto flex-1 space-y-2 pr-1">
+          {parsedList.map((c) => {
+            const isUpdate = !!c._matchedCase;
+            const borderColor = isUpdate ? "border-amber-600" : "border-indigo-600";
+            const bgColor     = isUpdate ? "bg-amber-950/20"  : "bg-indigo-950/20";
+            const tagStyle    = isUpdate
+              ? "bg-amber-900/50 text-amber-400 border-amber-700"
+              : "bg-indigo-900/50 text-indigo-400 border-indigo-700";
+            const hasChanges = isUpdate && Object.keys(c._updates).length > 0;
+
+            return (
+              <div key={c._key}
+                   className={`border rounded-xl p-3 transition-colors ${c._checked ? `${borderColor} ${bgColor}` : "border-slate-700 bg-slate-800/50 opacity-40"}`}>
+                <div className="flex items-start gap-3">
+                  {/* 체크박스 */}
+                  <button onClick={()=>toggleCheck(c._key)}
+                          className={`w-5 h-5 rounded border flex-shrink-0 mt-0.5 flex items-center justify-center ${c._checked?(isUpdate?"bg-amber-600 border-amber-500":"bg-indigo-600 border-indigo-500"):"border-slate-500"}`}>
+                    {c._checked && <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" strokeWidth="2" strokeLinecap="round"/></svg>}
+                  </button>
+
+                  <div className="flex-1 min-w-0">
+                    {/* 태그 + 매칭 사건명 */}
+                    <div className="flex items-center gap-2 mb-2 flex-wrap">
+                      <span className={`text-xs px-2 py-0.5 rounded border ${tagStyle}`}>
+                        {isUpdate ? "업데이트" : "신규 등록"}
+                      </span>
+                      {isUpdate && (
+                        <span className="text-xs text-slate-400">→ {c._matchedCase.title}</span>
+                      )}
+                    </div>
+
+                    {/* 기본 정보 (신규만 편집 가능) */}
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 mb-2">
+                      <EditableField label="사건명"   value={c.title}       onChange={v=>updateField(c._key,"title",v)}       readonly={isUpdate}/>
+                      <EditableField label="사건번호" value={c.caseNumber}  onChange={v=>updateField(c._key,"caseNumber",v)}  readonly={isUpdate}/>
+                      <EditableField label="의뢰인"   value={c.client}      onChange={v=>updateField(c._key,"client",v)}      readonly={isUpdate}/>
+                      <EditableField label="상대방"   value={c.opponent}    onChange={v=>updateField(c._key,"opponent",v)}    readonly={isUpdate}/>
+                      {!isUpdate && <>
+                        <EditableField label="법원"     value={c.court}     onChange={v=>updateField(c._key,"court",v)}/>
+                        <EditableField label="사건유형" value={c.type}      onChange={v=>updateField(c._key,"type",v)}/>
+                      </>}
+                    </div>
+
+                    {/* 업데이트 항목 요약 */}
+                    {isUpdate && (
+                      <div className="space-y-1">
+                        {hasChanges && (
+                          <div className="text-xs bg-amber-900/30 border border-amber-800/50 rounded px-2 py-1.5">
+                            <div className="text-amber-400 font-semibold mb-1">기본정보 변경</div>
+                            {Object.entries(c._updates).map(([k,v]) => {
+                              const labels = {court:"법원",opponent:"상대방",opponentCounsel:"상대방 대리인",judge:"담당 판사",panel:"재판부",manager:"담당자",managerOrg:"담당자 소속",managerContact:"담당자 연락처",retainerAmount:"착수금"};
+                              return <div key={k} className="text-xs text-slate-300">• {labels[k]||k}: <span className="text-amber-300">{v}</span></div>;
+                            })}
+                          </div>
+                        )}
+                        {c._newHearings.length > 0 && (
+                          <div className="text-xs bg-indigo-900/30 border border-indigo-800/50 rounded px-2 py-1.5">
+                            <div className="text-indigo-400 font-semibold mb-1">새 기일 {c._newHearings.length}건</div>
+                            {c._newHearings.map((h,i) => (
+                              <div key={i} className="text-xs text-slate-300">• {h.date} {h.type} {h.result&&`(${h.result})`}</div>
+                            ))}
+                          </div>
+                        )}
+                        {c._newDocuments.length > 0 && (
+                          <div className="text-xs bg-teal-900/30 border border-teal-800/50 rounded px-2 py-1.5">
+                            <div className="text-teal-400 font-semibold mb-1">서면 {c._newDocuments.length}건</div>
+                            {c._newDocuments.map((d,i) => (
+                              <div key={i} className="text-xs text-slate-300">• {d.date} {d.title} {d.note&&`(${d.note})`}</div>
+                            ))}
+                          </div>
+                        )}
+                        {c._memoContent && (
+                          <div className="text-xs bg-slate-700/50 border border-slate-600/50 rounded px-2 py-1.5">
+                            <div className="text-slate-400 font-semibold mb-0.5">메모 추가</div>
+                            <div className="text-slate-300 truncate">{c._memoContent.substring(0,80)}{c._memoContent.length>80?"…":""}</div>
+                          </div>
+                        )}
+                        {!hasChanges && !c._newHearings.length && !c._newDocuments.length && !c._memoContent && (
+                          <div className="text-xs text-slate-500 italic">변경사항이 감지되지 않았습니다.</div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* 신규: 기일/메모 미리보기 */}
+                    {!isUpdate && (
+                      <div className="space-y-1">
+                        {c._newHearings.length > 0 && (
+                          <div className="text-xs text-slate-400 bg-slate-700/40 rounded px-2 py-1">
+                            기일: {c._newHearings.map(h=>`${h.date} ${h.type}`).join(" / ")}
+                          </div>
+                        )}
+                        {c._newDocuments.length > 0 && (
+                          <div className="text-xs text-slate-400 bg-slate-700/40 rounded px-2 py-1">
+                            서면: {c._newDocuments.map(d=>d.title).join(", ")}
+                          </div>
+                        )}
+                        {c._memoContent && (
+                          <div className="text-xs text-slate-400 bg-slate-700/40 rounded px-2 py-1 truncate">
+                            메모: {c._memoContent.substring(0,60)}{c._memoContent.length>60?"…":""}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* 하단 버튼 */}
+        <div className="flex gap-2 justify-between mt-3 flex-shrink-0 pt-2 border-t border-slate-700">
+          <button onClick={()=>setStep("input")} className="text-xs text-slate-400 hover:text-slate-200 px-4 py-2">← 다시 입력</button>
+          <button onClick={applySelected} disabled={checkedCount===0}
+                  className="text-xs bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white px-5 py-2 rounded-xl font-semibold">
+            {newCount>0&&updateCount>0 ? `신규 ${newCount} + 업데이트 ${updateCount}건 적용`
+              : newCount>0 ? `${newCount}건 신규 등록`
+              : `${updateCount}건 업데이트 적용`}
           </button>
         </div>
       </div>
@@ -763,10 +1105,34 @@ ${text}
   );
 }
 
+// ── EditableField (AI 파싱 미리보기용 인라인 편집) ───────────────────
+function EditableField({ label, value, onChange, readonly=false }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-xs text-slate-500">{label}</div>
+      {readonly
+        ? <div className="text-xs text-slate-300 py-0.5 truncate">{value||"—"}</div>
+        : <input value={value||""} onChange={e=>onChange(e.target.value)}
+                 className="w-full bg-transparent border-b border-slate-600 text-slate-200 text-xs py-0.5 focus:outline-none focus:border-indigo-400"/>
+      }
+    </div>
+  );
+}
+
 // ── 설정 Modal ───────────────────────────────────────────────────────
-function SettingsModal({ onClose, onSave, currentUrl }) {
-  const [url, setUrl] = useState(currentUrl || "");
-  const apiKeySet = ANTHROPIC_API_KEY && ANTHROPIC_API_KEY !== "여기에_API_키_입력";
+function SettingsModal({ onClose, onSave, currentUrl, currentApiKey }) {
+  const [url, setUrl]         = useState(currentUrl || "");
+  const [apiKey, setApiKeyLocal] = useState(currentApiKey || "");
+  const [showKey, setShowKey] = useState(false);
+  const [saved, setSaved]     = useState(false);
+
+  const apiKeySet = apiKey && apiKey.startsWith("sk-ant-");
+
+  const handleSave = () => {
+    onSave(url, apiKey);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
 
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
@@ -777,23 +1143,40 @@ function SettingsModal({ onClose, onSave, currentUrl }) {
         </div>
 
         <div className="space-y-4">
-          <div className="bg-slate-700/50 rounded-xl p-3">
-            <div className="text-xs text-slate-300 font-semibold mb-1">Anthropic API 키</div>
-            <div className={`text-xs ${apiKeySet ? "text-emerald-400" : "text-red-400"}`}>
-              {apiKeySet ? "✓ App.jsx에 설정됨" : "✗ 미설정 — App.jsx 상단 ANTHROPIC_API_KEY 입력 필요"}
+          {/* API 키 입력 */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-xs text-slate-300 font-semibold">Anthropic API 키</div>
+              <span className={`text-xs ${apiKeySet ? "text-emerald-400" : "text-amber-400"}`}>
+                {apiKeySet ? "✓ 설정됨" : "미설정"}
+              </span>
             </div>
-            {!apiKeySet && (
-              <div className="text-xs text-slate-500 mt-1">
-                App.jsx 2번째 줄: <code className="bg-slate-600 px-1 rounded">const ANTHROPIC_API_KEY = "sk-ant-..."</code>
-              </div>
+            <div className="text-xs text-slate-500 mb-2">
+              코드에 저장되지 않고 이 기기의 브라우저에만 보관됩니다. GitHub에 노출되지 않습니다.
+            </div>
+            <div className="relative">
+              <input
+                value={apiKey}
+                onChange={e=>setApiKeyLocal(e.target.value)}
+                type={showKey ? "text" : "password"}
+                placeholder="sk-ant-api03-..."
+                className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-indigo-500 pr-16 font-mono"
+              />
+              <button onClick={()=>setShowKey(v=>!v)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-slate-200">
+                {showKey ? "숨기기" : "보기"}
+              </button>
+            </div>
+            {apiKey && !apiKeySet && (
+              <div className="text-xs text-red-400 mt-1">sk-ant- 로 시작하는 키를 입력하세요</div>
             )}
           </div>
 
+          {/* Sheets URL */}
           <div>
             <div className="text-xs text-slate-400 mb-1 font-semibold">Google Sheets 연동 URL (선택)</div>
             <div className="text-xs text-slate-500 mb-2">
-              입력하면 모든 수정사항이 자동으로 Google Sheets에 저장되고,<br/>
-              다른 기기/사용자가 최신 데이터를 불러올 수 있습니다.<br/>
+              입력하면 수정사항이 자동으로 Google Sheets에 저장됩니다.<br/>
               <span className="text-indigo-400">설정: </span>apps_script_server.js를 script.google.com에 배포 후 URL 복사
             </div>
             <input value={url} onChange={e=>setUrl(e.target.value)}
@@ -801,17 +1184,21 @@ function SettingsModal({ onClose, onSave, currentUrl }) {
                    className="w-full bg-slate-700 border border-slate-600 rounded-xl px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-indigo-500"/>
           </div>
 
+          {/* 상태 요약 */}
           <div className="bg-slate-700/50 rounded-xl p-3 text-xs text-slate-400 space-y-1">
             <div className="font-semibold text-slate-300">현재 상태</div>
-            <div>• AI 파싱: {apiKeySet ? "✓ 직접 호출 (Anthropic API)" : "✗ API 키 미설정"}</div>
-            <div>• 로컬 저장: ✓ localStorage (새로고침 후에도 유지)</div>
-            <div>• Sheets 공유: {url ? "✓ 설정됨 — 자동 저장/불러오기" : "△ 미설정 (로컬만 저장됨)"}</div>
+            <div>• AI 파싱: {apiKeySet ? "✓ 준비됨 (Anthropic API)" : "✗ API 키 입력 필요"}</div>
+            <div>• 로컬 저장: ✓ 브라우저 localStorage (새로고침 후 유지)</div>
+            <div>• Sheets 공유: {url ? "✓ 설정됨" : "△ 미설정 (로컬만)"}</div>
           </div>
         </div>
 
         <div className="flex gap-2 justify-end mt-4">
           <button onClick={onClose} className="text-xs text-slate-400 hover:text-slate-200 px-4 py-2">취소</button>
-          <button onClick={()=>onSave(url)} className="text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl">저장</button>
+          <button onClick={handleSave}
+                  className={`text-xs px-4 py-2 rounded-xl transition-colors ${saved ? "bg-emerald-600 text-white" : "bg-indigo-600 hover:bg-indigo-500 text-white"}`}>
+            {saved ? "✓ 저장됨" : "저장"}
+          </button>
         </div>
       </div>
     </div>
@@ -898,6 +1285,17 @@ export default function App() {
 
   const [cases, setCasesRaw]   = useState(loadCases);
   const [appsScriptUrl, setAppsScriptUrl] = useState(() => localStorage.getItem("cm_apps_script_url") || APPS_SCRIPT_URL);
+  const [apiKey, setApiKey] = useState(() => { try { return localStorage.getItem("cm_api_key") || ""; } catch(e) { return ""; } });
+
+  // API 키가 바뀌면 모듈 스코프 변수도 동기화
+  useEffect(() => { ANTHROPIC_API_KEY = apiKey; }, [apiKey]);
+
+  const saveApiKey = (key) => {
+    const trimmed = key.trim();
+    setApiKey(trimmed);
+    ANTHROPIC_API_KEY = trimmed;
+    try { localStorage.setItem("cm_api_key", trimmed); } catch(e) {}
+  };
 
   const setCases = useCallback((newCases) => {
     setCasesRaw(newCases);
@@ -916,9 +1314,10 @@ export default function App() {
   const [aiPrefill, setAiPrefill] = useState(null);
   const [syncStatus, setSyncStatus] = useState("");
 
-  const saveAppsScriptUrl = (url) => {
+  const saveSettings = (url, key) => {
     setAppsScriptUrl(url);
-    localStorage.setItem("cm_apps_script_url", url);
+    try { localStorage.setItem("cm_apps_script_url", url); } catch(e) {}
+    saveApiKey(key);
     setShowSettings(false);
   };
 
@@ -1276,18 +1675,35 @@ export default function App() {
       {showAI && (
         <AIModal
           onClose={()=>setShowAI(false)}
+          existingCases={cases}
           onResult={(parsed)=>{
             setAiPrefill(parsed);
             setShowAI(false);
             setShowNewCase(true);
+          }}
+          onBulkResult={(newCases)=>{
+            const next = [...newCases, ...cases];
+            setCases(next); saveToSheets(next);
+            setSelected(newCases[0]); setTab("개요");
+          }}
+          onUpdateResult={({ toCreate, toUpdate }) => {
+            let next = toCreate.length ? [...toCreate, ...cases] : [...cases];
+            toUpdate.forEach(updated => {
+              next = next.map(c => c.id === updated.id ? updated : c);
+            });
+            setCases(next);
+            saveToSheets(next);
+            const focus = toUpdate[0] || toCreate[0];
+            if (focus) { setSelected(focus); setTab("개요"); }
           }}
         />
       )}
       {showSettings && (
         <SettingsModal
           onClose={()=>setShowSettings(false)}
-          onSave={saveAppsScriptUrl}
+          onSave={saveSettings}
           currentUrl={appsScriptUrl}
+          currentApiKey={apiKey}
         />
       )}
       {showNewCase && (
