@@ -29,11 +29,16 @@ function HearingRow({ h, upcoming }) {
       <div className="flex items-center gap-3">
         <DdayBadge dateStr={h.date} small />
         <div>
-          <div className="text-sm font-medium text-slate-700">{h.type}</div>
+          <div className="text-sm font-medium text-slate-700">
+            {h.type}
+            {h.fromCalendar && <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-indigo-100 text-indigo-500 font-medium">LBOX</span>}
+          </div>
           {h.result && <div className="text-xs text-slate-400">{h.result}</div>}
         </div>
       </div>
-      <div className="text-xs text-slate-500">{fmtDate(h.date)}</div>
+      <div className="text-xs text-slate-500">
+        {fmtDate(h.date)}{h.time && <span className="ml-1 text-indigo-500 font-medium">{h.time}</span>}
+      </div>
     </div>
   );
 }
@@ -43,6 +48,13 @@ export default function OverviewTab({ c, onUpdate }) {
   const [expandedMemos, setExpandedMemos] = useState(new Set());
   const [showMemoForm, setShowMemoForm] = useState(false);
   const [newMemo, setNewMemo] = useState({ category: "일반메모", title: "", content: "" });
+  const [newTimeline, setNewTimeline] = useState("");
+
+  const addTimeline = () => {
+    if (!newTimeline.trim()) return;
+    onUpdate({ ...c, timeline: [...(c.timeline || []), { id: Date.now(), date: todayStr, content: newTimeline.trim() }] });
+    setNewTimeline("");
+  };
 
   const memos = c.memos || [];
   const filteredMemos = memoTab === "전체" ? memos : memos.filter(m => m.category === memoTab);
@@ -130,6 +142,14 @@ export default function OverviewTab({ c, onUpdate }) {
       </Section>
 
       <Section title="진행경과">
+        {/* 빠른 입력 */}
+        <div className="flex gap-2 mb-3">
+          <input className="input-sm flex-1" placeholder="오늘 경과 한줄 입력..." value={newTimeline}
+            onChange={e => setNewTimeline(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") addTimeline(); }} />
+          <button onClick={addTimeline} disabled={!newTimeline.trim()}
+            className="btn-primary text-xs px-3 py-1 disabled:opacity-40">추가</button>
+        </div>
         {c.timeline.length === 0 ? (
           <div className="text-sm text-slate-400 italic">등록된 경과가 없습니다.</div>
         ) : (

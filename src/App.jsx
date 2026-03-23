@@ -2,17 +2,17 @@ import { useState, useMemo, useCallback, useEffect } from "react";
 import { auth, provider, db } from "./firebase";
 import { onAuthStateChanged, signOut, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
 import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch } from "firebase/firestore";
-import { TYPES, STATUSES, todayStr, emptyCase, SAMPLE_CASES } from "./utils";
+import { TYPES, STATUSES, todayStr, dday, fmtDate, emptyCase, SAMPLE_CASES } from "./utils";
 import { TypeBadge } from "./components/Badges";
 import LoginScreen from "./components/LoginScreen";
 import StatsBar from "./components/StatsBar";
 import CaseItem from "./components/CaseItem";
 import OverviewTab from "./components/OverviewTab";
-import DocumentsTab from "./components/DocumentsTab";
 import TodosTab from "./components/TodosTab";
 import AiParseModal from "./components/AiParseModal";
 import CaseFormModal from "./components/CaseFormModal";
 import { fetchCalendarEvents, syncEventsWithCases } from "./calendarSync";
+import { migrateLegacyData } from "./migrateLegacy";
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -82,11 +82,27 @@ export default function App() {
   const filtered = useMemo(() => cases.filter(c => {
     const q = search.toLowerCase();
     const matchSearch = !q || c.title.toLowerCase().includes(q) || c.client.toLowerCase().includes(q)
-      || c.caseNumber?.toLowerCase().includes(q);
+      || c.opponent?.toLowerCase().includes(q) || c.caseNumber?.toLowerCase().includes(q);
     const matchStatus = statusFilter === "전체" || c.status === statusFilter;
     const matchType = typeFilter === "전체" || c.type === typeFilter;
     return matchSearch && matchStatus && matchType;
   }), [cases, search, statusFilter, typeFilter]);
+
+  // 가장 가까운 예정 기일 계산
+  const nextHearing = useMemo(() => {
+    let best = null;
+    for (const c of cases) {
+      if (c.status === "종결") continue;
+      for (const h of (c.hearings || [])) {
+        const d = dday(h.date);
+        if (d === null || d < 0) continue;
+        if (!best || d < best.dday) {
+          best = { ...h, dday: d, caseTitle: c.title, caseId: c.id, client: c.client };
+        }
+      }
+    }
+    return best;
+  }, [cases]);
 
   const saveCase = useCallback(async (c) => {
     if (!user) return;
@@ -117,7 +133,7 @@ export default function App() {
       // 기일 추가
       if (result.hearingDate && result.hearingType) {
         updated.hearings = [...(updated.hearings || []), {
-          id: Date.now() + 1, date: result.hearingDate, type: result.hearingType, result: ""
+          id: Date.now() + 1, date: result.hearingDate, time: result.hearingTime || "", type: result.hearingType, result: ""
         }];
       }
 
@@ -171,15 +187,39 @@ export default function App() {
       }
       if (!data?.items) { setCalResult({ error: "캘린더 데이터를 가져올 수 없습니다." }); return; }
 
-      const { updates, newTodoCount } = syncEventsWithCases(data.items, cases);
+      const { updates, newTodoCount, newHearingCount } = syncEventsWithCases(data.items, cases);
       for (const [, uc] of updates) await saveCase(uc);
 
-      setCalResult({ count: newTodoCount, total: data.items.length });
+      setCalResult({ count: newTodoCount, hearings: newHearingCount || 0, total: data.items.length });
       setTimeout(() => setCalResult(null), 4000);
     } catch (e) {
       setCalResult({ error: e.message });
     } finally { setCalSyncing(false); }
   }, [googleToken, cases, saveCase, refreshGoogleToken]);
+
+  const runMigration = useCallback(async () => {
+    if (!user) return;
+    let token = googleToken;
+    if (!token) {
+      token = await refreshGoogleToken();
+      if (!token) { alert("Google 인증이 필요합니다."); return; }
+    }
+    if (!window.confirm("구글 시트 '사건진행부'에서 민사/형사 사건을 가져옵니다. 진행하시겠습니까?")) return;
+    try {
+      const result = await migrateLegacyData(user.uid, token);
+      alert(`민사 ${result.civil}건, 형사 ${result.criminal}건 — 총 ${result.total}건 가져오기 완료!`);
+    } catch (e) {
+      if (e.message.includes("인증") || e.message.includes("401")) {
+        const newToken = await refreshGoogleToken();
+        if (newToken) {
+          const result = await migrateLegacyData(user.uid, newToken);
+          alert(`민사 ${result.civil}건, 형사 ${result.criminal}건 — 총 ${result.total}건 가져오기 완료!`);
+        } else { alert("Google 인증 실패. 로그아웃 후 다시 로그인하세요."); }
+      } else {
+        alert("가져오기 오류: " + e.message);
+      }
+    }
+  }, [user, googleToken, refreshGoogleToken]);
 
   const handleToken = useCallback((t) => {
     sessionStorage.setItem("googleToken", t); setGoogleToken(t);
@@ -222,10 +262,22 @@ export default function App() {
         {/* 헤더 */}
         <div style={{ background: "#0F172A" }} className="flex items-center justify-between px-4 sm:px-6 py-3">
           <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded-lg bg-indigo-500 flex items-center justify-center text-white text-xs font-bold">⚖</div>
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "linear-gradient(135deg, #6366F1 0%, #4F46E5 100%)", boxShadow: "0 2px 8px rgba(99,102,241,0.4)" }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 2L3 7V9H21V7L12 2Z" fill="white" opacity="0.9"/>
+                <rect x="5" y="10" width="2.5" height="8" rx="0.5" fill="white" opacity="0.8"/>
+                <rect x="10.75" y="10" width="2.5" height="8" rx="0.5" fill="white" opacity="0.8"/>
+                <rect x="16.5" y="10" width="2.5" height="8" rx="0.5" fill="white" opacity="0.8"/>
+                <rect x="3" y="18.5" width="18" height="2.5" rx="0.5" fill="white" opacity="0.9"/>
+              </svg>
+            </div>
             <span className="text-white font-bold text-base tracking-tight hidden sm:inline">사건 관리</span>
           </div>
           <div className="flex items-center gap-2">
+            <button onClick={runMigration}
+              className="flex items-center gap-1.5 text-xs text-amber-300 hover:text-amber-100 border border-amber-600 hover:border-amber-400 px-3 py-1.5 rounded-lg transition-colors">
+              <span>📥</span> <span className="hidden sm:inline">데이터 가져오기</span>
+            </button>
             <button onClick={syncCalendar} disabled={calSyncing}
               className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50">
               <span>📅</span> <span className="hidden sm:inline">{calSyncing ? "동기화 중…" : "캘린더"}</span>
@@ -253,12 +305,35 @@ export default function App() {
           <div className={`text-xs px-4 py-1.5 text-center font-medium ${
             calResult.error ? "bg-red-500 text-white" : "bg-emerald-500 text-white"
           }`}>
-            {calResult.error || `캘린더 일정 ${calResult.total}건 확인, ${calResult.count}건 할 일 추가`}
+            {calResult.error || `캘린더 ${calResult.total}건 확인 — 기일 ${calResult.hearings}건, 할일 ${calResult.count}건 추가`}
           </div>
         )}
 
+        {/* 다음 기일 D-day 배너 */}
+        {nextHearing && (
+          <button onClick={() => { setSelectedId(nextHearing.caseId); setActiveTab("overview"); setMobileView("detail"); }}
+            className="w-full text-left px-4 sm:px-6 py-2 flex items-center gap-3 transition-colors hover:bg-indigo-50"
+            style={{ background: nextHearing.dday <= 1 ? "#FEF2F2" : nextHearing.dday <= 3 ? "#FFFBEB" : "#EEF2FF" }}>
+            <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+              nextHearing.dday === 0 ? "bg-red-500 text-white" :
+              nextHearing.dday <= 3 ? "bg-amber-500 text-white" :
+              "bg-indigo-500 text-white"
+            }`}>{nextHearing.dday === 0 ? "오늘" : `D-${nextHearing.dday}`}</span>
+            <span className="text-sm font-medium text-slate-700 truncate">
+              {nextHearing.type} — {nextHearing.caseTitle}
+            </span>
+            <span className="text-xs text-slate-400 flex-shrink-0 ml-auto">
+              {fmtDate(nextHearing.date)}{nextHearing.time && ` ${nextHearing.time}`}
+            </span>
+          </button>
+        )}
+
         {/* 통계 바 */}
-        <StatsBar cases={cases} />
+        <StatsBar cases={cases} onSelectCase={(caseId, tab) => {
+          setSelectedId(caseId);
+          setActiveTab(tab || "overview");
+          setMobileView("detail");
+        }} />
 
         {/* 본문 */}
         <div className="flex flex-1 min-h-0">
@@ -347,7 +422,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex border-b border-slate-100 px-4 sm:px-6">
-                  {[["overview", "개요"], ["todos", "할 일"], ["documents", "문서"]].map(([key, label]) => (
+                  {[["overview", "개요"], ["todos", "할 일"]].map(([key, label]) => (
                     <button key={key} onClick={() => setActiveTab(key)}
                       className={`py-2.5 px-1 mr-5 text-sm font-medium border-b-2 transition-colors ${
                         activeTab === key
@@ -359,9 +434,7 @@ export default function App() {
                 <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5">
                   {activeTab === "overview"
                     ? <OverviewTab c={selected} onUpdate={saveCase} />
-                    : activeTab === "todos"
-                    ? <TodosTab c={selected} onUpdate={saveCase} />
-                    : <DocumentsTab c={selected} onUpdate={saveCase} />
+                    : <TodosTab c={selected} onUpdate={saveCase} />
                   }
                 </div>
               </>

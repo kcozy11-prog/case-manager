@@ -12,7 +12,7 @@ function FormSection({ title, children }) {
 
 export default function CaseFormModal({ initial, onSave, onClose }) {
   const [form, setForm] = useState(initial || emptyCase());
-  const [newHearing, setNewHearing] = useState({ date: todayStr, type: "", result: "" });
+  const [newHearing, setNewHearing] = useState({ date: todayStr, time: "", type: "", result: "" });
   const [newTimeline, setNewTimeline] = useState({ date: todayStr, content: "" });
   const set = (path, val) => {
     setForm(prev => {
@@ -27,7 +27,7 @@ export default function CaseFormModal({ initial, onSave, onClose }) {
   const addHearing = () => {
     if (!newHearing.date || !newHearing.type.trim()) return;
     setForm(p => ({ ...p, hearings: [...p.hearings, { id: Date.now(), ...newHearing }] }));
-    setNewHearing({ date: todayStr, type: "", result: "" });
+    setNewHearing({ date: todayStr, time: "", type: "", result: "" });
   };
   const delHearing = (id) => setForm(p => ({ ...p, hearings: p.hearings.filter(h => h.id !== id) }));
 
@@ -117,14 +117,17 @@ export default function CaseFormModal({ initial, onSave, onClose }) {
             {form.hearings.map(h => (
               <div key={h.id} className="flex items-center gap-2 text-sm mb-1.5 bg-slate-50 rounded px-2 py-1.5">
                 <span className="text-slate-400 w-24">{fmtDate(h.date)}</span>
+                {h.time && <span className="text-indigo-500 text-xs font-medium">{h.time}</span>}
                 <span className="text-slate-700 flex-1">{h.type}</span>
                 {h.result && <span className="text-slate-400 text-xs">{h.result}</span>}
                 <button onClick={() => delHearing(h.id)} className="text-slate-300 hover:text-red-400 ml-1">✕</button>
               </div>
             ))}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">
               <input className="input" type="date" value={newHearing.date}
                 onChange={e => setNewHearing(p => ({ ...p, date: e.target.value }))} />
+              <input className="input" type="time" value={newHearing.time}
+                onChange={e => setNewHearing(p => ({ ...p, time: e.target.value }))} />
               <input className="input" placeholder="기일 종류" value={newHearing.type}
                 onChange={e => setNewHearing(p => ({ ...p, type: e.target.value }))} />
               <div className="flex gap-1">

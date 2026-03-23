@@ -35,6 +35,8 @@ function findMatchingCase(identifiers, cases) {
   return null;
 }
 
+const GEMINI_KEY_STORAGE = "caseManager_geminiKey";
+
 // ── AI 파싱 모달 ──────────────────────────────────────────────────────────────
 export default function AiParseModal({ cases, onClose, onApply }) {
   const [text, setText] = useState("");
@@ -43,9 +45,22 @@ export default function AiParseModal({ cases, onClose, onApply }) {
   const [matchedCase, setMatchedCase] = useState(null);
   const [manualCaseId, setManualCaseId] = useState("");
   const [error, setError] = useState("");
+  const [apiKey, setApiKey] = useState(localStorage.getItem(GEMINI_KEY_STORAGE) || "");
+  const [showKeyInput, setShowKeyInput] = useState(!localStorage.getItem(GEMINI_KEY_STORAGE));
+
+  const saveKey = (key) => {
+    setApiKey(key);
+    if (key.trim()) localStorage.setItem(GEMINI_KEY_STORAGE, key.trim());
+    else localStorage.removeItem(GEMINI_KEY_STORAGE);
+  };
 
   const parse = async () => {
     if (!text.trim()) return;
+    if (!apiKey.trim()) {
+      setError("Gemini API 키를 입력해주세요.");
+      setShowKeyInput(true);
+      return;
+    }
     setLoading(true); setResult(null); setError(""); setMatchedCase(null); setManualCaseId("");
     try {
       const prompt = `다음 텍스트를 분석하여 법률 사건 관련 정보를 추출해 주세요.
@@ -62,26 +77,48 @@ JSON 형식으로만 응답하고, 다른 텍스트는 포함하지 마세요.
 - memoTitle: 메모 제목 (15자 이내, 핵심 요약. 예: "변론기일 지정", "피고 준비서면 제출", "합의 의사 전달")
 - memoContent: 원문 핵심 내용 정리 (날짜, 장소, 인물, 내용 포함)
 - hearingDate: 기일 날짜 YYYY-MM-DD (기일 관련 정보가 있을 때만, 없으면 null)
+- hearingTime: 기일 시간 HH:MM (시간 정보가 있을 때만, 없으면 null)
 - hearingType: 기일 종류 (변론기일/공판기일/조사기일 등, 없으면 null)
 - timelineContent: 진행 경과로 기록할 내용 한 줄 요약 (없으면 null)
 
 텍스트:
 ${text}`;
 
-      const GEMINI_KEY = import.meta.env.VITE_GEMINI_API_KEY;
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey.trim()}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
         }
       );
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        if (res.status === 400 || res.status === 403) {
+          setError("API 키가 유효하지 않습니다. 키를 확인해주세요.");
+          setShowKeyInput(true);
+        } else {
+          setError(`API 오류 (${res.status}): ${errData.error?.message || "알 수 없는 오류"}`);
+        }
+        return;
+      }
+
       const data = await res.json();
       const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
       const cleaned = raw.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(cleaned);
+
+      let parsed;
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch {
+        setError("AI 응답을 파싱할 수 없습니다. 다시 시도해주세요.");
+        return;
+      }
+
       setResult(parsed);
+      // API 키 저장 (성공 시)
+      localStorage.setItem(GEMINI_KEY_STORAGE, apiKey.trim());
 
       // 자동 매칭
       const found = findMatchingCase(parsed.caseIdentifiers, cases);
@@ -90,7 +127,7 @@ ${text}`;
         setManualCaseId(found.id);
       }
     } catch (e) {
-      setError("파싱 중 오류가 발생했습니다: " + e.message);
+      setError("네트워크 오류: " + e.message);
     } finally {
       setLoading(false);
     }
@@ -117,6 +154,28 @@ ${text}`;
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>
         <div className="p-5 space-y-4 max-h-[80vh] overflow-y-auto">
+          {/* API 키 설정 */}
+          <div className="border border-slate-200 rounded-lg overflow-hidden">
+            <button onClick={() => setShowKeyInput(p => !p)}
+              className="w-full flex items-center justify-between px-3 py-2 text-xs text-slate-500 hover:bg-slate-50">
+              <span>🔑 Gemini API 키 {apiKey ? "✓ 설정됨" : "⚠ 미설정"}</span>
+              <span>{showKeyInput ? "▲" : "▼"}</span>
+            </button>
+            {showKeyInput && (
+              <div className="px-3 pb-3 space-y-1.5">
+                <input
+                  className="w-full border border-slate-200 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                  type="password" placeholder="Gemini API 키 입력"
+                  value={apiKey} onChange={e => saveKey(e.target.value)}
+                />
+                <div className="text-[11px] text-slate-400">
+                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener"
+                    className="text-indigo-500 hover:underline">Google AI Studio</a>에서 무료 API 키를 발급받으세요
+                </div>
+              </div>
+            )}
+          </div>
+
           <textarea
             className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-300"
             rows={5} placeholder={"카카오톡 대화, 법원 알림, 엘박스 메시지 등을 붙여넣으세요...\n\n예) \"아파트 분양대금 반환 청구 사건 변론기일이 2026.4.15. 14:00 서울중앙지방법원 301호에서 진행됩니다\""}
@@ -170,7 +229,7 @@ ${text}`;
                     {result.hearingDate && (
                       <div className="text-xs text-slate-600 bg-white rounded-lg px-3 py-2 border border-slate-100 flex items-center gap-2">
                         <span className="text-indigo-400">📅</span>
-                        <span>기일 추가: <strong>{result.hearingDate}</strong> {result.hearingType || ""}</span>
+                        <span>기일 추가: <strong>{result.hearingDate}</strong>{result.hearingTime && ` ${result.hearingTime}`} {result.hearingType || ""}</span>
                       </div>
                     )}
                     {result.timelineContent && (

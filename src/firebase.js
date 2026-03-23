@@ -16,6 +16,7 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const provider = new GoogleAuthProvider();
 provider.addScope("https://www.googleapis.com/auth/calendar.readonly");
+provider.addScope("https://www.googleapis.com/auth/spreadsheets.readonly");
 
 // 오프라인 캐시 + 멀티탭 동기화 → 모든 디바이스에서 실시간 반영
 export const db = initializeFirestore(app, {
