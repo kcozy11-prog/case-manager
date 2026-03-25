@@ -21,7 +21,7 @@ function Section({ title, children }) {
   );
 }
 
-function HearingRow({ h, upcoming }) {
+function HearingRow({ h, upcoming, onDelete }) {
   return (
     <div className={`flex items-center justify-between rounded-lg px-3 py-2 ${
       upcoming ? "bg-indigo-50 border border-indigo-100" : "bg-slate-50"
@@ -36,8 +36,12 @@ function HearingRow({ h, upcoming }) {
           {h.result && <div className="text-xs text-slate-400">{h.result}</div>}
         </div>
       </div>
-      <div className="text-xs text-slate-500">
-        {fmtDate(h.date)}{h.time && <span className="ml-1 text-indigo-500 font-medium">{h.time}</span>}
+      <div className="flex items-center gap-2">
+        <div className="text-xs text-slate-500">
+          {fmtDate(h.date)}{h.time && <span className="ml-1 text-indigo-500 font-medium">{h.time}</span>}
+        </div>
+        <button onClick={(e) => { e.stopPropagation(); onDelete(h.id); }}
+          className="text-xs text-red-300 hover:text-red-500 transition-colors" title="기일 삭제">✕</button>
       </div>
     </div>
   );
@@ -49,11 +53,31 @@ export default function OverviewTab({ c, onUpdate }) {
   const [showMemoForm, setShowMemoForm] = useState(false);
   const [newMemo, setNewMemo] = useState({ category: "일반메모", title: "", content: "" });
   const [newTimeline, setNewTimeline] = useState("");
+  const [newTimelineDate, setNewTimelineDate] = useState(todayStr);
+  const [editingTimelineId, setEditingTimelineId] = useState(null);
+  const [editingTimelineDate, setEditingTimelineDate] = useState("");
+  const [editingMemoDate, setEditingMemoDate] = useState("");
+  const [editingMemoId, setEditingMemoId] = useState(null);
 
   const addTimeline = () => {
     if (!newTimeline.trim()) return;
-    onUpdate({ ...c, timeline: [...(c.timeline || []), { id: Date.now(), date: todayStr, content: newTimeline.trim() }] });
+    onUpdate({ ...c, timeline: [...(c.timeline || []), { id: Date.now(), date: newTimelineDate || todayStr, content: newTimeline.trim() }] });
     setNewTimeline("");
+    setNewTimelineDate(todayStr);
+  };
+
+  const deleteHearing = (id) => {
+    onUpdate({ ...c, hearings: c.hearings.filter(h => h.id !== id) });
+  };
+
+  const updateTimelineDate = (id, newDate) => {
+    onUpdate({ ...c, timeline: c.timeline.map(t => t.id === id ? { ...t, date: newDate } : t) });
+    setEditingTimelineId(null);
+  };
+
+  const updateMemoDate = (id, newDate) => {
+    onUpdate({ ...c, memos: (c.memos || []).map(m => m.id === id ? { ...m, date: newDate } : m) });
+    setEditingMemoId(null);
   };
 
   const memos = c.memos || [];
@@ -125,7 +149,7 @@ export default function OverviewTab({ c, onUpdate }) {
               <>
                 <div className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-1">예정</div>
                 {upcomingHearings.map(h => (
-                  <HearingRow key={h.id} h={h} upcoming />
+                  <HearingRow key={h.id} h={h} upcoming onDelete={deleteHearing} />
                 ))}
               </>
             )}
@@ -133,7 +157,7 @@ export default function OverviewTab({ c, onUpdate }) {
               <>
                 <div className="text-xs font-medium text-slate-400 uppercase tracking-wide mt-2 mb-1">지난 기일</div>
                 {pastHearings.map(h => (
-                  <HearingRow key={h.id} h={h} />
+                  <HearingRow key={h.id} h={h} onDelete={deleteHearing} />
                 ))}
               </>
             )}
@@ -144,7 +168,9 @@ export default function OverviewTab({ c, onUpdate }) {
       <Section title="진행경과">
         {/* 빠른 입력 */}
         <div className="flex gap-2 mb-3">
-          <input className="input-sm flex-1" placeholder="오늘 경과 한줄 입력..." value={newTimeline}
+          <input type="date" className="input-sm" style={{ width: "130px" }} value={newTimelineDate}
+            onChange={e => setNewTimelineDate(e.target.value)} />
+          <input className="input-sm flex-1" placeholder="경과 한줄 입력..." value={newTimeline}
             onChange={e => setNewTimeline(e.target.value)}
             onKeyDown={e => { if (e.key === "Enter") addTimeline(); }} />
           <button onClick={addTimeline} disabled={!newTimeline.trim()}
@@ -158,7 +184,20 @@ export default function OverviewTab({ c, onUpdate }) {
             {[...c.timeline].sort((a, b) => new Date(b.date) - new Date(a.date)).map((t) => (
               <div key={t.id} className="relative mb-3 last:mb-0">
                 <div className="absolute -left-2.5 top-1.5 w-2 h-2 rounded-full bg-indigo-400 border-2 border-white" />
-                <div className="text-xs text-slate-400 mb-0.5">{fmtDate(t.date)}</div>
+                <div className="flex items-center gap-1.5 mb-0.5">
+                  {editingTimelineId === t.id ? (
+                    <input type="date" className="input-sm" style={{ width: "130px", fontSize: "11px" }}
+                      value={editingTimelineDate}
+                      onChange={e => setEditingTimelineDate(e.target.value)}
+                      onBlur={() => updateTimelineDate(t.id, editingTimelineDate)}
+                      onKeyDown={e => { if (e.key === "Enter") updateTimelineDate(t.id, editingTimelineDate); if (e.key === "Escape") setEditingTimelineId(null); }}
+                      autoFocus />
+                  ) : (
+                    <button className="text-xs text-slate-400 hover:text-indigo-500 transition-colors"
+                      onClick={() => { setEditingTimelineId(t.id); setEditingTimelineDate(t.date); }}
+                      title="날짜 수정">{fmtDate(t.date)}</button>
+                  )}
+                </div>
                 <div className="text-sm text-slate-700">{t.content}</div>
               </div>
             ))}
@@ -195,7 +234,19 @@ export default function OverviewTab({ c, onUpdate }) {
                     <span className="text-sm font-medium text-slate-700 truncate">{m.title}</span>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
-                    <span className="text-xs text-slate-400">{fmtDate(m.date)}</span>
+                    {editingMemoId === m.id ? (
+                      <input type="date" className="input-sm" style={{ width: "130px", fontSize: "11px" }}
+                        value={editingMemoDate}
+                        onClick={e => e.stopPropagation()}
+                        onChange={e => setEditingMemoDate(e.target.value)}
+                        onBlur={() => updateMemoDate(m.id, editingMemoDate)}
+                        onKeyDown={e => { if (e.key === "Enter") updateMemoDate(m.id, editingMemoDate); if (e.key === "Escape") setEditingMemoId(null); }}
+                        autoFocus />
+                    ) : (
+                      <button className="text-xs text-slate-400 hover:text-indigo-500 transition-colors"
+                        onClick={e => { e.stopPropagation(); setEditingMemoId(m.id); setEditingMemoDate(m.date); }}
+                        title="날짜 수정">{fmtDate(m.date)}</button>
+                    )}
                     <span className="text-xs text-slate-300">{expandedMemos.has(m.id) ? "▲" : "▼"}</span>
                   </div>
                 </div>

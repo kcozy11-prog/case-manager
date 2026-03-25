@@ -14,28 +14,16 @@ export async function fetchCalendarEvents(token) {
     maxResults: "200",
   });
 
-  // primary + LBOX 캘린더 병렬 조회
-  const fetchCal = async (calId) => {
-    const res = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events?${params}`,
-      { headers: { Authorization: `Bearer ${token}` } },
-    );
-    if (res.status === 401) return null;
-    if (!res.ok) return { items: [] }; // 개별 캘린더 실패 시 빈 결과
-    return res.json();
-  };
+  // LBOX 캘린더만 조회 (할일 연계 없이 기일 정보만 사용)
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(LBOX_CAL_ID)}/events?${params}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (res.status === 401) return null;
+  if (!res.ok) return { items: [] };
+  const data = await res.json();
 
-  const [primaryData, lboxData] = await Promise.all([
-    fetchCal("primary"),
-    fetchCal(LBOX_CAL_ID),
-  ]);
-
-  if (!primaryData && !lboxData) return null; // 둘 다 401이면 토큰 만료
-
-  const primaryItems = (primaryData?.items || []).map(e => ({ ...e, _src: "primary" }));
-  const lboxItems = (lboxData?.items || []).map(e => ({ ...e, _src: "LBOX" }));
-
-  return { items: [...primaryItems, ...lboxItems] };
+  return { items: (data.items || []).map(e => ({ ...e, _src: "LBOX" })) };
 }
 
 // ── LBOX 일정 파싱 ──────────────────────────────────────────────────────────
@@ -86,82 +74,85 @@ export function matchEventToCase(eventText, caseObj) {
   return false;
 }
 
-// ── 이벤트 → 할 일 + 기일 변환 ─────────────────────────────────────────────
+// ── LBOX 이벤트 → 기일 + 기일메모 + 진행경과 변환 ──────────────────────────
 
 export function syncEventsWithCases(events, cases) {
   const updates = new Map();
-  let newTodoCount = 0;
   let newHearingCount = 0;
+
+  const todayStr = new Date().toISOString().split("T")[0];
 
   for (const ev of events) {
     const summary = ev.summary || "";
-    const eventText = summary + " " + (ev.description || "");
-    if (!eventText.trim()) continue;
+    if (!summary.trim()) continue;
 
     const eventDate = ev.start?.date || (ev.start?.dateTime?.split("T")[0]) || "";
     const eventTime = ev.start?.dateTime
       ? new Date(ev.start.dateTime).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })
       : "";
 
-    // LBOX 일정 → 기일 자동 추가
+    // LBOX 일정만 처리 → 기일 자동 추가 + 기일메모/진행경과
     const lbox = parseLboxEvent(summary);
-    if (lbox) {
-      const matched = matchByCaseNumber(lbox.caseNumber, cases);
-      if (matched) {
-        const ref = updates.get(matched.id) || { ...matched };
-        const hearings = ref.hearings || [];
+    if (!lbox) continue;
 
-        // 중복 체크: 같은 날짜+유형 또는 같은 calendarEventId
-        const isDup = hearings.some(h =>
-          h.calendarEventId === ev.id ||
-          (h.date === eventDate && h.type === (lbox.hearingType + "기일"))
-        );
+    const matched = matchByCaseNumber(lbox.caseNumber, cases);
+    if (!matched) continue;
 
-        if (!isDup) {
-          ref.hearings = [
-            ...hearings,
-            {
-              id: Date.now() + Math.floor(Math.random() * 10000),
-              date: eventDate,
-              time: lbox.time || eventTime,
-              type: lbox.hearingType + "기일",
-              result: lbox.location ? `${lbox.court} ${lbox.location}` : lbox.court,
-              fromCalendar: true,
-              calendarEventId: ev.id,
-            },
-          ];
-          updates.set(matched.id, ref);
-          newHearingCount++;
-        }
-        continue; // LBOX 일정은 할일에 추가하지 않음
-      }
-    }
+    const ref = updates.get(matched.id) || { ...matched };
+    const hearings = ref.hearings || [];
 
-    // 일반 일정 → 할 일 추가 (기존 로직)
-    for (const c of cases) {
-      if (!matchEventToCase(eventText, c)) continue;
+    // 중복 체크: 같은 날짜+유형 또는 같은 calendarEventId
+    const isDup = hearings.some(h =>
+      h.calendarEventId === ev.id ||
+      (h.date === eventDate && h.type === (lbox.hearingType + "기일"))
+    );
 
-      const ref = updates.get(c.id) || { ...c };
-      const todos = ref.todos || [];
+    if (!isDup) {
+      const hearingType = lbox.hearingType + "기일";
+      const locationInfo = lbox.location ? `${lbox.court} ${lbox.location}` : lbox.court;
 
-      if (todos.find((t) => t.calendarEventId === ev.id)) continue;
-
-      ref.todos = [
-        ...todos,
+      ref.hearings = [
+        ...hearings,
         {
           id: Date.now() + Math.floor(Math.random() * 10000),
-          text: summary || "캘린더 일정",
-          done: false,
-          priority: "보통",
-          dueDate: eventDate,
-          calendarEventId: ev.id,
+          date: eventDate,
+          time: lbox.time || eventTime,
+          type: hearingType,
+          result: locationInfo,
           fromCalendar: true,
+          calendarEventId: ev.id,
         },
       ];
-      updates.set(c.id, ref);
-      newTodoCount++;
+
+      // 기일메모 자동 추가
+      const memos = ref.memos || [];
+      const memoContent = `• ${hearingType} ${eventDate}${lbox.time ? ` ${lbox.time}` : ""}\n• 장소: ${locationInfo}`;
+      ref.memos = [
+        ...memos,
+        {
+          id: Date.now() + Math.floor(Math.random() * 10000) + 1,
+          category: "기일메모",
+          title: `${hearingType} 지정`,
+          content: memoContent,
+          date: todayStr,
+        },
+      ];
+
+      // 진행경과 자동 추가
+      const timeline = ref.timeline || [];
+      ref.timeline = [
+        ...timeline,
+        {
+          id: Date.now() + Math.floor(Math.random() * 10000) + 2,
+          date: todayStr,
+          content: `${hearingType} ${eventDate}${lbox.time ? ` ${lbox.time}` : ""} 지정 (${lbox.court})`,
+        },
+      ];
+
+      updates.set(matched.id, ref);
+      newHearingCount++;
     }
   }
 
-  return { updates, newTodoCount, newHearingCount };
+  return { updates, newTodoCount: 0, newHearingCount };
 }

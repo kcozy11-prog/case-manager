@@ -305,7 +305,7 @@ export default function App() {
           <div className={`text-xs px-4 py-1.5 text-center font-medium ${
             calResult.error ? "bg-red-500 text-white" : "bg-emerald-500 text-white"
           }`}>
-            {calResult.error || `캘린더 ${calResult.total}건 확인 — 기일 ${calResult.hearings}건, 할일 ${calResult.count}건 추가`}
+            {calResult.error || `LBOX 캘린더 ${calResult.total}건 확인 — 기일 ${calResult.hearings}건 추가 (기일메모·진행경과 자동 기록)`}
           </div>
         )}
 
