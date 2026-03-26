@@ -21,7 +21,12 @@ export default function StatsBar({ cases, onSelectCase }) {
 
   // 미완료 할 일 목록
   const pendingTodos = cases.filter(c => c.status === "진행중").flatMap(c =>
-    (c.todos || []).filter(t => !t.done).map(t => ({ ...t, caseId: c.id, caseTitle: c.title }))
+    (c.todos || []).filter(t => !t.done && !t.fromCalendar).map(t => ({ ...t, caseId: c.id, caseTitle: c.title }))
+  );
+
+  // 불변기간 미체크 항목
+  const uncheckedDeadlines = cases.filter(c => c.status === "진행중").flatMap(c =>
+    (c.memos || []).filter(m => m.category === "불변기간" && !m.checked).map(m => ({ ...m, caseId: c.id, caseTitle: c.title }))
   );
 
   const active = cases.filter(c => c.status === "진행중").length;
@@ -31,6 +36,7 @@ export default function StatsBar({ cases, onSelectCase }) {
     { key: "month", label: "이번 달 기일", value: monthHearings.length, unit: "건", color: "#34D399", items: monthHearings },
     { key: "week", label: "7일 내 기일", value: weekHearings.length, unit: "건", color: weekHearings.length > 0 ? "#F87171" : "#94A3B8", items: weekHearings },
     { key: "todos", label: "미완료 할 일", value: pendingTodos.length, unit: "건", color: pendingTodos.length > 0 ? "#FBBF24" : "#94A3B8", items: pendingTodos },
+    { key: "deadlines", label: "불변기간", value: uncheckedDeadlines.length, unit: "건", color: uncheckedDeadlines.length > 0 ? "#F43F5E" : "#94A3B8", items: uncheckedDeadlines },
   ];
 
   const handleClick = (s) => {
@@ -76,7 +82,7 @@ export default function StatsBar({ cases, onSelectCase }) {
                 className="flex items-center justify-between px-6 py-2.5 hover:bg-slate-700 cursor-pointer border-b border-slate-700/50 last:border-b-0 transition-colors">
                 <div className="flex items-center gap-3 min-w-0">
                   <span className="text-xs font-medium text-slate-300 truncate max-w-[200px]">{item.caseTitle}</span>
-                  <span className="text-xs text-slate-400 truncate">{item.text || item.type || ""}</span>
+                  <span className="text-xs text-slate-400 truncate">{item.text || item.title || item.type || ""}</span>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
                   {item.date && <span className="text-xs text-slate-500">{fmtDate(item.date)}</span>}

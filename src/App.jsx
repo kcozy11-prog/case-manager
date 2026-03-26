@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { auth, provider, db } from "./firebase";
 import { onAuthStateChanged, signOut, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
 import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch } from "firebase/firestore";
@@ -73,6 +73,18 @@ export default function App() {
   }, [user]);
 
   const selected = cases.find(c => c.id === selectedId);
+
+  // 캘린더에서 가져온 할일 일괄 삭제 (1회 마이그레이션)
+  const calTodoMigrated = useRef(false);
+  useEffect(() => {
+    if (!user || cases.length === 0 || calTodoMigrated.current) return;
+    calTodoMigrated.current = true;
+    const dirty = cases.filter(c => (c.todos || []).some(t => t.fromCalendar));
+    dirty.forEach(c => {
+      const cleaned = { ...c, todos: (c.todos || []).filter(t => !t.fromCalendar) };
+      setDoc(doc(db, "users", user.uid, "cases", c.id), cleaned);
+    });
+  }, [user, cases]);
 
   // 동적 타이틀
   useEffect(() => {

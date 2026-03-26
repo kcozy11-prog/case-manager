@@ -36,9 +36,10 @@ export const TYPE_STYLE = {
   "자문":       { dot: "#10B981", badge: "bg-emerald-50 text-emerald-700 border-emerald-200" },
 };
 
-export const MEMO_CATEGORIES = ["의뢰인요청", "기일메모", "공식결과메모", "일반메모"];
+export const MEMO_CATEGORIES = ["불변기간", "의뢰인요청", "기일메모", "공식결과메모", "일반메모"];
 
 export const MEMO_CAT_STYLE = {
+  "불변기간":     "bg-rose-50 text-rose-600 border-rose-200",
   "의뢰인요청":   "bg-blue-50 text-blue-600 border-blue-200",
   "기일메모":     "bg-amber-50 text-amber-600 border-amber-200",
   "공식결과메모": "bg-emerald-50 text-emerald-600 border-emerald-200",

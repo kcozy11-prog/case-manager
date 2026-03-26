@@ -103,6 +103,10 @@ export default function OverviewTab({ c, onUpdate }) {
     onUpdate({ ...c, memos: memos.filter(m => m.id !== id) });
   };
 
+  const toggleMemoCheck = (id) => {
+    onUpdate({ ...c, memos: memos.map(m => m.id === id ? { ...m, checked: !m.checked } : m) });
+  };
+
   const upcomingHearings = [...c.hearings]
     .filter(h => dday(h.date) >= 0)
     .sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -228,10 +232,18 @@ export default function OverviewTab({ c, onUpdate }) {
                   onClick={() => toggleMemo(m.id)}
                 >
                   <div className="flex items-center gap-2 min-w-0">
+                    {m.category === "불변기간" && (
+                      <button onClick={(e) => { e.stopPropagation(); toggleMemoCheck(m.id); }}
+                        className={`flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-colors ${
+                          m.checked ? "bg-rose-400 border-rose-400 text-white" : "border-rose-300 hover:border-rose-500"
+                        }`}>
+                        {m.checked && <span className="text-white text-xs leading-none">✓</span>}
+                      </button>
+                    )}
                     <span className={`text-xs px-1.5 py-0.5 rounded border flex-shrink-0 ${MEMO_CAT_STYLE[m.category] || MEMO_CAT_STYLE["일반메모"]}`}>
                       {m.category}
                     </span>
-                    <span className="text-sm font-medium text-slate-700 truncate">{m.title}</span>
+                    <span className={`text-sm font-medium truncate ${m.category === "불변기간" && m.checked ? "line-through text-slate-400" : "text-slate-700"}`}>{m.title}</span>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
                     {editingMemoId === m.id ? (
