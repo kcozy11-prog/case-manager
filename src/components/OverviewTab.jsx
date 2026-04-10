@@ -56,8 +56,12 @@ export default function OverviewTab({ c, onUpdate }) {
   const [newTimelineDate, setNewTimelineDate] = useState(todayStr);
   const [editingTimelineId, setEditingTimelineId] = useState(null);
   const [editingTimelineDate, setEditingTimelineDate] = useState("");
+  const [editingTimelineContentId, setEditingTimelineContentId] = useState(null);
+  const [editingTimelineContent, setEditingTimelineContent] = useState("");
   const [editingMemoDate, setEditingMemoDate] = useState("");
   const [editingMemoId, setEditingMemoId] = useState(null);
+  const [editingMemoFullId, setEditingMemoFullId] = useState(null);
+  const [editingMemoData, setEditingMemoData] = useState({});
 
   const addTimeline = () => {
     if (!newTimeline.trim()) return;
@@ -73,6 +77,25 @@ export default function OverviewTab({ c, onUpdate }) {
   const updateTimelineDate = (id, newDate) => {
     onUpdate({ ...c, timeline: c.timeline.map(t => t.id === id ? { ...t, date: newDate } : t) });
     setEditingTimelineId(null);
+  };
+
+  const saveTimelineContent = (id) => {
+    onUpdate({ ...c, timeline: c.timeline.map(t => t.id === id ? { ...t, content: editingTimelineContent } : t) });
+    setEditingTimelineContentId(null);
+  };
+
+  const deleteTimeline = (id) => {
+    onUpdate({ ...c, timeline: c.timeline.filter(t => t.id !== id) });
+  };
+
+  const startEditMemo = (m) => {
+    setEditingMemoFullId(m.id);
+    setEditingMemoData({ category: m.category, title: m.title, content: m.content || "" });
+  };
+
+  const saveMemoFull = (id) => {
+    onUpdate({ ...c, memos: memos.map(m => m.id === id ? { ...m, ...editingMemoData } : m) });
+    setEditingMemoFullId(null);
   };
 
   const updateMemoDate = (id, newDate) => {
@@ -188,21 +211,41 @@ export default function OverviewTab({ c, onUpdate }) {
             {[...c.timeline].sort((a, b) => new Date(b.date) - new Date(a.date)).map((t) => (
               <div key={t.id} className="relative mb-3 last:mb-0">
                 <div className="absolute -left-2.5 top-1.5 w-2 h-2 rounded-full bg-indigo-400 border-2 border-white" />
-                <div className="flex items-center gap-1.5 mb-0.5">
-                  {editingTimelineId === t.id ? (
-                    <input type="date" className="input-sm" style={{ width: "130px", fontSize: "11px" }}
-                      value={editingTimelineDate}
-                      onChange={e => setEditingTimelineDate(e.target.value)}
-                      onBlur={() => updateTimelineDate(t.id, editingTimelineDate)}
-                      onKeyDown={e => { if (e.key === "Enter") updateTimelineDate(t.id, editingTimelineDate); if (e.key === "Escape") setEditingTimelineId(null); }}
-                      autoFocus />
-                  ) : (
-                    <button className="text-xs text-slate-400 hover:text-indigo-500 transition-colors"
-                      onClick={() => { setEditingTimelineId(t.id); setEditingTimelineDate(t.date); }}
-                      title="날짜 수정">{fmtDate(t.date)}</button>
-                  )}
+                <div className="flex items-center justify-between gap-1.5 mb-0.5">
+                  <div className="flex items-center gap-1.5">
+                    {editingTimelineId === t.id ? (
+                      <input type="date" className="input-sm" style={{ width: "130px", fontSize: "11px" }}
+                        value={editingTimelineDate}
+                        onChange={e => setEditingTimelineDate(e.target.value)}
+                        onBlur={() => updateTimelineDate(t.id, editingTimelineDate)}
+                        onKeyDown={e => { if (e.key === "Enter") updateTimelineDate(t.id, editingTimelineDate); if (e.key === "Escape") setEditingTimelineId(null); }}
+                        autoFocus />
+                    ) : (
+                      <button className="text-xs text-slate-400 hover:text-indigo-500 transition-colors"
+                        onClick={() => { setEditingTimelineId(t.id); setEditingTimelineDate(t.date); }}
+                        title="날짜 수정">{fmtDate(t.date)}</button>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => { setEditingTimelineContentId(t.id); setEditingTimelineContent(t.content); }}
+                      className="text-xs text-slate-300 hover:text-indigo-500 transition-colors" title="내용 수정">✎</button>
+                    <button onClick={() => deleteTimeline(t.id)}
+                      className="text-xs text-slate-300 hover:text-red-500 transition-colors" title="삭제">✕</button>
+                  </div>
                 </div>
-                <div className="text-sm text-slate-700">{t.content}</div>
+                {editingTimelineContentId === t.id ? (
+                  <div className="flex gap-1.5">
+                    <input className="input-sm flex-1 text-sm"
+                      value={editingTimelineContent}
+                      onChange={e => setEditingTimelineContent(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") saveTimelineContent(t.id); if (e.key === "Escape") setEditingTimelineContentId(null); }}
+                      autoFocus />
+                    <button onClick={() => saveTimelineContent(t.id)} className="btn-primary text-xs px-2 py-1">저장</button>
+                    <button onClick={() => setEditingTimelineContentId(null)} className="text-xs text-slate-400 hover:text-slate-600 px-1">취소</button>
+                  </div>
+                ) : (
+                  <div className="text-sm text-slate-700">{t.content}</div>
+                )}
               </div>
             ))}
           </div>
@@ -225,8 +268,13 @@ export default function OverviewTab({ c, onUpdate }) {
           <div className="text-sm text-slate-400 italic">메모가 없습니다.</div>
         ) : (
           <div className="space-y-2">
-            {sortedMemos.map(m => (
-              <div key={m.id} className="border border-slate-200 rounded-lg overflow-hidden">
+            {sortedMemos.map(m => {
+              const deadlineDday = m.category === "불변기간" ? dday(m.date) : null;
+              const urgentBorder = m.category === "불변기간" && !m.checked && deadlineDday !== null
+                ? (deadlineDday <= 0 ? "border-red-300 bg-red-50/50" : deadlineDday <= 3 ? "border-rose-200 bg-rose-50/30" : deadlineDday <= 7 ? "border-amber-200" : "border-slate-200")
+                : "border-slate-200";
+              return (
+              <div key={m.id} className={`border rounded-lg overflow-hidden ${urgentBorder}`}>
                 <div
                   className="flex items-center justify-between px-3 py-2.5 cursor-pointer hover:bg-slate-50 transition-colors"
                   onClick={() => toggleMemo(m.id)}
@@ -239,6 +287,9 @@ export default function OverviewTab({ c, onUpdate }) {
                         }`}>
                         {m.checked && <span className="text-white text-xs leading-none">✓</span>}
                       </button>
+                    )}
+                    {m.category === "불변기간" && !m.checked && deadlineDday !== null && (
+                      <DdayBadge dateStr={m.date} small />
                     )}
                     <span className={`text-xs px-1.5 py-0.5 rounded border flex-shrink-0 ${MEMO_CAT_STYLE[m.category] || MEMO_CAT_STYLE["일반메모"]}`}>
                       {m.category}
@@ -264,13 +315,42 @@ export default function OverviewTab({ c, onUpdate }) {
                 </div>
                 {expandedMemos.has(m.id) && (
                   <div className="px-3 py-2.5 border-t border-slate-100 bg-slate-50">
-                    <div className="text-sm text-slate-600 whitespace-pre-wrap leading-relaxed">{m.content || <span className="text-slate-400 italic">내용 없음</span>}</div>
-                    <button onClick={(e) => { e.stopPropagation(); deleteMemo(m.id); }}
-                      className="text-xs text-red-400 hover:text-red-600 mt-2">삭제</button>
+                    {editingMemoFullId === m.id ? (
+                      <div className="space-y-2">
+                        <div className="flex gap-2">
+                          <select className="input-sm" style={{ width: "auto" }} value={editingMemoData.category}
+                            onChange={e => setEditingMemoData(p => ({ ...p, category: e.target.value }))}>
+                            {MEMO_CATEGORIES.map(cat => <option key={cat}>{cat}</option>)}
+                          </select>
+                          <input className="input-sm flex-1" placeholder="제목 *" value={editingMemoData.title}
+                            onChange={e => setEditingMemoData(p => ({ ...p, title: e.target.value }))} />
+                        </div>
+                        <textarea className="input-sm w-full resize-none" rows={4}
+                          value={editingMemoData.content}
+                          onChange={e => setEditingMemoData(p => ({ ...p, content: e.target.value }))} />
+                        <div className="flex justify-end gap-2">
+                          <button onClick={() => setEditingMemoFullId(null)}
+                            className="text-xs text-slate-400 hover:text-slate-600 px-2 py-1">취소</button>
+                          <button onClick={() => saveMemoFull(m.id)}
+                            className="btn-primary text-xs px-3 py-1">저장</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="text-sm text-slate-600 whitespace-pre-wrap leading-relaxed">{m.content || <span className="text-slate-400 italic">내용 없음</span>}</div>
+                        <div className="flex gap-3 mt-2">
+                          <button onClick={(e) => { e.stopPropagation(); startEditMemo(m); }}
+                            className="text-xs text-indigo-400 hover:text-indigo-600">수정</button>
+                          <button onClick={(e) => { e.stopPropagation(); deleteMemo(m.id); }}
+                            className="text-xs text-red-400 hover:text-red-600">삭제</button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
-            ))}
+            );
+            })}
           </div>
         )}
 

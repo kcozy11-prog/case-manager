@@ -29,9 +29,53 @@ export default function TodosTab({ c, onUpdate }) {
     "보통": { label: "text-slate-700" },
   };
 
+  const [editingId, setEditingId] = useState(null);
+  const [editData, setEditData] = useState({ text: "", dueDate: "", priority: "보통" });
+
+  const startEdit = (t) => {
+    setEditingId(t.id);
+    setEditData({ text: t.text, dueDate: t.dueDate || "", priority: t.priority || "보통" });
+  };
+
+  const saveEdit = (t) => {
+    if (!editData.text.trim()) return;
+    onUpdate({ ...c, todos: todos.map(td => td.id === t.id ? { ...td, ...editData } : td) });
+    setEditingId(null);
+  };
+
+  const cancelEdit = () => setEditingId(null);
+
   const TodoRow = ({ t }) => {
     const p = PRIO[t.priority] || PRIO["보통"];
     const overdue = t.dueDate && dday(t.dueDate) < 0 && !t.done;
+    const isEditing = editingId === t.id;
+
+    if (isEditing) {
+      return (
+        <div className="border border-indigo-200 rounded-lg px-3 py-2.5 bg-indigo-50 space-y-2">
+          <input
+            className="input-sm w-full"
+            value={editData.text}
+            onChange={e => setEditData(p => ({ ...p, text: e.target.value }))}
+            onKeyDown={e => { if (e.key === "Enter") saveEdit(t); if (e.key === "Escape") cancelEdit(); }}
+            autoFocus
+          />
+          <div className="flex gap-2">
+            <select className="input-sm flex-1" value={editData.priority}
+              onChange={e => setEditData(p => ({ ...p, priority: e.target.value }))}>
+              <option>높음</option><option>보통</option>
+            </select>
+            <input className="input-sm flex-1" type="date" value={editData.dueDate}
+              onChange={e => setEditData(p => ({ ...p, dueDate: e.target.value }))} />
+          </div>
+          <div className="flex gap-2 justify-end">
+            <button onClick={cancelEdit} className="btn-ghost text-xs py-1 px-3">취소</button>
+            <button onClick={() => saveEdit(t)} className="btn-primary text-xs py-1 px-3">저장</button>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className={`flex items-start gap-3 rounded-lg px-3 py-2.5 border transition-all ${
         t.done ? "bg-slate-50 border-slate-100 opacity-50" : "bg-white border-slate-100 hover:border-slate-200 shadow-sm"
@@ -45,6 +89,7 @@ export default function TodosTab({ c, onUpdate }) {
         <div className="flex-1 min-w-0">
           <div className={`text-sm leading-snug ${t.done ? "line-through text-slate-400" : p.label}`}>
             {t.fromCalendar && <span className="text-blue-400 mr-1" title="캘린더에서 가져옴">📅</span>}
+            {t.fromTasks && <span className="text-indigo-400 mr-1" title="Google Tasks에서 가져옴">📋</span>}
             {t.text}
           </div>
           <div className="flex items-center gap-2 mt-0.5 flex-wrap">
@@ -56,6 +101,7 @@ export default function TodosTab({ c, onUpdate }) {
             )}
           </div>
         </div>
+        <button onClick={() => startEdit(t)} className="text-slate-300 hover:text-indigo-400 flex-shrink-0 text-xs px-1" title="수정">✎</button>
         <button onClick={() => delTodo(t.id)} className="text-slate-200 hover:text-red-400 flex-shrink-0 text-xs px-1">✕</button>
       </div>
     );

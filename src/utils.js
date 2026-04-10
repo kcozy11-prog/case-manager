@@ -25,14 +25,19 @@ export const fmtDate = (s) => s ? s.replace(/-/g, ".") : "—";
 export const fmtMoney = (n) => n ? Number(n).toLocaleString() + "원" : "—";
 
 // ── 상수 ──────────────────────────────────────────────────────────────────────
-export const TYPES = ["전체", "민사", "형사(고소)", "형사(피의)", "형사(재판)", "자문"];
+export const TYPES = ["전체", "민사", "가사", "지급명령", "강제집행", "행정", "형사(고소)", "형사(피의)", "형사(재판)", "학교폭력", "자문"];
 export const STATUSES = ["전체", "진행중", "종결"];
 
 export const TYPE_STYLE = {
   "민사":       { dot: "#6366F1", badge: "bg-indigo-50 text-indigo-700 border-indigo-200" },
+  "가사":       { dot: "#EC4899", badge: "bg-pink-50 text-pink-700 border-pink-200" },
+  "지급명령":   { dot: "#0EA5E9", badge: "bg-sky-50 text-sky-700 border-sky-200" },
+  "강제집행":   { dot: "#F97316", badge: "bg-orange-50 text-orange-700 border-orange-200" },
+  "행정":       { dot: "#14B8A6", badge: "bg-teal-50 text-teal-700 border-teal-200" },
   "형사(고소)": { dot: "#F59E0B", badge: "bg-amber-50 text-amber-700 border-amber-200" },
   "형사(피의)": { dot: "#EF4444", badge: "bg-red-50 text-red-700 border-red-200" },
   "형사(재판)": { dot: "#8B5CF6", badge: "bg-violet-50 text-violet-700 border-violet-200" },
+  "학교폭력":   { dot: "#D946EF", badge: "bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200" },
   "자문":       { dot: "#10B981", badge: "bg-emerald-50 text-emerald-700 border-emerald-200" },
 };
 

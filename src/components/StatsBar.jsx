@@ -24,10 +24,10 @@ export default function StatsBar({ cases, onSelectCase }) {
     (c.todos || []).filter(t => !t.done && !t.fromCalendar).map(t => ({ ...t, caseId: c.id, caseTitle: c.title }))
   );
 
-  // 불변기간 미체크 항목
+  // 불변기간 미체크 항목 (마감일 임박순 정렬)
   const uncheckedDeadlines = cases.filter(c => c.status === "진행중").flatMap(c =>
     (c.memos || []).filter(m => m.category === "불변기간" && !m.checked).map(m => ({ ...m, caseId: c.id, caseTitle: c.title }))
-  );
+  ).sort((a, b) => new Date(a.date) - new Date(b.date));
 
   const active = cases.filter(c => c.status === "진행중").length;
 

@@ -11,8 +11,9 @@ import OverviewTab from "./components/OverviewTab";
 import TodosTab from "./components/TodosTab";
 import AiParseModal from "./components/AiParseModal";
 import CaseFormModal from "./components/CaseFormModal";
-import { fetchCalendarEvents, syncEventsWithCases } from "./calendarSync";
-import { migrateLegacyData } from "./migrateLegacy";
+import { fetchCalendarEvents, syncEventsWithCases, fetchWorkCalendarEvents, syncWorkEventsWithCases, inferCaseType, fetchWorkTasks, matchTasksToCases } from "./calendarSync";
+import UnmatchedTasksModal from "./components/UnmatchedTasksModal";
+import { migrateLegacyData, exportToGoogleSheet } from "./migrateLegacy";
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -30,6 +31,9 @@ export default function App() {
   const [googleToken, setGoogleToken] = useState(() => sessionStorage.getItem("googleToken"));
   const [calSyncing, setCalSyncing] = useState(false);
   const [calResult, setCalResult] = useState(null);
+  const [taskSyncing, setTaskSyncing] = useState(false);
+  const [taskResult, setTaskResult] = useState(null);
+  const [unmatchedTasks, setUnmatchedTasks] = useState(null); // null or array
 
   // Auth 상태 감지
   useEffect(() => {
@@ -84,6 +88,29 @@ export default function App() {
       const cleaned = { ...c, todos: (c.todos || []).filter(t => !t.fromCalendar) };
       setDoc(doc(db, "users", user.uid, "cases", c.id), cleaned);
     });
+  }, [user, cases]);
+
+  // 사건분류 자동 재분류 (1회 마이그레이션)
+  const typeReclassified = useRef(false);
+  useEffect(() => {
+    if (!user || cases.length === 0 || typeReclassified.current) return;
+    if (localStorage.getItem("typeReclassified_v1")) { typeReclassified.current = true; return; }
+    typeReclassified.current = true;
+    localStorage.setItem("typeReclassified_v1", "1");
+
+    const dirty = [];
+    for (const c of cases) {
+      const newType = inferCaseType(c.caseNumber, c.court, c.title);
+      // 민사로 분류된 것 중 새 카테고리에 해당하는 건만 변경
+      if (c.type === "민사" && newType !== "민사") {
+        dirty.push({ ...c, type: newType });
+      }
+    }
+    dirty.forEach(c => {
+      setDoc(doc(db, "users", user.uid, "cases", c.id), c);
+      console.log(`[사건분류] "${c.title}" 민사 → ${c.type}`);
+    });
+    if (dirty.length > 0) console.log(`[사건분류] ${dirty.length}건 재분류 완료`);
   }, [user, cases]);
 
   // 동적 타이틀
@@ -199,15 +226,92 @@ export default function App() {
       }
       if (!data?.items) { setCalResult({ error: "캘린더 데이터를 가져올 수 없습니다." }); return; }
 
-      const { updates, newTodoCount, newHearingCount } = syncEventsWithCases(data.items, cases);
+      const { updates, newTodoCount, newHearingCount, newCaseCount, skippedCount } = syncEventsWithCases(data.items, cases);
       for (const [, uc] of updates) await saveCase(uc);
 
-      setCalResult({ count: newTodoCount, hearings: newHearingCount || 0, total: data.items.length });
+      // 회사업무 캘린더 → 공식결과메모
+      const mergedCases = cases.map(c => updates.has(c.id) ? updates.get(c.id) : c);
+      const workEvents = await fetchWorkCalendarEvents(token);
+      const workResult = syncWorkEventsWithCases(workEvents, mergedCases);
+      for (const [, uc] of workResult.updates) await saveCase(uc);
+
+      setCalResult({ hearings: newHearingCount || 0, newCases: newCaseCount || 0, memos: workResult.newMemoCount || 0, total: data.items.length, skipped: skippedCount || 0 });
       setTimeout(() => setCalResult(null), 4000);
     } catch (e) {
       setCalResult({ error: e.message });
     } finally { setCalSyncing(false); }
   }, [googleToken, cases, saveCase, refreshGoogleToken]);
+
+  // ── Google Tasks 동기화 ────────────────────────────────────────────────────
+  const syncTasks = useCallback(async () => {
+    setTaskSyncing(true); setTaskResult(null);
+    try {
+      let token = googleToken;
+      let tasks = token ? await fetchWorkTasks(token) : null;
+      if (tasks === null) {
+        token = await refreshGoogleToken();
+        if (!token) { setTaskResult({ error: "Google 인증이 필요합니다." }); return; }
+        tasks = await fetchWorkTasks(token);
+      }
+      if (tasks === null) { setTaskResult({ error: "Google Tasks 데이터를 가져올 수 없습니다." }); return; }
+
+      const { matched, unmatched } = matchTasksToCases(tasks, cases);
+
+      // 자동 매칭된 것들을 해당 사건 todos에 추가 (중복 방지: calendarTaskId)
+      let addedCount = 0;
+      const updatedCases = new Map();
+      for (const { task, caseObj } of matched) {
+        const ref = updatedCases.get(caseObj.id) || { ...caseObj, todos: [...(caseObj.todos || [])] };
+        const alreadyAdded = ref.todos.some(t => t.calendarTaskId === task.id);
+        if (!alreadyAdded) {
+          const dueDate = task.due ? task.due.split("T")[0] : "";
+          ref.todos = [...ref.todos, {
+            id: Date.now() + Math.floor(Math.random() * 10000),
+            text: task.title,
+            priority: "보통",
+            dueDate,
+            done: false,
+            calendarTaskId: task.id,
+            fromTasks: true,
+          }];
+          addedCount++;
+        }
+        updatedCases.set(caseObj.id, ref);
+      }
+      for (const [, uc] of updatedCases) await saveCase(uc);
+
+      // 미매칭 태스크 모달 표시
+      if (unmatched.length > 0) {
+        setUnmatchedTasks(unmatched);
+      }
+
+      setTaskResult({ added: addedCount, unmatched: unmatched.length, total: tasks.length });
+      setTimeout(() => setTaskResult(null), 4000);
+    } catch (e) {
+      setTaskResult({ error: e.message });
+    } finally { setTaskSyncing(false); }
+  }, [googleToken, cases, saveCase, refreshGoogleToken]);
+
+  // 미매칭 태스크를 특정 사건에 수동 추가
+  const addUnmatchedTaskToCase = useCallback(async (task, caseObj) => {
+    const todos = caseObj.todos || [];
+    const alreadyAdded = todos.some(t => t.calendarTaskId === task.id);
+    if (alreadyAdded) return;
+    const dueDate = task.due ? task.due.split("T")[0] : "";
+    const updated = {
+      ...caseObj,
+      todos: [...todos, {
+        id: Date.now() + Math.floor(Math.random() * 10000),
+        text: task.title,
+        priority: "보통",
+        dueDate,
+        done: false,
+        calendarTaskId: task.id,
+        fromTasks: true,
+      }],
+    };
+    await saveCase(updated);
+  }, [saveCase]);
 
   const runMigration = useCallback(async () => {
     if (!user) return;
@@ -232,6 +336,30 @@ export default function App() {
       }
     }
   }, [user, googleToken, refreshGoogleToken]);
+
+  const runExport = useCallback(async () => {
+    if (!user || cases.length === 0) return;
+    let token = googleToken;
+    if (!token) {
+      token = await refreshGoogleToken();
+      if (!token) { alert("Google 인증이 필요합니다."); return; }
+    }
+    try {
+      let url = await exportToGoogleSheet(token, cases);
+      if (!url) {
+        // 기존 토큰에 쓰기 권한 없음 → 새 권한으로 재인증
+        provider.setCustomParameters({ prompt: "consent" });
+        token = await refreshGoogleToken();
+        provider.setCustomParameters({});
+        if (!token) { alert("Google 인증 실패."); return; }
+        url = await exportToGoogleSheet(token, cases);
+      }
+      if (url) window.open(url, "_blank");
+      else alert("내보내기 실패. 로그아웃 후 다시 로그인해주세요.");
+    } catch (e) {
+      alert("내보내기 오류: " + e.message);
+    }
+  }, [user, cases, googleToken, refreshGoogleToken]);
 
   const handleToken = useCallback((t) => {
     sessionStorage.setItem("googleToken", t); setGoogleToken(t);
@@ -288,11 +416,19 @@ export default function App() {
           <div className="flex items-center gap-2">
             <button onClick={runMigration}
               className="flex items-center gap-1.5 text-xs text-amber-300 hover:text-amber-100 border border-amber-600 hover:border-amber-400 px-3 py-1.5 rounded-lg transition-colors">
-              <span>📥</span> <span className="hidden sm:inline">데이터 가져오기</span>
+              <span>📥</span> <span className="hidden sm:inline">가져오기</span>
+            </button>
+            <button onClick={runExport}
+              className="flex items-center gap-1.5 text-xs text-emerald-300 hover:text-emerald-100 border border-emerald-600 hover:border-emerald-400 px-3 py-1.5 rounded-lg transition-colors">
+              <span>📤</span> <span className="hidden sm:inline">내보내기</span>
             </button>
             <button onClick={syncCalendar} disabled={calSyncing}
               className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50">
               <span>📅</span> <span className="hidden sm:inline">{calSyncing ? "동기화 중…" : "캘린더"}</span>
+            </button>
+            <button onClick={syncTasks} disabled={taskSyncing}
+              className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50">
+              <span>📋</span> <span className="hidden sm:inline">{taskSyncing ? "동기화 중…" : "할 일"}</span>
             </button>
             <button onClick={() => setShowAI(true)}
               className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors">
@@ -303,6 +439,7 @@ export default function App() {
               <span>+</span> <span className="hidden sm:inline">새 사건</span>
             </button>
             <div className="flex items-center gap-2 ml-2 pl-2 border-l border-slate-600">
+              <span className="text-slate-500 text-[10px] hidden sm:inline" title={`빌드: ${__BUILD_TIME__}`}>v{__BUILD_TIME__}</span>
               <span className="text-slate-300 text-xs hidden sm:inline">{user.displayName}</span>
               <button onClick={() => { sessionStorage.removeItem("googleToken"); setGoogleToken(null); signOut(auth); }}
                 className="text-xs text-slate-400 hover:text-white border border-slate-600 hover:border-slate-400 px-2.5 py-1.5 rounded-lg transition-colors">
@@ -317,7 +454,16 @@ export default function App() {
           <div className={`text-xs px-4 py-1.5 text-center font-medium ${
             calResult.error ? "bg-red-500 text-white" : "bg-emerald-500 text-white"
           }`}>
-            {calResult.error || `LBOX 캘린더 ${calResult.total}건 확인 — 기일 ${calResult.hearings}건 추가 (기일메모·진행경과 자동 기록)`}
+            {calResult.error || `LBOX ${calResult.total}건 — 기일 ${calResult.hearings}건${calResult.newCases ? `, 신규사건 ${calResult.newCases}건` : ""}${calResult.memos ? `, 업무메모 ${calResult.memos}건` : ""}${calResult.skipped ? ` · 미매칭 ${calResult.skipped}건` : ""}`}
+          </div>
+        )}
+
+        {/* Tasks 동기화 결과 알림 */}
+        {taskResult && (
+          <div className={`text-xs px-4 py-1.5 text-center font-medium ${
+            taskResult.error ? "bg-red-500 text-white" : "bg-indigo-500 text-white"
+          }`}>
+            {taskResult.error || `할 일 ${taskResult.total}건 — 자동추가 ${taskResult.added}건${taskResult.unmatched ? ` · 미매칭 ${taskResult.unmatched}건` : ""}`}
           </div>
         )}
 
@@ -460,6 +606,14 @@ export default function App() {
       </div>
 
       {showAI && <AiParseModal cases={cases} onClose={() => setShowAI(false)} onApply={applyAI} />}
+      {unmatchedTasks && (
+        <UnmatchedTasksModal
+          tasks={unmatchedTasks}
+          cases={cases}
+          onAddToCase={addUnmatchedTaskToCase}
+          onClose={() => setUnmatchedTasks(null)}
+        />
+      )}
       {showForm && (
         <CaseFormModal
           initial={editCase}
