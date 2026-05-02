@@ -1,41 +1,35 @@
 import { useState } from "react";
 import { MEMO_CAT_STYLE } from "../utils";
+import {
+  AI_PARSE_PROVIDERS,
+  AI_PARSE_STORAGE,
+  buildAiParsePrompt,
+  buildAiParseRequest,
+  extractAiResponseText,
+  extractJsonObject,
+  findMatchingCase,
+  getAiProviderMeta,
+  normalizeAiProviderConfig,
+} from "../aiParse";
 
-// ── 3글자 이상 매칭으로 사건 자동 탐색 ────────────────────────────────────────
-const normalize = (s) => s.replace(/[\s()㈜㈔·\-_.,'"#:]/g, "");
-
-function findMatchingCase(identifiers, cases) {
-  if (!identifiers?.length || !cases.length) return null;
-
-  // 1차: 사건번호 정확 매칭
-  for (const c of cases) {
-    if (!c.caseNumber || c.caseNumber === "—") continue;
-    const cn = normalize(c.caseNumber);
-    for (const id of identifiers) {
-      const ci = normalize(id);
-      if (ci.length >= 4 && (cn.includes(ci) || ci.includes(cn))) return c;
-    }
+function loadSavedConfig() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(AI_PARSE_STORAGE) || "{}");
+    return normalizeAiProviderConfig(saved);
+  } catch {
+    return normalizeAiProviderConfig();
   }
-
-  // 2차: 제목/의뢰인/상대방 3글자 이상 매칭
-  for (const c of cases) {
-    const terms = [c.title, c.client, c.opponent].filter(Boolean);
-    for (const id of identifiers) {
-      const ci = normalize(id);
-      if (ci.length < 3) continue;
-      for (const term of terms) {
-        const ct = normalize(term);
-        if (ct.length < 3) continue;
-        for (let i = 0; i <= ci.length - 3; i++) {
-          if (ct.includes(ci.substring(i, i + 3))) return c;
-        }
-      }
-    }
-  }
-  return null;
 }
 
-const GEMINI_KEY_STORAGE = "caseManager_geminiKey";
+function saveConfig(config) {
+  const normalized = normalizeAiProviderConfig(config);
+  if (normalized.apiKey) {
+    localStorage.setItem(AI_PARSE_STORAGE, JSON.stringify(normalized));
+  } else {
+    localStorage.removeItem(AI_PARSE_STORAGE);
+  }
+  return normalized;
+}
 
 // ── AI 파싱 모달 ──────────────────────────────────────────────────────────────
 export default function AiParseModal({ cases, onClose, onApply }) {
@@ -45,89 +39,68 @@ export default function AiParseModal({ cases, onClose, onApply }) {
   const [matchedCase, setMatchedCase] = useState(null);
   const [manualCaseId, setManualCaseId] = useState("");
   const [error, setError] = useState("");
-  const [apiKey, setApiKey] = useState(localStorage.getItem(GEMINI_KEY_STORAGE) || "");
-  const [showKeyInput, setShowKeyInput] = useState(!localStorage.getItem(GEMINI_KEY_STORAGE));
+  const [config, setConfig] = useState(loadSavedConfig);
+  const [showKeyInput, setShowKeyInput] = useState(!config.apiKey);
 
-  const saveKey = (key) => {
-    setApiKey(key);
-    if (key.trim()) localStorage.setItem(GEMINI_KEY_STORAGE, key.trim());
-    else localStorage.removeItem(GEMINI_KEY_STORAGE);
+  const providerMeta = getAiProviderMeta(config.provider);
+
+  const updateConfig = (next) => {
+    const normalized = saveConfig({ ...config, ...next });
+    setConfig(normalized);
+  };
+
+  const changeProvider = (provider) => {
+    const meta = getAiProviderMeta(provider);
+    const normalized = saveConfig({ provider, model: meta.defaultModel, apiKey: "" });
+    setConfig(normalized);
+    setShowKeyInput(true);
   };
 
   const parse = async () => {
     if (!text.trim()) return;
-    if (!apiKey.trim()) {
-      setError("Gemini API 키를 입력해주세요.");
+
+    const normalized = normalizeAiProviderConfig(config);
+    if (!normalized.apiKey) {
+      setError(`${providerMeta.apiKeyLabel}를 입력해주세요.`);
       setShowKeyInput(true);
       return;
     }
-    setLoading(true); setResult(null); setError(""); setMatchedCase(null); setManualCaseId("");
+
+    setLoading(true);
+    setResult(null);
+    setError("");
+    setMatchedCase(null);
+    setManualCaseId("");
+
     try {
-      const prompt = `다음 텍스트를 분석하여 법률 사건 관련 정보를 추출해 주세요.
-이 텍스트는 카카오톡 메시지, 법원 알림, 엘박스 알림, 문자 메시지 등에서 복사한 것입니다.
-JSON 형식으로만 응답하고, 다른 텍스트는 포함하지 마세요.
-
-추출 항목:
-- caseIdentifiers: 사건을 특정할 수 있는 키워드 배열 (사건명 키워드, 당사자 이름, 사건번호 등에서 추출. 예: ["김민준", "2026가합12345", "분양대금"])
-- memoCategory: 메모 카테고리 (아래 중 택1)
-  - "기일메모": 기일 지정, 변경, 결과 관련
-  - "공식결과메모": 서면 제출, 결정문, 판결, 송달, 공식 절차 진행 관련
-  - "의뢰인요청": 의뢰인 연락, 요청, 보고 관련
-  - "일반메모": 상대방 연락, 기타 업무 등 그 외
-- memoTitle: 메모 제목 (15자 이내, 핵심 요약. 예: "변론기일 지정", "피고 준비서면 제출", "합의 의사 전달")
-- memoContent: 메모 형식으로 요점만 간결하게 정리 (불필요한 인사말, 수식어 제거. 핵심 사실만 "• " 글머리 기호로 나열. 예: "• 변론기일 2026.4.15. 14:00 지정\n• 장소: 서울중앙지법 301호\n• 준비서면 기한: 2026.4.8.")
-- hearingDate: 기일 날짜 YYYY-MM-DD (기일 관련 정보가 있을 때만, 없으면 null)
-- hearingTime: 기일 시간 HH:MM (시간 정보가 있을 때만, 없으면 null)
-- hearingType: 기일 종류 (변론기일/공판기일/조사기일 등, 없으면 null)
-- timelineContent: 진행 경과로 기록할 내용 한 줄 요약 (없으면 null)
-
-텍스트:
-${text}`;
-
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey.trim()}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-        }
-      );
+      const prompt = buildAiParsePrompt(text);
+      const { url, options } = buildAiParseRequest(normalized, prompt);
+      const res = await fetch(url, options);
+      const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        if (res.status === 400 || res.status === 403) {
-          setError("API 키가 유효하지 않습니다. 키를 확인해주세요.");
+        const message = data.error?.message || data.error || data.message || "알 수 없는 오류";
+        if (res.status === 400 || res.status === 401 || res.status === 403) {
+          setError(`API 키 또는 모델 설정을 확인해주세요. (${message})`);
           setShowKeyInput(true);
         } else {
-          setError(`API 오류 (${res.status}): ${errData.error?.message || "알 수 없는 오류"}`);
+          setError(`AI API 오류 (${res.status}): ${message}`);
         }
         return;
       }
 
-      const data = await res.json();
-      const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      const cleaned = raw.replace(/```json|```/g, "").trim();
-
-      let parsed;
-      try {
-        parsed = JSON.parse(cleaned);
-      } catch {
-        setError("AI 응답을 파싱할 수 없습니다. 다시 시도해주세요.");
-        return;
-      }
-
+      const raw = extractAiResponseText(normalized.provider, data);
+      const parsed = extractJsonObject(raw);
       setResult(parsed);
-      // API 키 저장 (성공 시)
-      localStorage.setItem(GEMINI_KEY_STORAGE, apiKey.trim());
+      saveConfig(normalized);
 
-      // 자동 매칭
       const found = findMatchingCase(parsed.caseIdentifiers, cases);
       if (found) {
         setMatchedCase(found);
         setManualCaseId(found.id);
       }
     } catch (e) {
-      setError("네트워크 오류: " + e.message);
+      setError(e.message || "AI 파싱 중 오류가 발생했습니다.");
     } finally {
       setLoading(false);
     }
@@ -153,24 +126,47 @@ ${text}`;
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>
+
         <div className="p-5 space-y-4 max-h-[80vh] overflow-y-auto">
-          {/* API 키 설정 */}
+          {/* AI 설정 */}
           <div className="border border-slate-200 rounded-lg overflow-hidden">
             <button onClick={() => setShowKeyInput(p => !p)}
               className="w-full flex items-center justify-between px-3 py-2 text-xs text-slate-500 hover:bg-slate-50">
-              <span>🔑 Gemini API 키 {apiKey ? "✓ 설정됨" : "⚠ 미설정"}</span>
+              <span>🔑 {providerMeta.label} {config.apiKey ? "✓ 설정됨" : "⚠ 미설정"}</span>
               <span>{showKeyInput ? "▲" : "▼"}</span>
             </button>
             {showKeyInput && (
-              <div className="px-3 pb-3 space-y-1.5">
+              <div className="px-3 pb-3 space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-[11px] text-slate-500 space-y-1">
+                    <span>AI 제공자</span>
+                    <select className="input-sm" value={config.provider} onChange={e => changeProvider(e.target.value)}>
+                      {AI_PARSE_PROVIDERS.map(p => (
+                        <option key={p.value} value={p.value}>{p.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-[11px] text-slate-500 space-y-1">
+                    <span>모델</span>
+                    <input
+                      className="input-sm"
+                      value={config.model}
+                      onChange={e => updateConfig({ model: e.target.value })}
+                      placeholder={providerMeta.defaultModel}
+                    />
+                  </label>
+                </div>
                 <input
                   className="w-full border border-slate-200 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-300"
-                  type="password" placeholder="Gemini API 키 입력"
-                  value={apiKey} onChange={e => saveKey(e.target.value)}
+                  type="password"
+                  placeholder={providerMeta.apiKeyLabel}
+                  value={config.apiKey}
+                  onChange={e => updateConfig({ apiKey: e.target.value })}
                 />
-                <div className="text-[11px] text-slate-400">
-                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener"
-                    className="text-indigo-500 hover:underline">Google AI Studio</a>에서 무료 API 키를 발급받으세요
+                <div className="text-[11px] text-slate-400 flex justify-between gap-3">
+                  <span>키는 이 브라우저에만 저장됩니다.</span>
+                  <a href={providerMeta.helpUrl} target="_blank" rel="noopener"
+                    className="text-indigo-500 hover:underline flex-shrink-0">API 키 발급</a>
                 </div>
               </div>
             )}
@@ -181,11 +177,11 @@ ${text}`;
             rows={5} placeholder={"카카오톡 대화, 법원 알림, 엘박스 메시지 등을 붙여넣으세요...\n\n예) \"아파트 분양대금 반환 청구 사건 변론기일이 2026.4.15. 14:00 서울중앙지방법원 301호에서 진행됩니다\""}
             value={text} onChange={e => setText(e.target.value)}
           />
+
           {error && <div className="text-xs text-red-500 bg-red-50 px-3 py-2 rounded">{error}</div>}
 
           {result && (
             <div className="bg-slate-50 rounded-lg p-4 border border-slate-200 space-y-3">
-              {/* 매칭 사건 선택 */}
               <div>
                 <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1.5">대상 사건</div>
                 <select className="input-sm w-full" value={manualCaseId}
@@ -203,11 +199,10 @@ ${text}`;
                     <span>✓</span> <strong>{effectiveCase.title}</strong> ({effectiveCase.client})에 저장됩니다
                   </div>
                 ) : (
-                  <div className="text-xs text-amber-600 mt-1">사건을 선택해주세요</div>
+                  <div className="text-xs text-amber-600 mt-1">사건을 선택하지 않으면 새 사건 등록 폼으로 열립니다</div>
                 )}
               </div>
 
-              {/* 메모 미리보기 */}
               <div>
                 <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1.5">저장될 메모</div>
                 <div className="bg-white rounded-lg border border-slate-200 p-3">
@@ -221,51 +216,36 @@ ${text}`;
                 </div>
               </div>
 
-              {/* 기일/경과 추가 정보 */}
               {(result.hearingDate || result.timelineContent) && (
-                <div>
-                  <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1.5">함께 추가</div>
-                  <div className="space-y-1">
-                    {result.hearingDate && (
-                      <div className="text-xs text-slate-600 bg-white rounded-lg px-3 py-2 border border-slate-100 flex items-center gap-2">
-                        <span className="text-indigo-400">📅</span>
-                        <span>기일 추가: <strong>{result.hearingDate}</strong>{result.hearingTime && ` ${result.hearingTime}`} {result.hearingType || ""}</span>
-                      </div>
-                    )}
-                    {result.timelineContent && (
-                      <div className="text-xs text-slate-600 bg-white rounded-lg px-3 py-2 border border-slate-100 flex items-center gap-2">
-                        <span className="text-indigo-400">📋</span>
-                        <span>진행경과: {result.timelineContent}</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* AI 추출 키워드 (디버그용, 접기) */}
-              {result.caseIdentifiers?.length > 0 && (
-                <div className="text-xs text-slate-400">
-                  매칭 키워드: {result.caseIdentifiers.join(", ")}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                  {result.hearingDate && (
+                    <div className="bg-white border border-slate-200 rounded-lg p-2">
+                      <div className="text-slate-400 mb-0.5">기일</div>
+                      <div className="text-slate-700 font-medium">{result.hearingDate} {result.hearingTime || ""}</div>
+                      <div className="text-slate-500">{result.hearingType || "기일"}</div>
+                    </div>
+                  )}
+                  {result.timelineContent && (
+                    <div className="bg-white border border-slate-200 rounded-lg p-2">
+                      <div className="text-slate-400 mb-0.5">진행 경과</div>
+                      <div className="text-slate-700">{result.timelineContent}</div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           )}
 
-          <div className="flex gap-2 justify-end">
-            <button onClick={onClose} className="btn-ghost">취소</button>
-            {!result ? (
-              <button onClick={parse} disabled={loading || !text.trim()} className="btn-primary">
-                {loading ? "분석 중…" : "파싱하기"}
+          <div className="flex justify-between gap-2 pt-1">
+            <button className="btn-ghost" onClick={onClose}>취소</button>
+            <div className="flex gap-2">
+              <button className="btn-ghost" onClick={parse} disabled={loading || !text.trim()}>
+                {loading ? "분석 중…" : "AI 분석"}
               </button>
-            ) : (
-              <>
-                <button onClick={() => { setResult(null); setMatchedCase(null); setManualCaseId(""); }}
-                  className="btn-ghost text-xs">다시 입력</button>
-                <button onClick={apply} disabled={!effectiveCase} className="btn-primary">
-                  메모 저장
-                </button>
-              </>
-            )}
+              <button className="btn-primary" onClick={apply} disabled={!result}>
+                저장 적용
+              </button>
+            </div>
           </div>
         </div>
       </div>
