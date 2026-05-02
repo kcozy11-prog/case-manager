@@ -1,30 +1,13 @@
-const AI_PARSE_DEFAULTS = {
-  openai: {
-    label: "OpenAI",
-    apiKeyLabel: "OpenAI API 키",
-    defaultModel: "gpt-4o-mini",
-    helpUrl: "https://platform.openai.com/api-keys",
-  },
-  openrouter: {
-    label: "OpenRouter",
-    apiKeyLabel: "OpenRouter API 키",
-    defaultModel: "openai/gpt-4o-mini",
-    helpUrl: "https://openrouter.ai/keys",
-  },
-  anthropic: {
-    label: "Claude (Anthropic)",
-    apiKeyLabel: "Anthropic API 키",
-    defaultModel: "claude-3-5-haiku-latest",
-    helpUrl: "https://console.anthropic.com/settings/keys",
-  },
+const GEMINI_DEFAULT = {
+  value: "gemini",
+  label: "Gemini",
+  apiKeyLabel: "Gemini API 키",
+  defaultModel: "gemini-2.5-flash",
+  helpUrl: "https://aistudio.google.com/apikey",
 };
 
-export const AI_PARSE_PROVIDERS = Object.entries(AI_PARSE_DEFAULTS).map(([value, config]) => ({
-  value,
-  ...config,
-}));
-
-export const AI_PARSE_STORAGE = "caseManager_aiParseConfig";
+export const AI_PARSE_PROVIDERS = [GEMINI_DEFAULT];
+export const AI_PARSE_STORAGE = "caseManager_geminiKey";
 
 export function normalizeTextForCaseMatching(s = "") {
   return String(s).replace(/[\s()㈜㈔·\-_.,'"#:]/g, "");
@@ -84,78 +67,43 @@ ${text}`;
 }
 
 export function normalizeAiProviderConfig(config = {}) {
-  const provider = AI_PARSE_DEFAULTS[config.provider] ? config.provider : "openai";
-  const defaults = AI_PARSE_DEFAULTS[provider];
+  const source = typeof config === "string" ? { apiKey: config } : config;
+  const model = String(source.model || GEMINI_DEFAULT.defaultModel).trim() || GEMINI_DEFAULT.defaultModel;
   return {
-    provider,
-    apiKey: String(config.apiKey || "").trim(),
-    model: String(config.model || defaults.defaultModel).trim(),
+    provider: "gemini",
+    apiKey: String(source.apiKey || "").trim(),
+    model,
   };
 }
 
-export function getAiProviderMeta(provider) {
-  return AI_PARSE_DEFAULTS[provider] || AI_PARSE_DEFAULTS.openai;
+export function getAiProviderMeta() {
+  return GEMINI_DEFAULT;
 }
 
 export function buildAiParseRequest(config, prompt) {
   const normalized = normalizeAiProviderConfig(config);
-  if (!normalized.apiKey) throw new Error("AI API 키를 입력해주세요.");
-
-  if (normalized.provider === "anthropic") {
-    return {
-      url: "https://api.anthropic.com/v1/messages",
-      options: {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": normalized.apiKey,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        body: JSON.stringify({
-          model: normalized.model,
-          max_tokens: 1200,
-          temperature: 0.1,
-          messages: [{ role: "user", content: prompt }],
-        }),
-      },
-    };
-  }
-
-  const baseUrl = normalized.provider === "openrouter"
-    ? "https://openrouter.ai/api/v1/chat/completions"
-    : "https://api.openai.com/v1/chat/completions";
-
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${normalized.apiKey}`,
-  };
-
-  if (normalized.provider === "openrouter") {
-    const origin = typeof window !== "undefined" ? window.location.origin : "https://kcozy11-prog.github.io";
-    headers["HTTP-Referer"] = origin;
-    headers["X-Title"] = "Case Manager AI Parse";
-  }
+  if (!normalized.apiKey) throw new Error("Gemini API 키를 입력해주세요.");
 
   return {
-    url: baseUrl,
+    url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(normalized.model)}:generateContent?key=${encodeURIComponent(normalized.apiKey)}`,
     options: {
       method: "POST",
-      headers,
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: normalized.model,
-        temperature: 0.1,
-        messages: [{ role: "user", content: prompt }],
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: "application/json",
+        },
       }),
     },
   };
 }
 
-export function extractAiResponseText(provider, data) {
-  if (provider === "anthropic") {
-    return data?.content?.find(part => part.type === "text")?.text || data?.content?.[0]?.text || "";
-  }
-  return data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || "";
+export function extractAiResponseText(_provider, data) {
+  const payload = data === undefined ? _provider : data;
+  const parts = payload?.candidates?.[0]?.content?.parts || [];
+  return parts.map(part => part?.text || "").join("").trim();
 }
 
 export function extractJsonObject(raw) {

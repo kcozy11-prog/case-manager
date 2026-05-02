@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { MEMO_CAT_STYLE } from "../utils";
 import {
-  AI_PARSE_PROVIDERS,
   AI_PARSE_STORAGE,
   buildAiParsePrompt,
   buildAiParseRequest,
@@ -14,7 +13,17 @@ import {
 
 function loadSavedConfig() {
   try {
-    const saved = JSON.parse(localStorage.getItem(AI_PARSE_STORAGE) || "{}");
+    const saved = localStorage.getItem(AI_PARSE_STORAGE) || "";
+    if (!saved) return normalizeAiProviderConfig();
+
+    // 예전 원상복구 방식: caseManager_geminiKey에는 API 키 문자열만 저장한다.
+    // 혹시 JSON 형태로 저장된 값이 있어도 키/모델을 최대한 살려 Gemini 설정으로 정규화한다.
+    try {
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed === "object") return normalizeAiProviderConfig(parsed);
+    } catch {
+      // plain API key
+    }
     return normalizeAiProviderConfig(saved);
   } catch {
     return normalizeAiProviderConfig();
@@ -24,7 +33,7 @@ function loadSavedConfig() {
 function saveConfig(config) {
   const normalized = normalizeAiProviderConfig(config);
   if (normalized.apiKey) {
-    localStorage.setItem(AI_PARSE_STORAGE, JSON.stringify(normalized));
+    localStorage.setItem(AI_PARSE_STORAGE, normalized.apiKey);
   } else {
     localStorage.removeItem(AI_PARSE_STORAGE);
   }
@@ -42,18 +51,11 @@ export default function AiParseModal({ cases, onClose, onApply }) {
   const [config, setConfig] = useState(loadSavedConfig);
   const [showKeyInput, setShowKeyInput] = useState(!config.apiKey);
 
-  const providerMeta = getAiProviderMeta(config.provider);
+  const providerMeta = getAiProviderMeta();
 
   const updateConfig = (next) => {
     const normalized = saveConfig({ ...config, ...next });
     setConfig(normalized);
-  };
-
-  const changeProvider = (provider) => {
-    const meta = getAiProviderMeta(provider);
-    const normalized = saveConfig({ provider, model: meta.defaultModel, apiKey: "" });
-    setConfig(normalized);
-    setShowKeyInput(true);
   };
 
   const parse = async () => {
@@ -61,7 +63,7 @@ export default function AiParseModal({ cases, onClose, onApply }) {
 
     const normalized = normalizeAiProviderConfig(config);
     if (!normalized.apiKey) {
-      setError(`${providerMeta.apiKeyLabel}를 입력해주세요.`);
+      setError("Gemini API 키를 입력해주세요.");
       setShowKeyInput(true);
       return;
     }
@@ -81,10 +83,10 @@ export default function AiParseModal({ cases, onClose, onApply }) {
       if (!res.ok) {
         const message = data.error?.message || data.error || data.message || "알 수 없는 오류";
         if (res.status === 400 || res.status === 401 || res.status === 403) {
-          setError(`API 키 또는 모델 설정을 확인해주세요. (${message})`);
+          setError(`Gemini API 키 또는 모델 설정을 확인해주세요. (${message})`);
           setShowKeyInput(true);
         } else {
-          setError(`AI API 오류 (${res.status}): ${message}`);
+          setError(`Gemini API 오류 (${res.status}): ${message}`);
         }
         return;
       }
@@ -122,51 +124,32 @@ export default function AiParseModal({ cases, onClose, onApply }) {
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between" style={{ background: "#1E293B" }}>
           <div>
             <div className="text-white font-semibold">AI 파싱</div>
-            <div className="text-slate-400 text-xs">카카오톡 · 법원알림 · 엘박스 붙여넣기 → 자동 메모 저장</div>
+            <div className="text-slate-400 text-xs">카카오톡 · 법원알림 · 엘박스 붙여넣기 → Gemini 자동 메모 저장</div>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>
 
         <div className="p-5 space-y-4 max-h-[80vh] overflow-y-auto">
-          {/* AI 설정 */}
+          {/* Gemini API 키 설정 */}
           <div className="border border-slate-200 rounded-lg overflow-hidden">
             <button onClick={() => setShowKeyInput(p => !p)}
               className="w-full flex items-center justify-between px-3 py-2 text-xs text-slate-500 hover:bg-slate-50">
-              <span>🔑 {providerMeta.label} {config.apiKey ? "✓ 설정됨" : "⚠ 미설정"}</span>
+              <span>🔑 {providerMeta.apiKeyLabel} {config.apiKey ? "✓ 설정됨" : "⚠ 미설정"}</span>
               <span>{showKeyInput ? "▲" : "▼"}</span>
             </button>
             {showKeyInput && (
               <div className="px-3 pb-3 space-y-2">
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="text-[11px] text-slate-500 space-y-1">
-                    <span>AI 제공자</span>
-                    <select className="input-sm" value={config.provider} onChange={e => changeProvider(e.target.value)}>
-                      {AI_PARSE_PROVIDERS.map(p => (
-                        <option key={p.value} value={p.value}>{p.label}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="text-[11px] text-slate-500 space-y-1">
-                    <span>모델</span>
-                    <input
-                      className="input-sm"
-                      value={config.model}
-                      onChange={e => updateConfig({ model: e.target.value })}
-                      placeholder={providerMeta.defaultModel}
-                    />
-                  </label>
-                </div>
                 <input
                   className="w-full border border-slate-200 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-300"
                   type="password"
-                  placeholder={providerMeta.apiKeyLabel}
+                  placeholder="Gemini API 키 입력"
                   value={config.apiKey}
                   onChange={e => updateConfig({ apiKey: e.target.value })}
                 />
                 <div className="text-[11px] text-slate-400 flex justify-between gap-3">
-                  <span>키는 이 브라우저에만 저장됩니다.</span>
+                  <span>키는 이 브라우저에만 저장됩니다. 모델: {config.model}</span>
                   <a href={providerMeta.helpUrl} target="_blank" rel="noopener"
-                    className="text-indigo-500 hover:underline flex-shrink-0">API 키 발급</a>
+                    className="text-indigo-500 hover:underline flex-shrink-0">Google AI Studio</a>
                 </div>
               </div>
             )}
@@ -240,7 +223,7 @@ export default function AiParseModal({ cases, onClose, onApply }) {
             <button className="btn-ghost" onClick={onClose}>취소</button>
             <div className="flex gap-2">
               <button className="btn-ghost" onClick={parse} disabled={loading || !text.trim()}>
-                {loading ? "분석 중…" : "AI 분석"}
+                {loading ? "분석 중…" : "파싱하기"}
               </button>
               <button className="btn-primary" onClick={apply} disabled={!result}>
                 저장 적용

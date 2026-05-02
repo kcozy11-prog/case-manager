@@ -1,64 +1,59 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  AI_PARSE_STORAGE,
+  buildAiParsePrompt,
   buildAiParseRequest,
+  extractAiResponseText,
   extractJsonObject,
   findMatchingCase,
   normalizeAiProviderConfig,
 } from "./aiParse.js";
 
-test("OpenAI provider builds a non-Gemini chat-completions request", () => {
-  const config = normalizeAiProviderConfig({
-    provider: "openai",
-    apiKey: "sk-test",
-    model: "gpt-4o-mini",
+test("Gemini is the restored default parser provider using the legacy key storage", () => {
+  const config = normalizeAiProviderConfig({ apiKey: "  AIza-test  " });
+
+  assert.deepEqual(config, {
+    provider: "gemini",
+    apiKey: "AIza-test",
+    model: "gemini-2.5-flash",
   });
+  assert.equal(AI_PARSE_STORAGE, "caseManager_geminiKey");
+});
 
-  const request = buildAiParseRequest(config, "프롬프트");
+test("Gemini request uses the Generative Language generateContent endpoint", () => {
+  const request = buildAiParseRequest({ apiKey: "AIza test/key", model: "gemini-2.5-flash" }, "프롬프트");
 
-  assert.equal(request.url, "https://api.openai.com/v1/chat/completions");
+  assert.equal(
+    request.url,
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=AIza%20test%2Fkey",
+  );
   assert.equal(request.options.method, "POST");
-  assert.equal(request.options.headers.Authorization, "Bearer sk-test");
   assert.equal(request.options.headers["Content-Type"], "application/json");
-  assert.doesNotMatch(request.url, /gemini|generativelanguage/i);
 
   const body = JSON.parse(request.options.body);
-  assert.equal(body.model, "gpt-4o-mini");
-  assert.deepEqual(body.messages, [{ role: "user", content: "프롬프트" }]);
+  assert.deepEqual(body.contents, [{ parts: [{ text: "프롬프트" }] }]);
+  assert.equal(body.generationConfig.temperature, 0.1);
+  assert.equal(body.generationConfig.responseMimeType, "application/json");
 });
 
-test("Anthropic provider builds a non-Gemini messages request", () => {
-  const config = normalizeAiProviderConfig({
-    provider: "anthropic",
-    apiKey: "sk-ant-test",
-    model: "claude-3-5-haiku-latest",
-  });
+test("extractAiResponseText reads Gemini candidate text parts", () => {
+  const data = {
+    candidates: [
+      { content: { parts: [{ text: "{\"memoTitle\":" }, { text: "\"기일 지정\"}" }] } },
+    ],
+  };
 
-  const request = buildAiParseRequest(config, "프롬프트");
-
-  assert.equal(request.url, "https://api.anthropic.com/v1/messages");
-  assert.equal(request.options.headers["x-api-key"], "sk-ant-test");
-  assert.equal(request.options.headers["anthropic-version"], "2023-06-01");
-  assert.equal(request.options.headers["anthropic-dangerous-direct-browser-access"], "true");
-  assert.doesNotMatch(request.url, /gemini|generativelanguage/i);
-
-  const body = JSON.parse(request.options.body);
-  assert.equal(body.model, "claude-3-5-haiku-latest");
-  assert.deepEqual(body.messages, [{ role: "user", content: "프롬프트" }]);
+  assert.equal(extractAiResponseText("gemini", data), '{"memoTitle":"기일 지정"}');
 });
 
-test("OpenRouter preset uses OpenAI-compatible schema without Gemini", () => {
-  const config = normalizeAiProviderConfig({
-    provider: "openrouter",
-    apiKey: "or-test",
-    model: "anthropic/claude-3.5-haiku",
-  });
+test("buildAiParsePrompt keeps the legal extraction schema", () => {
+  const prompt = buildAiParsePrompt("변론기일 2026.5.10. 10:30");
 
-  const request = buildAiParseRequest(config, "프롬프트");
-
-  assert.equal(request.url, "https://openrouter.ai/api/v1/chat/completions");
-  assert.equal(request.options.headers.Authorization, "Bearer or-test");
-  assert.doesNotMatch(request.url, /gemini|generativelanguage/i);
+  assert.match(prompt, /caseIdentifiers/);
+  assert.match(prompt, /memoCategory/);
+  assert.match(prompt, /hearingDate/);
+  assert.match(prompt, /변론기일 2026\.5\.10\. 10:30/);
 });
 
 test("extractJsonObject handles fenced model output", () => {
