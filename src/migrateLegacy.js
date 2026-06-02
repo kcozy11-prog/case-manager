@@ -2,6 +2,7 @@
 import { db } from "./firebase";
 import { collection, doc, setDoc } from "firebase/firestore";
 import { todayStr } from "./utils";
+import { buildExportBatchUpdateData, EXPORT_SHEET_TITLES } from "./exportSheet";
 
 const SPREADSHEET_ID = "1zgH0S46N0-RobcGOM7VWhZU6ssjDxizHtKdt0wZsY-I";
 const CIVIL_RANGE = "김명진(민사)!A1:I100";
@@ -156,13 +157,7 @@ export async function exportToGoogleSheet(token, cases) {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       properties: { title: `사건관리 내보내기 ${new Date().toLocaleDateString("ko-KR")}` },
-      sheets: [
-        { properties: { title: "사건 목록" } },
-        { properties: { title: "기일" } },
-        { properties: { title: "메모" } },
-        { properties: { title: "진행경과" } },
-        { properties: { title: "할 일" } },
-      ],
+      sheets: EXPORT_SHEET_TITLES.map(title => ({ properties: { title } })),
     }),
   });
 
@@ -172,42 +167,7 @@ export async function exportToGoogleSheet(token, cases) {
   const spreadsheet = await createRes.json();
 
   // 2. 데이터 구성
-  const caseRows = [
-    ["사건명", "분류", "상태", "의뢰인", "연락처", "상대방", "관할기관", "사건번호", "담당자", "소속", "수임일", "착수금", "성공보수", "성공보수금액"],
-    ...cases.map(c => [
-      c.title, c.type, c.status, c.client, c.clientContact, c.opponent,
-      c.court, c.caseNumber, c.manager, c.managerOrg,
-      c.retainer?.date || "", c.retainer?.amount || "", c.retainer?.successFee || "", c.retainer?.successFeeAmount || "",
-    ]),
-  ];
-
-  const hearingRows = [
-    ["사건명", "날짜", "시간", "유형", "결과/장소", "캘린더"],
-    ...cases.flatMap(c =>
-      (c.hearings || []).map(h => [c.title, h.date, h.time || "", h.type, h.result || "", h.fromCalendar ? "LBOX" : ""])
-    ),
-  ];
-
-  const memoRows = [
-    ["사건명", "카테고리", "제목", "내용", "날짜", "체크"],
-    ...cases.flatMap(c =>
-      (c.memos || []).map(m => [c.title, m.category, m.title, m.content || "", m.date, m.checked ? "Y" : ""])
-    ),
-  ];
-
-  const timelineRows = [
-    ["사건명", "날짜", "내용"],
-    ...cases.flatMap(c =>
-      (c.timeline || []).map(t => [c.title, t.date, t.content])
-    ),
-  ];
-
-  const todoRows = [
-    ["사건명", "할일", "완료", "우선순위", "기한"],
-    ...cases.flatMap(c =>
-      (c.todos || []).map(t => [c.title, t.text, t.done ? "Y" : "", t.priority || "", t.dueDate || ""])
-    ),
-  ];
+  const data = buildExportBatchUpdateData(cases);
 
   // 3. 일괄 입력
   const writeRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheet.spreadsheetId}/values:batchUpdate`, {
@@ -215,13 +175,7 @@ export async function exportToGoogleSheet(token, cases) {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       valueInputOption: "RAW",
-      data: [
-        { range: "사건 목록!A1", values: caseRows },
-        { range: "기일!A1", values: hearingRows },
-        { range: "메모!A1", values: memoRows },
-        { range: "진행경과!A1", values: timelineRows },
-        { range: "할 일!A1", values: todoRows },
-      ],
+      data,
     }),
   });
 
