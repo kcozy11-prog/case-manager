@@ -3,6 +3,7 @@ import { db } from "./firebase";
 import { collection, doc, setDoc } from "firebase/firestore";
 import { todayStr } from "./utils";
 import { buildExportBatchUpdateData, EXPORT_SHEET_TITLES } from "./exportSheet";
+import { responseErrorMessage } from "./googleApiError";
 
 const SPREADSHEET_ID = "1zgH0S46N0-RobcGOM7VWhZU6ssjDxizHtKdt0wZsY-I";
 const CIVIL_RANGE = "김명진(민사)!A1:I100";
@@ -162,7 +163,7 @@ export async function exportToGoogleSheet(token, cases) {
   });
 
   if (createRes.status === 401 || createRes.status === 403) return null;
-  if (!createRes.ok) throw new Error(`시트 생성 실패: ${createRes.status}`);
+  if (!createRes.ok) throw new Error(await responseErrorMessage("시트 생성 실패", createRes));
 
   const spreadsheet = await createRes.json();
 
@@ -179,7 +180,7 @@ export async function exportToGoogleSheet(token, cases) {
     }),
   });
 
-  if (!writeRes.ok) throw new Error(`데이터 입력 실패: ${writeRes.status}`);
+  if (!writeRes.ok) throw new Error(await responseErrorMessage("데이터 입력 실패", writeRes));
 
   return spreadsheet.spreadsheetUrl;
 }

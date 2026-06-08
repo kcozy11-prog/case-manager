@@ -40,3 +40,41 @@ test("buildExportBatchUpdateData quotes every sheet name in A1 ranges", () => {
 test("quoteSheetName escapes apostrophes for valid Google Sheets A1 notation", () => {
   assert.equal(quoteSheetName("O'Brien 사건"), "'O''Brien 사건'");
 });
+
+test("buildExportBatchUpdateData converts Firestore-like objects to Sheets-safe scalar cells", () => {
+  const timestamp = { seconds: 1780883000, nanoseconds: 123000000 };
+  const cases = [
+    {
+      title: { ko: "객체형 사건명" },
+      retainer: { date: timestamp, amount: 1000 },
+      hearings: [{ date: timestamp, time: new Date("2026-06-08T01:02:03.000Z"), type: ["공판", "변론"], result: { note: "결과" } }],
+      memos: [{ category: "일반메모", title: "객체 메모", content: { text: "내용" }, date: timestamp }],
+      timeline: [{ date: timestamp, content: ["진행", "경과"] }],
+      todos: [{ text: { text: "할 일" }, done: false, priority: "보통", dueDate: timestamp }],
+    },
+  ];
+
+  const data = buildExportBatchUpdateData(cases);
+  const cells = data.flatMap(entry => entry.values.flat());
+
+  assert.ok(cells.every(cell => cell === null || ["string", "number", "boolean"].includes(typeof cell)));
+  assert.equal(data[0].values[1][0], '{"ko":"객체형 사건명"}');
+  assert.match(data[0].values[1][10], /^2026-/);
+  assert.equal(data[1].values[1][3], "공판, 변론");
+  assert.equal(data[2].values[1][3], '{"text":"내용"}');
+});
+
+test("buildExportBatchUpdateData truncates cells that exceed the Google Sheets 50000 character limit", () => {
+  const longMemo = "가".repeat(50100);
+  const data = buildExportBatchUpdateData([
+    {
+      title: "긴 메모 사건",
+      memos: [{ category: "일반메모", title: "긴 메모", content: longMemo, date: "2026-06-08" }],
+    },
+  ]);
+
+  const memoContent = data[2].values[1][3];
+
+  assert.equal(memoContent.length, 50000);
+  assert.ok(memoContent.endsWith("…[truncated]"));
+});

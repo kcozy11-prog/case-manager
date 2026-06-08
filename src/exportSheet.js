@@ -1,5 +1,8 @@
 export const EXPORT_SHEET_TITLES = ["사건 목록", "기일", "메모", "진행경과", "할 일"];
 
+const MAX_SHEETS_CELL_CHARS = 50000;
+const TRUNCATION_MARKER = "…[truncated]";
+
 export function quoteSheetName(sheetName) {
   return `'${String(sheetName).replace(/'/g, "''")}'`;
 }
@@ -8,8 +11,73 @@ export function a1Range(sheetName, cell = "A1") {
   return `${quoteSheetName(sheetName)}!${cell}`;
 }
 
+function truncateCellText(text) {
+  if (text.length <= MAX_SHEETS_CELL_CHARS) return text;
+  return text.slice(0, MAX_SHEETS_CELL_CHARS - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
+}
+
+function dateCell(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+  return date.toISOString();
+}
+
+function timestampCell(value) {
+  if (!value || typeof value !== "object") return null;
+
+  if (typeof value.toDate === "function") {
+    try {
+      return dateCell(value.toDate());
+    } catch {
+      return null;
+    }
+  }
+
+  const seconds = value.seconds ?? value._seconds;
+  const nanoseconds = value.nanoseconds ?? value._nanoseconds ?? 0;
+  if (typeof seconds === "number" && typeof nanoseconds === "number") {
+    return dateCell(new Date(seconds * 1000 + Math.floor(nanoseconds / 1_000_000)));
+  }
+
+  return null;
+}
+
+function stringifyObject(value) {
+  const seen = new WeakSet();
+  try {
+    return JSON.stringify(value, (_key, nested) => {
+      if (nested instanceof Date) return dateCell(nested);
+      const timestamp = timestampCell(nested);
+      if (timestamp !== null) return timestamp;
+      if (nested && typeof nested === "object") {
+        if (seen.has(nested)) return "[Circular]";
+        seen.add(nested);
+      }
+      return nested;
+    });
+  } catch {
+    return String(value);
+  }
+}
+
 function cell(value) {
-  return value ?? "";
+  if (value == null) return "";
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "string") return truncateCellText(value);
+  if (value instanceof Date) return truncateCellText(dateCell(value));
+
+  const timestamp = timestampCell(value);
+  if (timestamp !== null) return truncateCellText(timestamp);
+
+  if (Array.isArray(value)) {
+    return truncateCellText(value.map(item => cell(item)).join(", "));
+  }
+
+  if (typeof value === "object") {
+    return truncateCellText(stringifyObject(value) || String(value));
+  }
+
+  return truncateCellText(String(value));
 }
 
 function normalizeRows(rows) {
