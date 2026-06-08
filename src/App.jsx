@@ -14,6 +14,7 @@ import CaseFormModal from "./components/CaseFormModal";
 import { fetchCalendarEvents, syncEventsWithCases, fetchWorkCalendarEvents, syncWorkEventsWithCases, inferCaseType, fetchWorkTasks, matchTasksToCases } from "./calendarSync";
 import UnmatchedTasksModal from "./components/UnmatchedTasksModal";
 import { migrateLegacyData, exportToGoogleSheet } from "./migrateLegacy";
+import { openSpreadsheetUrl } from "./exportOpen";
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -354,7 +355,7 @@ export default function App() {
         if (!token) { alert("Google 인증 실패."); return; }
         url = await exportToGoogleSheet(token, cases);
       }
-      if (url) window.open(url, "_blank");
+      if (url) openSpreadsheetUrl(url);
       else alert("내보내기 실패. 로그아웃 후 다시 로그인해주세요.");
     } catch (e) {
       alert("내보내기 오류: " + e.message);
