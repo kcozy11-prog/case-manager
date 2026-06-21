@@ -20,29 +20,141 @@ export async function fetchCalendarEvents(token) {
     { headers: { Authorization: `Bearer ${token}` } },
   );
   if (res.status === 401) return null;
-  if (!res.ok) return { items: [] };
-  const data = await res.json();
+  const dedicated = res.ok ? ((await res.json()).items || []).map(e => ({ ...e, _src: "LBOX" })) : [];
 
-  return { items: (data.items || []).map(e => ({ ...e, _src: "LBOX" })) };
+  // 전용 캘린더 외에, 다른 캘린더에 'lbox/엘박스' 키워드로 들어온 기일도 추가 수집
+  let extra = [];
+  try { extra = await fetchLboxKeywordEvents(token); } catch (e) { console.warn("LBOX 키워드 스캔 실패", e); }
+
+  const ids = new Set(dedicated.map(e => e.id).filter(Boolean));
+  const merged = [...dedicated, ...extra.filter(e => !e.id || !ids.has(e.id))];
+  return { items: merged };
+}
+
+// 다른 캘린더에서 'lbox/엘박스' 일정 수집:
+//  - 캘린더 이름 자체가 LBOX → 그 캘린더 전체 일정
+//  - 그 외 캘린더 → 일정 텍스트에 키워드가 있는 것만 (Calendar API q 검색 + isLboxEvent 확인)
+export async function fetchLboxKeywordEvents(token) {
+  const calendars = await fetchCalendarList(token);
+  if (!calendars.length) return [];
+
+  const past = new Date(); past.setDate(past.getDate() - 7);
+  const future = new Date(); future.setDate(future.getDate() + 60);
+  const baseParams = {
+    timeMin: past.toISOString(), timeMax: future.toISOString(),
+    singleEvents: "true", orderBy: "startTime", maxResults: "100",
+  };
+  const headers = { Authorization: `Bearer ${token}` };
+  const out = [];
+  const seen = new Set();
+  const add = (e, calName) => {
+    const key = e.id || `${e.summary}|${e.start?.dateTime || e.start?.date}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ ...e, _src: "LBOX", _calendarName: calName });
+  };
+
+  for (const cal of calendars) {
+    if (cal.id === LBOX_CAL_ID) continue; // 전용 캘린더는 별도 처리
+    const calIsLbox = LBOX_KEYWORD_RE.test(cal.summary || "");
+    // 내가 쓰는 캘린더만 키워드 검색 (공휴일 등 읽기전용 구독은 제외 → 호출·노이즈 감소)
+    const writable = cal.primary || cal.accessRole === "owner" || cal.accessRole === "writer";
+    try {
+      if (calIsLbox) {
+        // 캘린더 이름 자체가 LBOX → 역할 무관 전체 일정
+        const params = new URLSearchParams(baseParams);
+        const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal.id)}/events?${params}`, { headers });
+        if (res.ok) ((await res.json()).items || []).forEach(e => add(e, cal.summary));
+      } else if (writable) {
+        for (const kw of ["엘박스", "LBOX"]) {
+          const params = new URLSearchParams({ ...baseParams, q: kw });
+          const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal.id)}/events?${params}`, { headers });
+          if (res.ok) ((await res.json()).items || []).forEach(e => {
+            if (isLboxEvent({ ...e, _calendarName: cal.summary })) add(e, cal.summary);
+          });
+        }
+      }
+    } catch (e) {
+      console.warn(`LBOX 키워드 스캔 실패 (${cal.summary})`, e);
+    }
+  }
+  return out;
 }
 
 // ── LBOX 일정 파싱 ──────────────────────────────────────────────────────────
-// 형식: [이계원] 변론 서울중앙지방법원 2025가단99078 동관452호 10:40
+// 두 가지 형식을 모두 지원한다.
+//  (A) 대괄호 형식 : [이계원] 변론 서울중앙지방법원 2025가단99078 동관452호 10:40
+//  (B) 콤마 형식   : 박제군, 변론, 수원지방법원 안양지원-2026가단100906 제406호 법정 11:20
 
 const LBOX_RE = /^\[(.+?)\]\s+(\S+)\s+(\S+(?:법원|검찰청|경찰서))\s+(\d{4}[가-힣]+\d+)\s*(.*?)\s*(\d{1,2}:\d{2})?\s*$/;
 
+// 공통 추출 패턴
+const LBOX_CASE_NUM_RE = /(\d{4}[가-힣]{1,4}\d+)/;                 // 2026가단100906
+const LBOX_TIME_RE = /(\d{1,2}:\d{2})\s*$/;                       // 끝의 11:20
+// 법원/지원/검찰청/경찰서 (예: "수원지방법원 안양지원")
+const LBOX_COURT_RE = /([가-힣]+(?:지방법원|고등법원|가정법원|행정법원|회생법원|지방검찰청|검찰청|경찰서|법원))(?:\s+([가-힣]+지원))?/;
+
 export function parseLboxEvent(summary) {
   if (!summary) return null;
-  const m = summary.match(LBOX_RE);
-  if (!m) return null;
-  return {
-    client: m[1],           // 이계원
-    hearingType: m[2],      // 변론
-    court: m[3],            // 서울중앙지방법원
-    caseNumber: m[4],       // 2025가단99078
-    location: m[5]?.trim(), // 동관452호
-    time: m[6] || "",       // 10:40
-  };
+  const raw = summary.trim();
+
+  // (A) 대괄호 형식 우선
+  const m = raw.match(LBOX_RE);
+  if (m) {
+    return {
+      client: m[1],
+      hearingType: m[2],
+      court: m[3],
+      caseNumber: m[4],
+      location: m[5]?.trim() || "",
+      time: m[6] || "",
+    };
+  }
+
+  // (B) 콤마/일반 형식 — 사건번호가 있어야 LBOX 기일로 인정
+  const caseM = raw.match(LBOX_CASE_NUM_RE);
+  if (!caseM) return null;
+  const caseNumber = caseM[1];
+
+  const timeM = raw.match(LBOX_TIME_RE);
+  const time = timeM ? timeM[1] : "";
+
+  // 콤마 세그먼트에서 당사자/기일유형 추출
+  const commaParts = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  let client = "";
+  let hearingType = "";
+  if (commaParts.length >= 2) {
+    client = commaParts[0];
+    hearingType = extractHearingType(commaParts[1]) || commaParts[1].split(/\s+/)[0] || "";
+  } else {
+    hearingType = extractHearingType(raw) || "";
+  }
+
+  // 법원: 사건번호 앞부분에서 추출 (지원까지 포함)
+  const beforeCase = raw.slice(0, caseM.index);
+  const courtM = beforeCase.match(LBOX_COURT_RE);
+  let court = "";
+  if (courtM) court = [courtM[1], courtM[2]].filter(Boolean).join(" ").trim();
+
+  // 법정/장소: 사건번호 뒤 ~ 시간 앞
+  let afterCase = raw.slice(caseM.index + caseNumber.length);
+  afterCase = afterCase.replace(LBOX_TIME_RE, "");
+  const location = afterCase.replace(/^[\s\-,]+/, "").replace(/[\s,]+$/, "").trim();
+
+  return { client, hearingType, court, caseNumber, location, time };
+}
+
+// ── LBOX 이벤트 식별: 형식이 아니라 키워드(lbox/엘박스) 또는 출처로 판정 ──────
+const LBOX_KEYWORD_RE = /lbox|엘박스/i;
+
+export function isLboxEvent(ev) {
+  if (!ev) return false;
+  if (ev._src === "LBOX") return true; // LBOX 캘린더에서 가져온 일정
+  const hay = [
+    ev.summary, ev.description, ev.location,
+    ev._calendarName, ev.organizer?.displayName, ev.organizer?.email,
+  ].filter(Boolean).join(" ");
+  return LBOX_KEYWORD_RE.test(hay);
 }
 
 // ── 매칭 로직: 사건번호 우선, 3글자 이상 연속 일치 ──────────────────────────
@@ -122,6 +234,9 @@ export function syncEventsWithCases(events, cases) {
       ? new Date(ev.start.dateTime).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })
       : "";
 
+    // LBOX 여부: 형식이 아니라 키워드/출처로 판정
+    const isLbox = isLboxEvent(ev);
+
     // 1단계: LBOX 정규 형식 파싱 (성공하면 풍부한 정보 획득)
     const lbox = parseLboxEvent(summary);
 
@@ -141,8 +256,13 @@ export function syncEventsWithCases(events, cases) {
     if (!matched) {
       const caseNum = lbox?.caseNumber || (summary.match(CASE_NUM_EXTRACT) || [])[1] || "";
 
-      // 사건번호도 없고 LBOX 파싱도 실패 → 스킵
-      if (!caseNum && !lbox) {
+      // LBOX 일정도 아니고 사건번호·형식 정보도 없음 → 스킵
+      if (!caseNum && !lbox && !isLbox) {
+        skippedEvents.push(summary);
+        continue;
+      }
+      // 사건번호 없이 LBOX 키워드만 있는 경우: 사건 신규 생성은 보류(오인 방지), 스킵
+      if (!caseNum) {
         skippedEvents.push(summary);
         continue;
       }
@@ -173,8 +293,9 @@ export function syncEventsWithCases(events, cases) {
           client, clientContact: "", opponent: "",
           manager: "", managerOrg: "", managerContact: "",
           court, caseNumber: caseNum,
-          retainer: { amount: "", date: "", successFee: "", successFeeAmount: "" },
-          hearings: [], timeline: [], memos: [], documents: [], todos: [],
+          retainer: { amount: "", date: "", successFee: "", successFeeAmount: "", paidAmount: "", successFeeCollected: "" },
+          closeResult: "", closeReason: "", closedDate: "",
+          hearings: [], timeline: [], memos: [], documents: [], todos: [], briefs: [],
         };
         newCaseCount++;
         console.log(`[캘린더 동기화] + 신규 사건: "${title}" (${caseNum})`);
@@ -190,55 +311,71 @@ export function syncEventsWithCases(events, cases) {
     const locationInfo = lbox ? (lbox.location ? `${lbox.court} ${lbox.location}` : lbox.court) : "";
     const hearingTime = lbox?.time || eventTime;
 
-    // 중복 체크: calendarEventId 또는 같은 날짜+유형
-    const isDup = hearings.some(h =>
-      h.calendarEventId === ev.id ||
-      (h.date === eventDate && h.type === hearingType)
+    const nextHearing = {
+      id: Date.now() + Math.floor(Math.random() * 10000),
+      date: eventDate,
+      time: hearingTime,
+      type: hearingType,
+      result: locationInfo,
+      fromCalendar: true,
+      calendarEventId: ev.id,
+    };
+
+    // 중복/업데이트 체크: calendarEventId 일치, 또는 같은 사건 내 날짜+유형+시간 동일.
+    // (전용 LBOX 캘린더와 개인 캘린더에 같은 기일이 다른 ID로 들어와도 중복 방지)
+    const existingIndex = hearings.findIndex(h =>
+      (ev.id && h.calendarEventId === ev.id) ||
+      (h.date === eventDate && h.type === hearingType && (h.time || "") === (hearingTime || ""))
     );
 
-    if (!isDup) {
-      ref.hearings = [
-        ...hearings,
-        {
-          id: Date.now() + Math.floor(Math.random() * 10000),
-          date: eventDate,
-          time: hearingTime,
-          type: hearingType,
-          result: locationInfo,
-          fromCalendar: true,
-          calendarEventId: ev.id,
-        },
-      ];
+    if (existingIndex >= 0) {
+      const existing = hearings[existingIndex];
+      const changed =
+        existing.date !== nextHearing.date ||
+        (existing.time || "") !== (nextHearing.time || "") ||
+        existing.type !== nextHearing.type ||
+        (existing.result || "") !== (nextHearing.result || "");
 
-      // 기일메모 자동 추가
-      const memos = ref.memos || [];
-      const memoContent = `• ${hearingType} ${eventDate}${hearingTime ? ` ${hearingTime}` : ""}${locationInfo ? `\n• 장소: ${locationInfo}` : ""}`;
-      ref.memos = [
-        ...memos,
-        {
-          id: Date.now() + Math.floor(Math.random() * 10000) + 1,
-          category: "기일메모",
-          title: `${hearingType} 지정`,
-          content: memoContent,
-          date: todayStr,
-        },
-      ];
-
-      // 진행경과 자동 추가
-      const timeline = ref.timeline || [];
-      ref.timeline = [
-        ...timeline,
-        {
-          id: Date.now() + Math.floor(Math.random() * 10000) + 2,
-          date: todayStr,
-          content: `${hearingType} ${eventDate}${hearingTime ? ` ${hearingTime}` : ""} 지정${lbox?.court ? ` (${lbox.court})` : ""}`,
-        },
-      ];
-
-      updates.set(matched.id, ref);
-      newHearingCount++;
-      console.log(`[캘린더 동기화] ✓ 기일 추가: "${summary}" → ${matched.title}`);
+      if (changed) {
+        const updatedHearings = [...hearings];
+        updatedHearings[existingIndex] = { ...existing, ...nextHearing, id: existing.id || nextHearing.id };
+        ref.hearings = updatedHearings;
+        updates.set(matched.id, ref);
+        console.log(`[캘린더 동기화] ↻ 기일 업데이트: "${summary}" → ${matched.title}`);
+      }
+      continue;
     }
+
+    ref.hearings = [...hearings, nextHearing];
+
+    // 기일메모 자동 추가
+    const memos = ref.memos || [];
+    const memoContent = `• ${hearingType} ${eventDate}${hearingTime ? ` ${hearingTime}` : ""}${locationInfo ? `\n• 장소: ${locationInfo}` : ""}`;
+    ref.memos = [
+      ...memos,
+      {
+        id: Date.now() + Math.floor(Math.random() * 10000) + 1,
+        category: "기일메모",
+        title: `${hearingType} 지정`,
+        content: memoContent,
+        date: todayStr,
+      },
+    ];
+
+    // 진행경과 자동 추가
+    const timeline = ref.timeline || [];
+    ref.timeline = [
+      ...timeline,
+      {
+        id: Date.now() + Math.floor(Math.random() * 10000) + 2,
+        date: todayStr,
+        content: `${hearingType} ${eventDate}${hearingTime ? ` ${hearingTime}` : ""} 지정${lbox?.court ? ` (${lbox.court})` : ""}`,
+      },
+    ];
+
+    updates.set(matched.id, ref);
+    newHearingCount++;
+    console.log(`[캘린더 동기화] ✓ 기일 추가: "${summary}" → ${matched.title}`);
   }
 
   if (skippedEvents.length > 0) {
@@ -266,9 +403,9 @@ export async function fetchWorkTasks(token) {
     || listData.items?.[0];
   if (!workList) return [];
 
-  // 3. 해당 tasklist의 태스크 가져오기 (완료되지 않은 것만)
+  // 3. 해당 tasklist의 태스크 가져오기 (완료/숨김 포함 — 기존 항목 업데이트용)
   const taskRes = await fetch(
-    `https://tasks.googleapis.com/tasks/v1/lists/${workList.id}/tasks?showCompleted=false&maxResults=100`,
+    `https://tasks.googleapis.com/tasks/v1/lists/${workList.id}/tasks?showCompleted=true&showHidden=true&maxResults=100`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
   if (!taskRes.ok) return [];
@@ -304,6 +441,41 @@ export function matchTasksToCases(tasks, cases) {
     }
   }
   return { matched, unmatched };
+}
+
+export function buildTodoFromGoogleTask(task) {
+  const dueDate = task.due ? task.due.split("T")[0] : "";
+  return {
+    text: task.title || "",
+    details: task.notes || "",
+    priority: "보통",
+    dueDate,
+    done: task.status === "completed",
+    calendarTaskId: task.id,
+    fromTasks: true,
+    sourceTaskList: task._listName || "",
+    sourceUpdatedAt: task.updated || "",
+  };
+}
+
+export function mergeTaskIntoCaseTodos(caseObj, task) {
+  const nextTodo = buildTodoFromGoogleTask(task);
+  const todos = [...(caseObj.todos || [])];
+  const index = todos.findIndex(t => t.calendarTaskId === task.id);
+
+  if (index >= 0) {
+    todos[index] = {
+      ...todos[index],
+      ...nextTodo,
+      id: todos[index].id,
+      // Google Tasks를 원본으로 보고 완료 상태도 동기화
+      done: nextTodo.done,
+    };
+    return { caseObj: { ...caseObj, todos }, added: false, updated: true };
+  }
+
+  todos.push({ id: Date.now() + Math.floor(Math.random() * 10000), ...nextTodo });
+  return { caseObj: { ...caseObj, todos }, added: true, updated: false };
 }
 
 // ── 캘린더 목록 조회 ──────────────────────────────────────────────────────────

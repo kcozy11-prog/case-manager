@@ -11,10 +11,14 @@ import OverviewTab from "./components/OverviewTab";
 import TodosTab from "./components/TodosTab";
 import AiParseModal from "./components/AiParseModal";
 import CaseFormModal from "./components/CaseFormModal";
-import { fetchCalendarEvents, syncEventsWithCases, fetchWorkCalendarEvents, syncWorkEventsWithCases, inferCaseType, fetchWorkTasks, matchTasksToCases } from "./calendarSync";
+import { fetchCalendarEvents, syncEventsWithCases, fetchWorkCalendarEvents, syncWorkEventsWithCases, inferCaseType, fetchWorkTasks, matchTasksToCases, mergeTaskIntoCaseTodos } from "./calendarSync";
 import UnmatchedTasksModal from "./components/UnmatchedTasksModal";
 import { migrateLegacyData, exportToGoogleSheet } from "./migrateLegacy";
 import { openSpreadsheetUrl } from "./exportOpen";
+import JournalApp from "./components/journal/JournalApp";
+import BriefsTab from "./components/BriefsTab";
+import GlobalSearch from "./components/GlobalSearch";
+import { ensureTaskCalendar, upsertTaskEvent, CalendarAuthError } from "./calendarPush";
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -25,6 +29,9 @@ export default function App() {
   const [statusFilter, setStatusFilter] = useState("전체");
   const [typeFilter, setTypeFilter] = useState("전체");
   const [activeTab, setActiveTab] = useState("overview");
+  const [appMode, setAppMode] = useState("cases"); // cases | journal
+  const [showSearch, setShowSearch] = useState(false);
+  const [showAdv, setShowAdv] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editCase, setEditCase] = useState(null);
   const [showAI, setShowAI] = useState(false);
@@ -35,6 +42,8 @@ export default function App() {
   const [taskSyncing, setTaskSyncing] = useState(false);
   const [taskResult, setTaskResult] = useState(null);
   const [unmatchedTasks, setUnmatchedTasks] = useState(null); // null or array
+  const autoCalendarSyncStarted = useRef(false);
+  const autoTaskSyncStarted = useRef(false);
 
   // Auth 상태 감지
   useEffect(() => {
@@ -114,6 +123,14 @@ export default function App() {
     if (dirty.length > 0) console.log(`[사건분류] ${dirty.length}건 재분류 완료`);
   }, [user, cases]);
 
+  // 로그인/토큰 상태가 바뀌면 자동 동기화 플래그 초기화
+  useEffect(() => {
+    if (!user || !googleToken) {
+      autoCalendarSyncStarted.current = false;
+      autoTaskSyncStarted.current = false;
+    }
+  }, [user, googleToken]);
+
   // 동적 타이틀
   useEffect(() => {
     document.title = selected ? `${selected.title} — 사건 관리` : "사건 관리";
@@ -160,7 +177,6 @@ export default function App() {
     if (matchedCase) {
       const updated = { ...matchedCase };
 
-      // 카테고리 분류된 메모 추가
       const cat = result.memoCategory || "일반메모";
       const title = result.memoTitle || "AI 파싱 메모";
       const content = result.memoContent || result.memo || "";
@@ -170,14 +186,12 @@ export default function App() {
         }];
       }
 
-      // 기일 추가
       if (result.hearingDate && result.hearingType) {
         updated.hearings = [...(updated.hearings || []), {
           id: Date.now() + 1, date: result.hearingDate, time: result.hearingTime || "", type: result.hearingType, result: ""
         }];
       }
 
-      // 진행경과 추가
       if (result.timelineContent) {
         updated.timeline = [...(updated.timeline || []), {
           id: Date.now() + 2, date: todayStr, content: result.timelineContent
@@ -189,7 +203,6 @@ export default function App() {
       setActiveTab("overview");
       setMobileView("detail");
     } else {
-      // 매칭 사건 없이 호출된 경우 → 새 사건 등록 폼
       const nc = emptyCase();
       if (result.caseIdentifiers?.length) nc.title = result.caseIdentifiers[0];
       if (result.memoContent || result.memo) {
@@ -197,12 +210,13 @@ export default function App() {
           title: result.memoTitle || "메모", content: result.memoContent || result.memo, date: todayStr }];
       }
       if (result.hearingDate && result.hearingType) {
-        nc.hearings = [{ id: Date.now() + 1, date: result.hearingDate, type: result.hearingType, result: "" }];
+        nc.hearings = [{ id: Date.now() + 1, date: result.hearingDate, time: result.hearingTime || "", type: result.hearingType, result: "" }];
       }
       setEditCase({ ...nc, _isNew: true });
       setShowForm(true);
     }
   }, [saveCase]);
+
 
   // ── 구글 캘린더 동기화 ──────────────────────────────────────────────────
   const refreshGoogleToken = useCallback(async () => {
@@ -258,26 +272,16 @@ export default function App() {
 
       const { matched, unmatched } = matchTasksToCases(tasks, cases);
 
-      // 자동 매칭된 것들을 해당 사건 todos에 추가 (중복 방지: calendarTaskId)
+      // 자동 매칭된 항목을 사건 할 일로 추가/갱신 (Google Tasks notes 포함)
       let addedCount = 0;
+      let updatedCount = 0;
       const updatedCases = new Map();
       for (const { task, caseObj } of matched) {
         const ref = updatedCases.get(caseObj.id) || { ...caseObj, todos: [...(caseObj.todos || [])] };
-        const alreadyAdded = ref.todos.some(t => t.calendarTaskId === task.id);
-        if (!alreadyAdded) {
-          const dueDate = task.due ? task.due.split("T")[0] : "";
-          ref.todos = [...ref.todos, {
-            id: Date.now() + Math.floor(Math.random() * 10000),
-            text: task.title,
-            priority: "보통",
-            dueDate,
-            done: false,
-            calendarTaskId: task.id,
-            fromTasks: true,
-          }];
-          addedCount++;
-        }
-        updatedCases.set(caseObj.id, ref);
+        const merged = mergeTaskIntoCaseTodos(ref, task);
+        updatedCases.set(caseObj.id, merged.caseObj);
+        if (merged.added) addedCount++;
+        if (merged.updated) updatedCount++;
       }
       for (const [, uc] of updatedCases) await saveCase(uc);
 
@@ -286,7 +290,7 @@ export default function App() {
         setUnmatchedTasks(unmatched);
       }
 
-      setTaskResult({ added: addedCount, unmatched: unmatched.length, total: tasks.length });
+      setTaskResult({ added: addedCount, updated: updatedCount, unmatched: unmatched.length, total: tasks.length });
       setTimeout(() => setTaskResult(null), 4000);
     } catch (e) {
       setTaskResult({ error: e.message });
@@ -295,24 +299,46 @@ export default function App() {
 
   // 미매칭 태스크를 특정 사건에 수동 추가
   const addUnmatchedTaskToCase = useCallback(async (task, caseObj) => {
-    const todos = caseObj.todos || [];
-    const alreadyAdded = todos.some(t => t.calendarTaskId === task.id);
-    if (alreadyAdded) return;
-    const dueDate = task.due ? task.due.split("T")[0] : "";
-    const updated = {
-      ...caseObj,
-      todos: [...todos, {
-        id: Date.now() + Math.floor(Math.random() * 10000),
-        text: task.title,
-        priority: "보통",
-        dueDate,
-        done: false,
-        calendarTaskId: task.id,
-        fromTasks: true,
-      }],
-    };
-    await saveCase(updated);
+    const merged = mergeTaskIntoCaseTodos({ ...caseObj, todos: [...(caseObj.todos || [])] }, task);
+    await saveCase(merged.caseObj);
   }, [saveCase]);
+
+  // ── 할일 → 구글 캘린더 쓰기 (전용 '업무 할일' 캘린더, 단방향) ──────────────
+  const taskCalIdRef = useRef(null);
+  const pushTaskToCalendar = useCallback(async ({ eventId, title, details, date, time }) => {
+    let token = googleToken;
+    if (!token) {
+      token = await refreshGoogleToken();
+      if (!token) throw new Error("Google 인증이 필요합니다.");
+    }
+    const run = async (tk) => {
+      if (!taskCalIdRef.current) taskCalIdRef.current = await ensureTaskCalendar(tk);
+      return upsertTaskEvent(tk, taskCalIdRef.current, { eventId, title, details, date, time });
+    };
+    try {
+      return await run(token);
+    } catch (e) {
+      if (e instanceof CalendarAuthError) {
+        const nt = await refreshGoogleToken();
+        if (!nt) throw new Error("Google 인증 실패. 다시 로그인하세요.");
+        taskCalIdRef.current = null;
+        return await run(nt);
+      }
+      throw e;
+    }
+  }, [googleToken, refreshGoogleToken]);
+
+  useEffect(() => {
+    if (!user || !googleToken || cases.length === 0 || calSyncing || autoCalendarSyncStarted.current) return;
+    autoCalendarSyncStarted.current = true;
+    syncCalendar();
+  }, [user, googleToken, cases.length, calSyncing, syncCalendar]);
+
+  useEffect(() => {
+    if (!user || !googleToken || cases.length === 0 || taskSyncing || autoTaskSyncStarted.current) return;
+    autoTaskSyncStarted.current = true;
+    syncTasks();
+  }, [user, googleToken, cases.length, taskSyncing, syncTasks]);
 
   const runMigration = useCallback(async () => {
     if (!user) return;
@@ -412,16 +438,21 @@ export default function App() {
                 <rect x="3" y="18.5" width="18" height="2.5" rx="0.5" fill="white" opacity="0.9"/>
               </svg>
             </div>
-            <span className="text-white font-bold text-base tracking-tight hidden sm:inline">사건 관리</span>
+            <span className="text-white font-bold text-base tracking-tight hidden sm:inline">법률 업무 통합</span>
+            <div className="flex items-center bg-slate-800 rounded-lg p-0.5 ml-1">
+              {[["cases", "사건"], ["journal", "업무일지"]].map(([key, label]) => (
+                <button key={key} onClick={() => setAppMode(key)}
+                  className={`text-xs px-3 py-1.5 rounded-md transition-colors font-medium ${
+                    appMode === key ? "bg-indigo-500 text-white" : "text-slate-400 hover:text-white"
+                  }`}>{label}</button>
+              ))}
+            </div>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={runMigration}
-              className="flex items-center gap-1.5 text-xs text-amber-300 hover:text-amber-100 border border-amber-600 hover:border-amber-400 px-3 py-1.5 rounded-lg transition-colors">
-              <span>📥</span> <span className="hidden sm:inline">가져오기</span>
-            </button>
-            <button onClick={runExport}
-              className="flex items-center gap-1.5 text-xs text-emerald-300 hover:text-emerald-100 border border-emerald-600 hover:border-emerald-400 px-3 py-1.5 rounded-lg transition-colors">
-              <span>📤</span> <span className="hidden sm:inline">내보내기</span>
+            {appMode === "cases" && (<>
+            <button onClick={() => setShowSearch(true)}
+              className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors">
+              <span>🔍</span> <span className="hidden sm:inline">검색</span>
             </button>
             <button onClick={syncCalendar} disabled={calSyncing}
               className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50">
@@ -439,6 +470,24 @@ export default function App() {
               className="flex items-center gap-1.5 text-xs bg-indigo-500 hover:bg-indigo-400 text-white px-3 py-1.5 rounded-lg transition-colors font-semibold">
               <span>+</span> <span className="hidden sm:inline">새 사건</span>
             </button>
+            <div className="relative">
+              <button onClick={() => setShowAdv(v => !v)}
+                className="flex items-center text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-2.5 py-1.5 rounded-lg transition-colors"
+                title="고급 (구글시트 가져오기/내보내기)">⋯</button>
+              {showAdv && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setShowAdv(false)} />
+                  <div className="absolute right-0 mt-1 w-44 bg-white rounded-lg shadow-xl border border-slate-200 py-1 z-50">
+                    <div className="px-3 py-1 text-[10px] text-slate-400 uppercase tracking-wider">구글시트 (1회성)</div>
+                    <button onClick={() => { setShowAdv(false); runMigration(); }}
+                      className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"><span>📥</span> 가져오기</button>
+                    <button onClick={() => { setShowAdv(false); runExport(); }}
+                      className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"><span>📤</span> 내보내기</button>
+                  </div>
+                </>
+              )}
+            </div>
+            </>)}
             <div className="flex items-center gap-2 ml-2 pl-2 border-l border-slate-600">
               <span className="text-slate-500 text-[10px] hidden sm:inline" title={`빌드: ${__BUILD_TIME__}`}>v{__BUILD_TIME__}</span>
               <span className="text-slate-300 text-xs hidden sm:inline">{user.displayName}</span>
@@ -450,6 +499,7 @@ export default function App() {
           </div>
         </div>
 
+        {appMode === "cases" && (<>
         {/* 캘린더 동기화 결과 알림 */}
         {calResult && (
           <div className={`text-xs px-4 py-1.5 text-center font-medium ${
@@ -464,7 +514,7 @@ export default function App() {
           <div className={`text-xs px-4 py-1.5 text-center font-medium ${
             taskResult.error ? "bg-red-500 text-white" : "bg-indigo-500 text-white"
           }`}>
-            {taskResult.error || `할 일 ${taskResult.total}건 — 자동추가 ${taskResult.added}건${taskResult.unmatched ? ` · 미매칭 ${taskResult.unmatched}건` : ""}`}
+            {taskResult.error || `할 일 ${taskResult.total}건 — 자동추가 ${taskResult.added}건${taskResult.updated ? ` · 업데이트 ${taskResult.updated}건` : ""}${taskResult.unmatched ? ` · 미매칭 ${taskResult.unmatched}건` : ""}`}
           </div>
         )}
 
@@ -493,8 +543,12 @@ export default function App() {
           setActiveTab(tab || "overview");
           setMobileView("detail");
         }} />
+        </>)}
 
         {/* 본문 */}
+        {appMode === "journal" ? (
+          <JournalApp user={user} cases={cases} onPushTask={pushTaskToCalendar} />
+        ) : (
         <div className="flex flex-1 min-h-0">
           {/* 좌측 목록 */}
           <div className={`${
@@ -581,7 +635,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex border-b border-slate-100 px-4 sm:px-6">
-                  {[["overview", "개요"], ["todos", "할 일"]].map(([key, label]) => (
+                  {[["overview", "개요"], ["todos", "할 일"], ["briefs", "서면"]].map(([key, label]) => (
                     <button key={key} onClick={() => setActiveTab(key)}
                       className={`py-2.5 px-1 mr-5 text-sm font-medium border-b-2 transition-colors ${
                         activeTab === key
@@ -591,10 +645,9 @@ export default function App() {
                   ))}
                 </div>
                 <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5">
-                  {activeTab === "overview"
-                    ? <OverviewTab c={selected} onUpdate={saveCase} />
-                    : <TodosTab c={selected} onUpdate={saveCase} />
-                  }
+                  {activeTab === "overview" && <OverviewTab c={selected} onUpdate={saveCase} />}
+                  {activeTab === "todos" && <TodosTab c={selected} onUpdate={saveCase} onPushTodo={pushTaskToCalendar} />}
+                  {activeTab === "briefs" && <BriefsTab c={selected} onUpdate={saveCase} />}
                 </div>
               </>
             ) : (
@@ -604,8 +657,20 @@ export default function App() {
             )}
           </div>
         </div>
+        )}
       </div>
-
+      {showSearch && (
+        <GlobalSearch
+          cases={cases}
+          onClose={() => setShowSearch(false)}
+          onOpen={(caseId, tab) => {
+            setSelectedId(caseId);
+            setActiveTab(tab || "overview");
+            setMobileView("detail");
+            setShowSearch(false);
+          }}
+        />
+      )}
       {showAI && <AiParseModal cases={cases} onClose={() => setShowAI(false)} onApply={applyAI} />}
       {unmatchedTasks && (
         <UnmatchedTasksModal

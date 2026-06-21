@@ -61,7 +61,7 @@ export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onClose
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium text-slate-800 leading-snug">{task.title}</div>
                     {task.notes && (
-                      <div className="text-xs text-slate-500 mt-0.5 line-clamp-2">{task.notes}</div>
+                      <div className="text-xs text-slate-500 mt-0.5 whitespace-pre-wrap break-words leading-relaxed">{task.notes}</div>
                     )}
                     {task.due && (
                       <div className="text-xs text-slate-400 mt-0.5 flex items-center gap-1">

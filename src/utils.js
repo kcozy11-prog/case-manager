@@ -57,8 +57,10 @@ export const emptyCase = () => ({
   opponent: "",
   manager: "", managerOrg: "", managerContact: "",
   court: "", caseNumber: "",
-  retainer: { amount: "", date: "", successFee: "", successFeeAmount: "" },
-  hearings: [], timeline: [], memos: [], documents: [], todos: [],
+  retainer: { amount: "", date: "", successFee: "", successFeeAmount: "",
+    paidAmount: "", successFeeCollected: "" },
+  closeResult: "", closeReason: "", closedDate: "",
+  hearings: [], timeline: [], memos: [], documents: [], todos: [], briefs: [],
 });
 
 // ── 샘플 데이터 ───────────────────────────────────────────────────────────────

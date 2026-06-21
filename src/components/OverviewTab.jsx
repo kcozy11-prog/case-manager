@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { dday, fmtDate, fmtMoney, todayStr, MEMO_CATEGORIES, MEMO_CAT_STYLE } from "../utils";
+import { dday, fmtDate, fmtMoney, todayStr, addDays, MEMO_CATEGORIES, MEMO_CAT_STYLE } from "../utils";
 import { DdayBadge } from "./Badges";
 
 function InfoCard({ label, value, sub }) {
@@ -21,7 +21,8 @@ function Section({ title, children }) {
   );
 }
 
-function HearingRow({ h, upcoming, onDelete }) {
+function HearingRow({ h, upcoming, onDelete, onAddDeadline }) {
+  const isJudgment = /선고|판결/.test(h.type || "");
   return (
     <div className={`flex items-center justify-between rounded-lg px-3 py-2 ${
       upcoming ? "bg-indigo-50 border border-indigo-100" : "bg-slate-50"
@@ -37,6 +38,11 @@ function HearingRow({ h, upcoming, onDelete }) {
         </div>
       </div>
       <div className="flex items-center gap-2">
+        {isJudgment && onAddDeadline && (
+          <button onClick={(e) => { e.stopPropagation(); onAddDeadline(h); }}
+            className="text-[11px] text-rose-500 hover:text-rose-700 border border-rose-200 hover:border-rose-400 rounded px-1.5 py-0.5 transition-colors"
+            title="이 선고 기준 상소기한을 불변기간으로 추가 (기산점·기간은 직접 확인)">↪ 상소기한</button>
+        )}
         <div className="text-xs text-slate-500">
           {fmtDate(h.date)}{h.time && <span className="ml-1 text-indigo-500 font-medium">{h.time}</span>}
         </div>
@@ -71,21 +77,45 @@ export default function OverviewTab({ c, onUpdate }) {
   };
 
   const deleteHearing = (id) => {
-    onUpdate({ ...c, hearings: c.hearings.filter(h => h.id !== id) });
+    onUpdate({ ...c, hearings: (c.hearings || []).filter(h => h.id !== id) });
+  };
+
+  // ── 기한(불변기간) 일급 입력 ── (저장은 메모 category="불변기간" 으로 → 대시보드 호환)
+  const [newDeadline, setNewDeadline] = useState({ title: "", date: "" });
+  const addDeadline = () => {
+    if (!newDeadline.title.trim() || !newDeadline.date) return;
+    onUpdate({ ...c, memos: [...(c.memos || []), {
+      id: Date.now(), category: "불변기간", title: newDeadline.title.trim(),
+      content: "", date: newDeadline.date, checked: false,
+    }] });
+    setNewDeadline({ title: "", date: "" });
+  };
+
+  // 선고 기일 → 상소기한 자동 제안 (형사 7일 / 그 외 14일, 기산점·기간은 사용자 확인)
+  const addAppealDeadline = (h) => {
+    const isCriminal = /형사/.test(c.type || "");
+    const days = isCriminal ? 7 : 14;
+    const date = addDays(new Date(h.date), days);
+    onUpdate({ ...c, memos: [...(c.memos || []), {
+      id: Date.now(), category: "불변기간",
+      title: isCriminal ? "상소기간 만료(형사 7일)" : "항소기간 만료(민사 2주)",
+      content: `※ ${fmtDate(h.date)} ${h.type} 기준 추정. 기산점(송달/선고)·기간을 직접 확인하세요.`,
+      date, checked: false,
+    }] });
   };
 
   const updateTimelineDate = (id, newDate) => {
-    onUpdate({ ...c, timeline: c.timeline.map(t => t.id === id ? { ...t, date: newDate } : t) });
+    onUpdate({ ...c, timeline: (c.timeline || []).map(t => t.id === id ? { ...t, date: newDate } : t) });
     setEditingTimelineId(null);
   };
 
   const saveTimelineContent = (id) => {
-    onUpdate({ ...c, timeline: c.timeline.map(t => t.id === id ? { ...t, content: editingTimelineContent } : t) });
+    onUpdate({ ...c, timeline: (c.timeline || []).map(t => t.id === id ? { ...t, content: editingTimelineContent } : t) });
     setEditingTimelineContentId(null);
   };
 
   const deleteTimeline = (id) => {
-    onUpdate({ ...c, timeline: c.timeline.filter(t => t.id !== id) });
+    onUpdate({ ...c, timeline: (c.timeline || []).filter(t => t.id !== id) });
   };
 
   const startEditMemo = (m) => {
@@ -104,6 +134,8 @@ export default function OverviewTab({ c, onUpdate }) {
   };
 
   const memos = c.memos || [];
+  const hearings = c.hearings || [];
+  const timeline = c.timeline || [];
   const filteredMemos = memoTab === "전체" ? memos : memos.filter(m => m.category === memoTab);
   const sortedMemos = [...filteredMemos].sort((a, b) => new Date(b.date) - new Date(a.date));
 
@@ -130,10 +162,10 @@ export default function OverviewTab({ c, onUpdate }) {
     onUpdate({ ...c, memos: memos.map(m => m.id === id ? { ...m, checked: !m.checked } : m) });
   };
 
-  const upcomingHearings = [...c.hearings]
+  const upcomingHearings = [...hearings]
     .filter(h => dday(h.date) >= 0)
     .sort((a, b) => new Date(a.date) - new Date(b.date));
-  const pastHearings = [...c.hearings]
+  const pastHearings = [...hearings]
     .filter(h => dday(h.date) < 0)
     .sort((a, b) => new Date(b.date) - new Date(a.date));
 
@@ -147,28 +179,92 @@ export default function OverviewTab({ c, onUpdate }) {
           sub={[c.managerOrg, c.managerContact].filter(Boolean).join(" · ")} />
       </div>
 
-      <Section title="선임약정">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      {c.status === "종결" && (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs px-2 py-0.5 rounded-full bg-slate-700 text-white font-medium">종결</span>
+            {c.closeResult && <span className="text-sm font-semibold text-slate-800">{c.closeResult}</span>}
+            {c.closedDate && <span className="text-xs text-slate-500">확정 {fmtDate(c.closedDate)}</span>}
+          </div>
+          {c.closeReason && <div className="text-xs text-slate-500 mt-1">{c.closeReason}</div>}
+        </div>
+      )}
+
+      <Section title="선임약정 · 정산">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div>
             <div className="text-xs text-slate-400 mb-0.5">착수금</div>
             <div className="text-sm font-semibold text-slate-800">{fmtMoney(c.retainer?.amount)}</div>
           </div>
           <div>
+            <div className="text-xs text-slate-400 mb-0.5">입금액</div>
+            <div className="text-sm text-slate-700">{fmtMoney(c.retainer?.paidAmount)}</div>
+          </div>
+          <div>
+            <div className="text-xs text-slate-400 mb-0.5">미수금</div>
+            {(() => {
+              const due = Math.max(0, (Number(c.retainer?.amount) || 0) - (Number(c.retainer?.paidAmount) || 0));
+              return <div className={`text-sm font-semibold ${due > 0 ? "text-rose-600" : "text-emerald-600"}`}>{due > 0 ? fmtMoney(due) : "완납"}</div>;
+            })()}
+          </div>
+          <div>
             <div className="text-xs text-slate-400 mb-0.5">수임일</div>
             <div className="text-sm text-slate-700">{fmtDate(c.retainer?.date)}</div>
           </div>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
           <div>
-            <div className="text-xs text-slate-400 mb-0.5">성공보수</div>
+            <div className="text-xs text-slate-400 mb-0.5">성공보수 조건</div>
             <div className="text-sm text-slate-700">{c.retainer?.successFee || "—"}</div>
-            {c.retainer?.successFeeAmount && (
-              <div className="text-xs text-slate-400">{fmtMoney(c.retainer.successFeeAmount)}</div>
+            {c.retainer?.successFeeAmount > 0 && (
+              <div className="text-xs text-slate-400">약정 {fmtMoney(c.retainer.successFeeAmount)}</div>
             )}
           </div>
+          {c.retainer?.successFeeCollected > 0 && (
+            <div>
+              <div className="text-xs text-slate-400 mb-0.5">성공보수 수금</div>
+              <div className="text-sm text-emerald-600 font-semibold">{fmtMoney(c.retainer.successFeeCollected)}</div>
+            </div>
+          )}
         </div>
       </Section>
 
+      <Section title="기한 (불변기간)">
+        <div className="flex gap-2 mb-2">
+          <input className="input-sm flex-1" placeholder="기한 내용 (예: 항소장 제출)"
+            value={newDeadline.title} onChange={e => setNewDeadline(p => ({ ...p, title: e.target.value }))}
+            onKeyDown={e => { if (e.key === "Enter") addDeadline(); }} />
+          <input className="input-sm" style={{ width: "140px" }} type="date"
+            value={newDeadline.date} onChange={e => setNewDeadline(p => ({ ...p, date: e.target.value }))} />
+          <button onClick={addDeadline} disabled={!newDeadline.title.trim() || !newDeadline.date}
+            className="btn-primary text-xs px-3 py-1 disabled:opacity-40">추가</button>
+        </div>
+        {(() => {
+          const dls = (c.memos || []).filter(m => m.category === "불변기간" && !m.checked)
+            .sort((a, b) => new Date(a.date) - new Date(b.date));
+          if (dls.length === 0) return <div className="text-sm text-slate-400 italic">임박한 기한이 없습니다.</div>;
+          return (
+            <div className="space-y-1.5">
+              {dls.map(m => {
+                const d = dday(m.date);
+                const tone = d <= 0 ? "border-red-300 bg-red-50" : d <= 3 ? "border-rose-200 bg-rose-50/40" : d <= 7 ? "border-amber-200 bg-amber-50/30" : "border-slate-200 bg-slate-50";
+                return (
+                  <div key={m.id} className={`flex items-center gap-3 rounded-lg px-3 py-2 border ${tone}`}>
+                    <button onClick={() => toggleMemoCheck(m.id)}
+                      className="flex-shrink-0 w-4 h-4 rounded border-2 border-rose-300 hover:bg-rose-400 hover:text-white" title="완료 표시" />
+                    <DdayBadge dateStr={m.date} small />
+                    <span className="text-sm font-medium text-slate-700 flex-1 min-w-0 truncate">{m.title}</span>
+                    <span className="text-xs text-slate-500 flex-shrink-0">{fmtDate(m.date)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
+      </Section>
+
       <Section title="기일">
-        {c.hearings.length === 0 ? (
+        {hearings.length === 0 ? (
           <div className="text-sm text-slate-400 italic">등록된 기일이 없습니다.</div>
         ) : (
           <div className="space-y-1.5">
@@ -176,7 +272,7 @@ export default function OverviewTab({ c, onUpdate }) {
               <>
                 <div className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-1">예정</div>
                 {upcomingHearings.map(h => (
-                  <HearingRow key={h.id} h={h} upcoming onDelete={deleteHearing} />
+                  <HearingRow key={h.id} h={h} upcoming onDelete={deleteHearing} onAddDeadline={addAppealDeadline} />
                 ))}
               </>
             )}
@@ -184,7 +280,7 @@ export default function OverviewTab({ c, onUpdate }) {
               <>
                 <div className="text-xs font-medium text-slate-400 uppercase tracking-wide mt-2 mb-1">지난 기일</div>
                 {pastHearings.map(h => (
-                  <HearingRow key={h.id} h={h} onDelete={deleteHearing} />
+                  <HearingRow key={h.id} h={h} onDelete={deleteHearing} onAddDeadline={addAppealDeadline} />
                 ))}
               </>
             )}
@@ -203,12 +299,12 @@ export default function OverviewTab({ c, onUpdate }) {
           <button onClick={addTimeline} disabled={!newTimeline.trim()}
             className="btn-primary text-xs px-3 py-1 disabled:opacity-40">추가</button>
         </div>
-        {c.timeline.length === 0 ? (
+        {timeline.length === 0 ? (
           <div className="text-sm text-slate-400 italic">등록된 경과가 없습니다.</div>
         ) : (
           <div className="relative pl-4">
             <div className="absolute left-1.5 top-0 bottom-0 w-px bg-slate-200" />
-            {[...c.timeline].sort((a, b) => new Date(b.date) - new Date(a.date)).map((t) => (
+            {[...timeline].sort((a, b) => new Date(b.date) - new Date(a.date)).map((t) => (
               <div key={t.id} className="relative mb-3 last:mb-0">
                 <div className="absolute -left-2.5 top-1.5 w-2 h-2 rounded-full bg-indigo-400 border-2 border-white" />
                 <div className="flex items-center justify-between gap-1.5 mb-0.5">

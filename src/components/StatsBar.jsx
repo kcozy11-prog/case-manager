@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { today, dday, fmtDate } from "../utils";
+import { buildPendingTodos } from "../statsTodos";
 
 export default function StatsBar({ cases, onSelectCase }) {
   const [dropdown, setDropdown] = useState(null); // "month" | "week" | "todos" | null
@@ -20,14 +21,29 @@ export default function StatsBar({ cases, onSelectCase }) {
   ).sort((a, b) => new Date(a.date) - new Date(b.date));
 
   // 미완료 할 일 목록
-  const pendingTodos = cases.filter(c => c.status === "진행중").flatMap(c =>
-    (c.todos || []).filter(t => !t.done && !t.fromCalendar).map(t => ({ ...t, caseId: c.id, caseTitle: c.title }))
-  );
+  const pendingTodos = buildPendingTodos(cases);
 
   // 불변기간 미체크 항목 (마감일 임박순 정렬)
   const uncheckedDeadlines = cases.filter(c => c.status === "진행중").flatMap(c =>
     (c.memos || []).filter(m => m.category === "불변기간" && !m.checked).map(m => ({ ...m, caseId: c.id, caseTitle: c.title }))
   ).sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  // 제출 대기 서면 (작성했으나 미제출 — 아침 컨펌 워크플로)
+  const pendingBriefs = cases.filter(c => c.status === "진행중").flatMap(c =>
+    (c.briefs || []).filter(b => b.status !== "submitted")
+      .map(b => ({ ...b, caseId: c.id, caseTitle: c.title, displayDate: b.preparedDate ? fmtDate(b.preparedDate) : "" }))
+  ).sort((a, b) => (a.preparedDate || "").localeCompare(b.preparedDate || ""));
+
+  // 미수금 합계 (착수금 미입금분)
+  const outstanding = cases.filter(c => c.status === "진행중").reduce((sum, c) => {
+    const amt = Number(c.retainer?.amount) || 0;
+    const paid = Number(c.retainer?.paidAmount) || 0;
+    return sum + Math.max(0, amt - paid);
+  }, 0);
+  const outstandingCases = cases.filter(c => c.status === "진행중")
+    .map(c => ({ c, due: Math.max(0, (Number(c.retainer?.amount) || 0) - (Number(c.retainer?.paidAmount) || 0)) }))
+    .filter(x => x.due > 0)
+    .map(x => ({ caseId: x.c.id, caseTitle: x.c.title, title: `${x.due.toLocaleString()}원 미입금` }));
 
   const active = cases.filter(c => c.status === "진행중").length;
 
@@ -37,6 +53,11 @@ export default function StatsBar({ cases, onSelectCase }) {
     { key: "week", label: "7일 내 기일", value: weekHearings.length, unit: "건", color: weekHearings.length > 0 ? "#F87171" : "#94A3B8", items: weekHearings },
     { key: "todos", label: "미완료 할 일", value: pendingTodos.length, unit: "건", color: pendingTodos.length > 0 ? "#FBBF24" : "#94A3B8", items: pendingTodos },
     { key: "deadlines", label: "불변기간", value: uncheckedDeadlines.length, unit: "건", color: uncheckedDeadlines.length > 0 ? "#F43F5E" : "#94A3B8", items: uncheckedDeadlines },
+    { key: "briefs", label: "제출 대기 서면", value: pendingBriefs.length, unit: "건", color: pendingBriefs.length > 0 ? "#FB923C" : "#94A3B8", items: pendingBriefs },
+    { key: "outstanding", label: "미수금",
+      value: outstanding >= 10000 ? Math.floor(outstanding / 10000).toLocaleString() : outstanding.toLocaleString(),
+      unit: outstanding >= 10000 ? "만원" : "원",
+      color: outstanding > 0 ? "#FBBF24" : "#94A3B8", items: outstandingCases.length ? outstandingCases : null },
   ];
 
   const handleClick = (s) => {
@@ -78,18 +99,40 @@ export default function StatsBar({ cases, onSelectCase }) {
           <div className="absolute left-0 right-0 z-40 bg-slate-800 border-b border-slate-600 shadow-xl max-h-64 overflow-y-auto">
             {activeDropdown.items.map((item, i) => (
               <div key={i}
-                onClick={() => handleItemClick(item, dropdown === "todos" ? "todos" : "overview")}
+                onClick={() => handleItemClick(item, dropdown === "todos" ? "todos" : dropdown === "briefs" ? "briefs" : "overview")}
                 className="flex items-center justify-between px-6 py-2.5 hover:bg-slate-700 cursor-pointer border-b border-slate-700/50 last:border-b-0 transition-colors">
                 <div className="flex items-center gap-3 min-w-0">
                   <span className="text-xs font-medium text-slate-300 truncate max-w-[200px]">{item.caseTitle}</span>
                   <span className="text-xs text-slate-400 truncate">{item.text || item.title || item.type || ""}</span>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
-                  {item.date && <span className="text-xs text-slate-500">{fmtDate(item.date)}</span>}
-                  {item.date && dday(item.date) !== null && (
-                    <span className={`text-xs font-bold ${dday(item.date) <= 3 ? "text-red-400" : "text-slate-400"}`}>
-                      D{dday(item.date) === 0 ? "-day" : dday(item.date) > 0 ? `-${dday(item.date)}` : `+${Math.abs(dday(item.date))}`}
-                    </span>
+                  {dropdown === "todos" ? (
+                    <>
+                      <span className={`text-xs ${item.overdue ? "text-rose-300 font-semibold" : item.dueDate ? "text-slate-300" : "text-slate-500"}`}>
+                        {item.displayDate}
+                      </span>
+                      {item.dueDate && dday(item.dueDate) !== null && (
+                        <span className={`text-xs font-bold ${item.overdue ? "text-rose-300" : dday(item.dueDate) <= 3 ? "text-amber-300" : "text-slate-400"}`}>
+                          D{dday(item.dueDate) === 0 ? "-day" : dday(item.dueDate) > 0 ? `-${dday(item.dueDate)}` : `+${Math.abs(dday(item.dueDate))}`}
+                        </span>
+                      )}
+                      {item.overdue && (
+                        <span className="rounded-full border border-rose-300/40 bg-rose-400/10 px-2 py-0.5 text-[11px] font-semibold text-rose-300">기한 지남</span>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {(item.displayDate || item.date) && (
+                        <span className={`text-xs ${item.overdue ? "text-rose-300 font-semibold" : "text-slate-400"}`}>
+                          {item.displayDate || fmtDate(item.date)}
+                        </span>
+                      )}
+                      {item.date && dday(item.date) !== null && (
+                        <span className={`text-xs font-bold ${dday(item.date) <= 3 ? "text-red-400" : "text-slate-400"}`}>
+                          D{dday(item.date) === 0 ? "-day" : dday(item.date) > 0 ? `-${dday(item.date)}` : `+${Math.abs(dday(item.date))}`}
+                        </span>
+                      )}
+                    </>
                   )}
                   {item.priority && (
                     <span className={`text-xs ${item.priority === "높음" ? "text-red-400 font-semibold" : "text-slate-500"}`}>{item.priority}</span>

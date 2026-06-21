@@ -67,6 +67,19 @@ export default function CaseFormModal({ initial, onSave, onClose }) {
                   <option>진행중</option><option>종결</option>
                 </select>
               </div>
+              {form.status === "종결" && (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+                  <select className="input" value={form.closeResult || ""} onChange={e => set("closeResult", e.target.value)}>
+                    <option value="">결과 선택</option>
+                    <option>승소</option><option>일부승</option><option>패소</option>
+                    <option>조정·화해</option><option>취하</option><option>기타</option>
+                  </select>
+                  <input className="input" type="date" value={form.closedDate || ""}
+                    onChange={e => set("closedDate", e.target.value)} title="확정/종결일" />
+                  <input className="input" placeholder="종결 사유(선택)" value={form.closeReason || ""}
+                    onChange={e => set("closeReason", e.target.value)} />
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <input className="input" placeholder="관할 법원/기관" value={form.court}
                   onChange={e => set("court", e.target.value)} />
@@ -98,19 +111,32 @@ export default function CaseFormModal({ initial, onSave, onClose }) {
             </div>
           </FormSection>
 
-          <FormSection title="선임약정">
+          <FormSection title="선임약정 · 정산">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <input className="input" type="number" placeholder="착수금 (원)" value={form.retainer.amount}
                 onChange={e => set("retainer.amount", e.target.value)} />
               <input className="input" type="date" value={form.retainer.date}
-                onChange={e => set("retainer.date", e.target.value)} />
+                onChange={e => set("retainer.date", e.target.value)} title="수임일" />
+              <input className="input" type="number" placeholder="착수금 입금액 (원)" value={form.retainer.paidAmount || ""}
+                onChange={e => set("retainer.paidAmount", e.target.value)} />
+              <div className="input flex items-center text-slate-500 bg-slate-50">
+                미수금: {(() => {
+                  const due = Math.max(0, (Number(form.retainer.amount) || 0) - (Number(form.retainer.paidAmount) || 0));
+                  return due > 0 ? `${due.toLocaleString()}원` : "없음";
+                })()}
+              </div>
             </div>
             <input className="input w-full mt-2" placeholder="성공보수 조건 (예: 승소 시 회수금의 10%)"
               value={form.retainer.successFee}
               onChange={e => set("retainer.successFee", e.target.value)} />
-            <input className="input w-full mt-2" type="number" placeholder="성공보수 금액 (원, 선택)"
-              value={form.retainer.successFeeAmount}
-              onChange={e => set("retainer.successFeeAmount", e.target.value)} />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+              <input className="input" type="number" placeholder="성공보수 약정액 (원, 선택)"
+                value={form.retainer.successFeeAmount}
+                onChange={e => set("retainer.successFeeAmount", e.target.value)} />
+              <input className="input" type="number" placeholder="성공보수 수금액 (원, 선택)"
+                value={form.retainer.successFeeCollected || ""}
+                onChange={e => set("retainer.successFeeCollected", e.target.value)} />
+            </div>
           </FormSection>
 
           <FormSection title="기일">

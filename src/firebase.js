@@ -15,7 +15,8 @@ const app = initializeApp(firebaseConfig);
 
 export const auth = getAuth(app);
 export const provider = new GoogleAuthProvider();
-provider.addScope("https://www.googleapis.com/auth/calendar.readonly");
+// 캘린더 읽기 + 쓰기(전용 캘린더 생성·할일 이벤트 등록). 권한 확대로 1회 재로그인 필요.
+provider.addScope("https://www.googleapis.com/auth/calendar");
 provider.addScope("https://www.googleapis.com/auth/spreadsheets");
 provider.addScope("https://www.googleapis.com/auth/tasks.readonly");
 
