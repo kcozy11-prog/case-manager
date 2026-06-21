@@ -1,8 +1,9 @@
 import { useState } from "react";
 
 // 재사용 체크리스트 에디터
-// items: [{ id, text, done, details?, dueDate?, assignee?, cmCaseId?, cmCaseTitle?, googleEventId?, sourceDate? }]
-// 옵션: showDate, showAssignee, showCase(+cases), showDetails, onPushItem(item, field)+field, placeholder
+// items: [{ id, text, done, details?, dueDate?, assignee?, cmCaseId?, cmCaseTitle?, googleEventId?, cmBriefId?, sourceDate? }]
+// 옵션: showDate, showAssignee, showCase(+cases), showDetails, onPushItem(item, field)+field,
+//       onSendToCase(item, field) → 사건 제출대기서면 보내기(행별 사건 선택 활성), placeholder
 export default function ChecklistEditor({
   items = [],
   onChange,
@@ -14,6 +15,7 @@ export default function ChecklistEditor({
   showDetails = false,
   cases = [],
   onPushItem = null,
+  onSendToCase = null,
   emptyHint = "항목이 없습니다.",
 }) {
   const [text, setText] = useState("");
@@ -23,6 +25,8 @@ export default function ChecklistEditor({
   const [expandedId, setExpandedId] = useState(null); // 상세 편집 중인 항목
   const [pushingId, setPushingId] = useState(null);
   const [pushErr, setPushErr] = useState(null);
+  const [sendingId, setSendingId] = useState(null);
+  const [sendErr, setSendErr] = useState(null);
 
   const mkId = () => `item_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -62,6 +66,19 @@ export default function ChecklistEditor({
     }
   };
 
+  const send = async (item) => {
+    if (!onSendToCase) return;
+    if (!item.cmCaseId) { setSendErr({ id: item.id, msg: "관련 사건을 먼저 선택하세요." }); return; }
+    setSendingId(item.id); setSendErr(null);
+    try {
+      await onSendToCase(item, field);
+    } catch (e) {
+      setSendErr({ id: item.id, msg: e.message || "서면 보내기 실패" });
+    } finally {
+      setSendingId(null);
+    }
+  };
+
   return (
     <div className="space-y-2">
       {items.length === 0 ? (
@@ -80,9 +97,22 @@ export default function ChecklistEditor({
                 <span className={`text-sm flex-1 min-w-0 ${it.done ? "line-through text-slate-300" : "text-slate-700"}`}>
                   {it.text}
                   {it.assignee && <span className="ml-1.5 text-xs text-slate-400">@{it.assignee}</span>}
-                  {it.cmCaseTitle && <span className="ml-1.5 text-xs text-indigo-400">· {it.cmCaseTitle}</span>}
+                  {!onSendToCase && it.cmCaseTitle && <span className="ml-1.5 text-xs text-indigo-400">· {it.cmCaseTitle}</span>}
                   {it.sourceDate && <span className="ml-1.5 text-[11px] text-amber-500">↪{it.sourceDate.slice(5)}</span>}
                 </span>
+                {onSendToCase && showCase && (
+                  <select
+                    value={it.cmCaseId || ""}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      updateItem(it.id, { cmCaseId: id, cmCaseTitle: cases.find((c) => c.id === id)?.title || "" });
+                    }}
+                    className="input text-[11px] flex-shrink-0 w-[110px] py-0.5"
+                    title="관련 사건">
+                    <option value="">사건 선택</option>
+                    {cases.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
+                  </select>
+                )}
                 {it.dueDate && (
                   <span className="text-[11px] text-slate-400 font-mono flex-shrink-0">{it.dueDate.slice(5)}</span>
                 )}
@@ -101,6 +131,17 @@ export default function ChecklistEditor({
                     }`}
                     title={it.googleEventId ? "캘린더에 동기화됨 (다시 누르면 갱신)" : "구글 캘린더에 추가"}>
                     {pushingId === it.id ? "…" : it.googleEventId ? "📅✓" : "📅"}
+                  </button>
+                )}
+                {onSendToCase && (
+                  <button
+                    onClick={() => send(it)}
+                    disabled={sendingId === it.id || !it.cmCaseId}
+                    className={`flex-shrink-0 text-xs px-1 disabled:opacity-30 ${
+                      it.cmBriefId ? "text-emerald-500 hover:text-emerald-600" : "text-slate-300 hover:text-indigo-400"
+                    }`}
+                    title={!it.cmCaseId ? "관련 사건을 먼저 선택하세요" : it.cmBriefId ? "사건 제출대기서면에 추가됨 (다시 누르면 갱신)" : "사건 제출대기서면으로 보내기"}>
+                    {sendingId === it.id ? "…" : it.cmBriefId ? "📄✓" : "📄"}
                   </button>
                 )}
                 <button
@@ -125,6 +166,9 @@ export default function ChecklistEditor({
               )}
               {pushErr && pushErr.id === it.id && (
                 <div className="text-[11px] text-red-500 ml-6 mt-0.5">⚠ {pushErr.msg}</div>
+              )}
+              {sendErr && sendErr.id === it.id && (
+                <div className="text-[11px] text-red-500 ml-6 mt-0.5">⚠ {sendErr.msg}</div>
               )}
             </li>
           ))}

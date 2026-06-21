@@ -32,6 +32,8 @@ test("buildExportBatchUpdateData quotes every sheet name in A1 ranges", () => {
     "'메모'!A1",
     "'진행경과'!A1",
     "'할 일'!A1",
+    "'서면'!A1",
+    "'업무일지'!A1",
   ]);
   assert.equal(data[0].values[1][0], "경기외고 전성오 등 형사사건");
   assert.equal(data[1].values[1][5], "LBOX");

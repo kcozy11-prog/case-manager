@@ -6,7 +6,7 @@
 //  일지 entry 는 law-journal 의 필드 스키마를 그대로 유지한다.
 //  (대부분 JSON 문자열 필드 — journalLogic.js 의 함수들이 이 형태를 그대로 소비)
 // ─────────────────────────────────────────────────────────────────────────────
-import { collection, doc, setDoc, deleteDoc, onSnapshot } from "firebase/firestore";
+import { collection, doc, setDoc, deleteDoc, onSnapshot, getDocs } from "firebase/firestore";
 import { db } from "./firebase";
 
 // law-journal 의 FIELDS 와 동일한 entry 필드 집합
@@ -16,6 +16,8 @@ export const JOURNAL_FIELDS = [
   "submittedDocItems", "pendingDocs", "pendingDocItems", "pendingDocCompletions",
   "delegated", "delegatedItems", "learned", "learnedItems",
   "tomorrowTasks", "etc",
+  // 사건 연동: 진행 기록 / 통화 상담 기록 (JSON 배열 문자열)
+  "caseProgressItems", "callLogItems",
 ];
 
 export function emptyJournalEntry(dateKey) {
@@ -56,4 +58,13 @@ export async function saveJournalEntry(uid, dateKey, data) {
 export async function deleteJournalEntry(uid, dateKey) {
   if (!uid || !dateKey) return;
   await deleteDoc(doc(journalCol(uid), dateKey));
+}
+
+// 전체 일지 1회 조회 → { [dateKey]: entry } 맵 (내보내기 등 단발성 용도)
+export async function fetchAllJournalEntries(uid) {
+  if (!uid) return {};
+  const snap = await getDocs(journalCol(uid));
+  const map = {};
+  snap.docs.forEach((d) => { map[d.id] = d.data(); });
+  return map;
 }

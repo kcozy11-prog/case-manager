@@ -86,6 +86,13 @@ export function normalizeTaskItem(item, prefix = 'task') {
     assignee: item.assignee || '',
     sourceDate: item.sourceDate || '',
     createdAt: item.createdAt || '',
+    // 사건 연결·상세·연동 식별자는 이월 시에도 보존(끊김 방지)
+    details: item.details || '',
+    cmCaseId: item.cmCaseId || '',
+    cmCaseTitle: item.cmCaseTitle || '',
+    googleEventId: item.googleEventId || '',
+    cmBriefId: item.cmBriefId || '',
+    cmBriefSyncedAt: item.cmBriefSyncedAt || '',
   };
 }
 

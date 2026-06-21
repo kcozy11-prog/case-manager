@@ -151,7 +151,7 @@ export async function migrateLegacyData(userId, token) {
 
 // ── 구글시트 내보내기 ─────────────────────────────────────────────────
 
-export async function exportToGoogleSheet(token, cases) {
+export async function exportToGoogleSheet(token, cases, journalEntries = {}) {
   // 1. 새 스프레드시트 생성
   const createRes = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
     method: "POST",
@@ -167,8 +167,8 @@ export async function exportToGoogleSheet(token, cases) {
 
   const spreadsheet = await createRes.json();
 
-  // 2. 데이터 구성
-  const data = buildExportBatchUpdateData(cases);
+  // 2. 데이터 구성 (사건 + 업무일지)
+  const data = buildExportBatchUpdateData(cases, journalEntries);
 
   // 3. 일괄 입력
   const writeRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheet.spreadsheetId}/values:batchUpdate`, {

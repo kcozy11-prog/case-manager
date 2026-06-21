@@ -16,6 +16,8 @@ import UnmatchedTasksModal from "./components/UnmatchedTasksModal";
 import { migrateLegacyData, exportToGoogleSheet } from "./migrateLegacy";
 import { openSpreadsheetUrl } from "./exportOpen";
 import JournalApp from "./components/journal/JournalApp";
+import { fetchAllJournalEntries } from "./journalStore";
+import { computeRetainerPayups } from "./caseLink";
 import BriefsTab from "./components/BriefsTab";
 import GlobalSearch from "./components/GlobalSearch";
 import { ensureTaskCalendar, upsertTaskEvent, CalendarAuthError } from "./calendarPush";
@@ -172,6 +174,18 @@ export default function App() {
     await deleteDoc(doc(db, "users", user.uid, "cases", caseId));
     setMobileView("list");
   }, [user]);
+
+  // 착수금 일괄 완납처리: 약정액 > 입금액인 사건 모두 paidAmount=amount (멱등)
+  const bulkMarkRetainersPaid = useCallback(async () => {
+    if (!user) return;
+    const changed = computeRetainerPayups(cases);
+    if (changed.length === 0) { alert("완납처리할 미입금 사건이 없습니다."); return; }
+    if (!window.confirm(`착수금 미입금·부분입금 ${changed.length}건을 약정 착수금만큼 '입금 완료'로 일괄 처리할까요?`)) return;
+    const batch = writeBatch(db);
+    changed.forEach((c) => batch.set(doc(db, "users", user.uid, "cases", c.id), c));
+    await batch.commit();
+    alert(`${changed.length}건 착수금 완납처리 완료.`);
+  }, [user, cases]);
 
   const applyAI = useCallback((result, matchedCase) => {
     if (matchedCase) {
@@ -393,14 +407,15 @@ export default function App() {
       if (!token) { alert("Google 인증이 필요합니다."); return; }
     }
     try {
-      let url = await exportToGoogleSheet(token, cases);
+      const journalEntries = await fetchAllJournalEntries(user.uid);
+      let url = await exportToGoogleSheet(token, cases, journalEntries);
       if (!url) {
         // 기존 토큰에 쓰기 권한 없음 → 새 권한으로 재인증
         provider.setCustomParameters({ prompt: "consent" });
         token = await refreshGoogleToken();
         provider.setCustomParameters({});
         if (!token) { alert("Google 인증 실패."); return; }
-        url = await exportToGoogleSheet(token, cases);
+        url = await exportToGoogleSheet(token, cases, journalEntries);
       }
       if (url) openSpreadsheetUrl(url);
       else alert("내보내기 실패. 로그아웃 후 다시 로그인해주세요.");
@@ -503,7 +518,10 @@ export default function App() {
                     <button onClick={() => { setShowAdv(false); runMigration(); }}
                       className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"><span>📥</span> 가져오기</button>
                     <button onClick={() => { setShowAdv(false); runExport(); }}
-                      className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"><span>📤</span> 내보내기</button>
+                      className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"><span>📤</span> 내보내기 (사건+업무일지)</button>
+                    <div className="px-3 py-1 mt-1 border-t border-slate-100 text-[10px] text-slate-400 uppercase tracking-wider">일괄 작업</div>
+                    <button onClick={() => { setShowAdv(false); bulkMarkRetainersPaid(); }}
+                      className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"><span>💰</span> 착수금 일괄 완납처리</button>
                   </div>
                 </>
               )}
@@ -568,7 +586,7 @@ export default function App() {
 
         {/* 본문 */}
         {appMode === "journal" ? (
-          <JournalApp user={user} cases={cases} onPushTask={pushTaskToCalendar} />
+          <JournalApp user={user} cases={cases} onPushTask={pushTaskToCalendar} onUpdateCase={saveCase} />
         ) : (
         <div className="flex flex-1 min-h-0">
           {/* 좌측 목록 */}
