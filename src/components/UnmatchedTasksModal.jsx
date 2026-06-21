@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { fmtDate } from "../utils";
 
-export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onClose }) {
+export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onIgnore, onClose }) {
   // 각 태스크별 선택된 사건 ID 상태
   const [selections, setSelections] = useState(
     Object.fromEntries(tasks.map(({ task }) => [task.id, ""]))
@@ -23,7 +23,13 @@ export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onClose
   };
 
   const handleIgnore = (taskId) => {
+    if (onIgnore) onIgnore(taskId); // 영구 무시 저장 → 다음 동기화부터 숨김
     setDismissed(prev => new Set([...prev, taskId]));
+  };
+
+  const handleIgnoreAll = () => {
+    remaining.forEach(({ task }) => { if (onIgnore) onIgnore(task.id); });
+    setDismissed(prev => new Set([...prev, ...remaining.map(({ task }) => task.id)]));
   };
 
   const remaining = tasks.filter(({ task }) => !dismissed.has(task.id));
@@ -42,7 +48,7 @@ export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onClose
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between" style={{ background: "#1E293B" }}>
           <div>
             <div className="text-white font-semibold">📋 미매칭 할 일</div>
-            <div className="text-slate-400 text-xs">사건을 선택하여 추가하거나 무시할 수 있습니다</div>
+            <div className="text-slate-400 text-xs">사건에 추가하거나 무시할 수 있습니다 · 완료된 할일은 자동 숨김 · 무시 시 다시 안 나옵니다</div>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>
@@ -95,7 +101,8 @@ export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onClose
                   </button>
                   <button
                     onClick={() => handleIgnore(task.id)}
-                    className="text-xs text-slate-400 hover:text-slate-600 border border-slate-200 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
+                    title="이 할일을 영구히 숨깁니다 (다음 동기화에도 안 나옴)"
+                    className="text-xs text-slate-400 hover:text-rose-600 border border-slate-200 hover:border-rose-300 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
                   >
                     무시
                   </button>
@@ -106,7 +113,13 @@ export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onClose
         </div>
 
         {/* 푸터 */}
-        <div className="px-5 py-3 border-t border-slate-100 flex justify-end">
+        <div className="px-5 py-3 border-t border-slate-100 flex justify-between items-center">
+          {remaining.length > 0 ? (
+            <button onClick={handleIgnoreAll}
+              className="text-sm text-slate-400 hover:text-rose-600 transition-colors">
+              남은 {remaining.length}건 모두 무시
+            </button>
+          ) : <span />}
           <button onClick={onClose} className="text-sm text-slate-500 hover:text-slate-700 border border-slate-200 hover:border-slate-400 px-4 py-1.5 rounded-lg transition-colors">
             닫기
           </button>

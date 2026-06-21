@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { auth, provider, db } from "./firebase";
 import { onAuthStateChanged, signOut, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
-import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch } from "firebase/firestore";
+import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, arrayUnion } from "firebase/firestore";
 import { TYPES, STATUSES, todayStr, dday, fmtDate, emptyCase, SAMPLE_CASES } from "./utils";
 import { TypeBadge } from "./components/Badges";
 import LoginScreen from "./components/LoginScreen";
@@ -272,6 +272,17 @@ export default function App() {
 
       const { matched, unmatched } = matchTasksToCases(tasks, cases);
 
+      // 영구 무시 목록 로드 (기기 간 공유)
+      let ignoredIds = new Set();
+      try {
+        const snap = await getDoc(doc(db, "users", user.uid, "meta", "taskSync"));
+        if (snap.exists()) ignoredIds = new Set(snap.data().ignoredTaskIds || []);
+      } catch (e) { console.warn("무시 목록 로드 실패", e); }
+
+      // 미매칭 중 (1) 이미 완료된 할일, (2) 영구 무시한 할일 제외
+      const visibleUnmatched = unmatched.filter(({ task }) =>
+        task.status !== "completed" && !ignoredIds.has(task.id));
+
       // 자동 매칭된 항목을 사건 할 일로 추가/갱신 (Google Tasks notes 포함)
       let addedCount = 0;
       let updatedCount = 0;
@@ -285,23 +296,33 @@ export default function App() {
       }
       for (const [, uc] of updatedCases) await saveCase(uc);
 
-      // 미매칭 태스크 모달 표시
-      if (unmatched.length > 0) {
-        setUnmatchedTasks(unmatched);
+      // 미매칭 태스크 모달 표시 (완료·무시 제외분만)
+      if (visibleUnmatched.length > 0) {
+        setUnmatchedTasks(visibleUnmatched);
       }
 
-      setTaskResult({ added: addedCount, updated: updatedCount, unmatched: unmatched.length, total: tasks.length });
+      setTaskResult({ added: addedCount, updated: updatedCount, unmatched: visibleUnmatched.length, total: tasks.length });
       setTimeout(() => setTaskResult(null), 4000);
     } catch (e) {
       setTaskResult({ error: e.message });
     } finally { setTaskSyncing(false); }
   }, [googleToken, cases, saveCase, refreshGoogleToken]);
 
-  // 미매칭 태스크를 특정 사건에 수동 추가
+  // 미매칭 할일 영구 무시 (다음 동기화부터 숨김, 기기 간 공유)
+  const ignoreUnmatchedTask = useCallback(async (taskId) => {
+    if (!user || !taskId) return;
+    try {
+      await setDoc(doc(db, "users", user.uid, "meta", "taskSync"),
+        { ignoredTaskIds: arrayUnion(taskId) }, { merge: true });
+    } catch (e) { console.warn("할일 무시 저장 실패", e); }
+  }, [user]);
+
+  // 미매칭 태스크를 특정 사건에 수동 추가 (추가 후엔 다시 안 뜨도록 무시 목록에도 등록)
   const addUnmatchedTaskToCase = useCallback(async (task, caseObj) => {
     const merged = mergeTaskIntoCaseTodos({ ...caseObj, todos: [...(caseObj.todos || [])] }, task);
     await saveCase(merged.caseObj);
-  }, [saveCase]);
+    await ignoreUnmatchedTask(task.id);
+  }, [saveCase, ignoreUnmatchedTask]);
 
   // ── 할일 → 구글 캘린더 쓰기 (전용 '업무 할일' 캘린더, 단방향) ──────────────
   const taskCalIdRef = useRef(null);
@@ -677,6 +698,7 @@ export default function App() {
           tasks={unmatchedTasks}
           cases={cases}
           onAddToCase={addUnmatchedTaskToCase}
+          onIgnore={ignoreUnmatchedTask}
           onClose={() => setUnmatchedTasks(null)}
         />
       )}
