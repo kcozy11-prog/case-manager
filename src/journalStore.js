@@ -12,7 +12,7 @@ import { db } from "./firebase";
 // law-journal 의 FIELDS 와 동일한 entry 필드 집합
 export const JOURNAL_FIELDS = [
   "entryDate", "arrivalTime", "leaveTime",
-  "todayTasks", "todayWork", "eventMemos", "callNotes", "writtenDocs",
+  "todayTasks", "todayTaskCompletions", "todayWork", "eventMemos", "callNotes", "writtenDocs",
   "submittedDocItems", "pendingDocs", "pendingDocItems", "pendingDocCompletions",
   "delegated", "delegatedItems", "learned", "learnedItems",
   "tomorrowTasks", "etc",

@@ -104,7 +104,33 @@ export function sortChecklistByDueDate(items = []) {
   });
 }
 
+// ── 오늘 할 일 완료/삭제 기록(todayTaskCompletions) ─────────────────────────────
+//  carry-forward 가 텍스트로 중복을 판단하므로 완료 기록도 id·text 키로 매칭한다.
+function taskCompletionKeys(item) {
+  if (!item || !item.text || !item.text.trim()) return [];
+  const keys = [`text:${item.text.trim()}`];
+  if (item.id) keys.push(`id:${item.id}`);
+  return keys;
+}
+
+export function createTaskCompletion(item, completedAt = new Date().toISOString()) {
+  if (!item || !item.text || !item.text.trim()) return null;
+  return { id: item.id || '', text: item.text.trim(), completedAt };
+}
+
+function collectTaskCompletionKeys(entries = {}, targetDate) {
+  const completed = new Set();
+  Object.keys(entries)
+    .filter((dateKey) => dateKey <= targetDate)
+    .forEach((dateKey) => {
+      parseJsonArray(entries[dateKey]?.todayTaskCompletions)
+        .forEach((item) => taskCompletionKeys(item).forEach((key) => completed.add(key)));
+    });
+  return completed;
+}
+
 export function carryForwardTomorrowTasks(entries = {}, targetDate) {
+  const completedKeys = collectTaskCompletionKeys(entries, targetDate);
   const current = parseJsonArray(entries[targetDate]?.todayTasks).map((item) => normalizeTaskItem(item, 'today')).filter(Boolean);
   const existingTexts = new Set(current.map((item) => item.text));
 
@@ -118,13 +144,52 @@ export function carryForwardTomorrowTasks(entries = {}, targetDate) {
       .filter(Boolean);
 
     tomorrowTasks.forEach((item) => {
-      if (item.done || existingTexts.has(item.text)) return;
+      // 원본 항목이 완료됐거나, 이미 같은 텍스트가 있거나, 나중 날짜에서 체크/삭제된(완료 기록) 항목은 이월 안 함
+      if (item.done || existingTexts.has(item.text) || taskCompletionKeys(item).some((key) => completedKeys.has(key))) return;
       existingTexts.add(item.text);
       current.push({ ...item, sourceDate: item.sourceDate || dateKey, done: false });
     });
   });
 
   return sortChecklistByDueDate(current);
+}
+
+// 체크리스트 변경(prev→next)에서 '완료(done) 처리됐거나 삭제된' 항목을 골라낸다.
+// (이월된 항목을 나중 날짜에서 체크/삭제했음을 감지 → 완료 기록 생성용)
+export function diffResolvedItems(prevItems = [], nextItems = []) {
+  const nextById = new Map((nextItems || []).filter((i) => i && i.id).map((i) => [i.id, i]));
+  const resolved = [];
+  (prevItems || []).forEach((old) => {
+    if (!old || !old.id) return; // id 없는 레거시 항목은 식별 불가 → 건너뜀
+    const now = nextById.get(old.id);
+    if (now) {
+      if (!old.done && now.done) resolved.push(now); // 새로 체크됨
+    } else {
+      resolved.push(old); // 삭제됨
+    }
+  });
+  return resolved;
+}
+
+// 현재 활성(미완료로 존재하는) 항목의 완료 기록은 회수한다.
+// (체크 후 다시 체크 해제하거나 같은 항목을 되살린 경우, 잘못된 이월 억제를 막음 — id 기준 정확 매칭)
+export function pruneCompletionsForActive(completionsStr, items = []) {
+  const activeIds = new Set((items || []).filter((it) => it && !it.done && it.id).map((it) => it.id));
+  if (!activeIds.size) return completionsStr || '[]';
+  const kept = parseJsonArray(completionsStr).filter((r) => !(r && r.id && activeIds.has(r.id)));
+  return JSON.stringify(kept);
+}
+
+// 완료 기록 문자열(JSON)에 새 기록을 누적하되 id·text·기한·출처로 중복 제거.
+export function mergeCompletions(prevStr, newRecords = []) {
+  const keyOf = (r) => `${r.id || ''}|${r.text || ''}|${r.dueDate || ''}|${r.sourceDate || ''}`;
+  const existing = parseJsonArray(prevStr);
+  const seen = new Set(existing.map(keyOf));
+  (newRecords || []).filter(Boolean).forEach((r) => {
+    const key = keyOf(r);
+    if (!seen.has(key)) { seen.add(key); existing.push(r); }
+  });
+  return JSON.stringify(existing);
 }
 
 function pendingDocCompletionKeys(item, fallbackSourceDate = '') {

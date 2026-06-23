@@ -6,6 +6,7 @@ import {
   parseJsonArray, carryForwardTomorrowTasks, carryForwardPendingDocs,
   buildLearnedTopicGroups, searchLearnedItems, buildLearnedArchiveStats,
   buildLearnedTopicOptions,
+  diffResolvedItems, createTaskCompletion, createPendingDocCompletion, mergeCompletions, pruneCompletionsForActive,
 } from "../../journalLogic";
 import ChecklistEditor from "./ChecklistEditor";
 import CaseNoteEditor from "./CaseNoteEditor";
@@ -36,6 +37,7 @@ function entryToForm(entry, dateKey) {
     writtenDocs: e.writtenDocs || "",
     etc: e.etc || "",
     todayTasks: parseJsonArray(e.todayTasks),
+    todayTaskCompletions: e.todayTaskCompletions || "",
     tomorrowTasks: parseJsonArray(e.tomorrowTasks),
     pendingDocItems: parseJsonArray(e.pendingDocItems),
     delegatedItems: parseJsonArray(e.delegatedItems),
@@ -61,6 +63,7 @@ function formToEntry(form) {
     writtenDocs: form.writtenDocs,
     etc: form.etc,
     todayTasks: JSON.stringify(form.todayTasks || []),
+    todayTaskCompletions: form.todayTaskCompletions || "",
     tomorrowTasks: JSON.stringify(form.tomorrowTasks || []),
     pendingDocItems: JSON.stringify(form.pendingDocItems || []),
     pendingDocs: (form.pendingDocItems || []).map((i) => i.text).join("\n"),
@@ -138,6 +141,30 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     setForm((prev) => ({ ...prev, ...patch }));
     setDirty(true);
   }, []);
+
+  // 오늘 할 일 변경: 체크(done)·삭제된 항목은 완료 기록(todayTaskCompletions)에 남겨
+  // 다음 날 carry-forward 가 되살리지 않게 한다.
+  const handleTodayTasksChange = useCallback((v) => {
+    const now = new Date().toISOString();
+    setForm((prev) => {
+      const records = diffResolvedItems(prev.todayTasks, v).map((it) => createTaskCompletion(it, now));
+      const merged = mergeCompletions(prev.todayTaskCompletions, records);
+      return { ...prev, todayTasks: v, todayTaskCompletions: pruneCompletionsForActive(merged, v) };
+    });
+    setDirty(true);
+  }, []);
+
+  // 제출 예정 서면 변경: 동일하게 체크·삭제 항목을 완료 기록(pendingDocCompletions)에 남긴다.
+  const handlePendingDocsChange = useCallback((v) => {
+    const now = new Date().toISOString();
+    setForm((prev) => {
+      const records = diffResolvedItems(prev.pendingDocItems, v)
+        .map((it) => createPendingDocCompletion(it, now, it.sourceDate || currentDate));
+      const merged = mergeCompletions(prev.pendingDocCompletions, records);
+      return { ...prev, pendingDocItems: v, pendingDocCompletions: pruneCompletionsForActive(merged, v) };
+    });
+    setDirty(true);
+  }, [currentDate]);
 
   const save = useCallback(async () => {
     if (!user) return;
@@ -351,7 +378,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
             <SectionLabel hint="📝 상세 · 📅 캘린더 등록 · 체크 시 이월 안 됨">오늘 할 일</SectionLabel>
             <ChecklistEditor items={form.todayTasks} cases={cases} showCase showDetails
               field="todayTasks" onPushItem={onPushTask ? handlePushItem : null}
-              onChange={(v) => update({ todayTasks: v })} placeholder="오늘 처리할 업무 입력 후 Enter" />
+              onChange={handleTodayTasksChange} placeholder="오늘 처리할 업무 입력 후 Enter" />
 
             <SectionLabel hint="미완료 시 다음 날 '오늘 할 일'로 자동 이월">내일 할 일</SectionLabel>
             <ChecklistEditor items={form.tomorrowTasks} cases={cases} showCase showDetails
@@ -362,7 +389,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
             <ChecklistEditor items={form.pendingDocItems} cases={cases} showCase showDetails
               field="pendingDocItems" onPushItem={onPushTask ? handlePushItem : null}
               onSendToCase={onUpdateCase ? handleSendDoc : null}
-              onChange={(v) => update({ pendingDocItems: v })} placeholder="제출 예정 서면 입력 후 Enter" />
+              onChange={handlePendingDocsChange} placeholder="제출 예정 서면 입력 후 Enter" />
 
             <SectionLabel hint="담당자별 · 상세·캘린더 등록 가능">위임 업무</SectionLabel>
             <ChecklistEditor items={form.delegatedItems} showAssignee showDate showDetails

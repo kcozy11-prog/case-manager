@@ -100,19 +100,6 @@ export default function ChecklistEditor({
                   {!onSendToCase && it.cmCaseTitle && <span className="ml-1.5 text-xs text-indigo-400">· {it.cmCaseTitle}</span>}
                   {it.sourceDate && <span className="ml-1.5 text-[11px] text-amber-500">↪{it.sourceDate.slice(5)}</span>}
                 </span>
-                {onSendToCase && showCase && (
-                  <select
-                    value={it.cmCaseId || ""}
-                    onChange={(e) => {
-                      const id = e.target.value;
-                      updateItem(it.id, { cmCaseId: id, cmCaseTitle: cases.find((c) => c.id === id)?.title || "" });
-                    }}
-                    className="input text-[11px] flex-shrink-0 w-[110px] py-0.5"
-                    title="관련 사건">
-                    <option value="">사건 선택</option>
-                    {cases.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
-                  </select>
-                )}
                 {it.dueDate && (
                   <span className="text-[11px] text-slate-400 font-mono flex-shrink-0">{it.dueDate.slice(5)}</span>
                 )}
@@ -133,22 +120,44 @@ export default function ChecklistEditor({
                     {pushingId === it.id ? "…" : it.googleEventId ? "📅✓" : "📅"}
                   </button>
                 )}
-                {onSendToCase && (
-                  <button
-                    onClick={() => send(it)}
-                    disabled={sendingId === it.id || !it.cmCaseId}
-                    className={`flex-shrink-0 text-xs px-1 disabled:opacity-30 ${
-                      it.cmBriefId ? "text-emerald-500 hover:text-emerald-600" : "text-slate-300 hover:text-indigo-400"
-                    }`}
-                    title={!it.cmCaseId ? "관련 사건을 먼저 선택하세요" : it.cmBriefId ? "사건 제출대기서면에 추가됨 (다시 누르면 갱신)" : "사건 제출대기서면으로 보내기"}>
-                    {sendingId === it.id ? "…" : it.cmBriefId ? "📄✓" : "📄"}
-                  </button>
-                )}
                 <button
                   onClick={() => remove(it.id)}
                   className="text-slate-300 hover:text-red-500 text-sm flex-shrink-0 opacity-0 group-hover:opacity-100"
                   title="삭제">✕</button>
               </div>
+
+              {/* 사건 연동: 관련 사건 선택 + 사건 제출대기서면으로 보내기 (전용 줄로 분리해 눈에 잘 띄게) */}
+              {onSendToCase && (
+                <div className="flex items-center gap-2 flex-wrap ml-6 mt-1">
+                  <span className="text-[11px] text-slate-400 flex-shrink-0">사건 연동</span>
+                  <select
+                    value={it.cmCaseId || ""}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      updateItem(it.id, { cmCaseId: id, cmCaseTitle: cases.find((c) => c.id === id)?.title || "" });
+                    }}
+                    className="input text-[11px] py-0.5 w-[150px] flex-shrink-0"
+                    title="관련 사건">
+                    <option value="">관련 사건 선택…</option>
+                    {cases.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
+                  </select>
+                  {/* 사건 미선택이어도 버튼은 눌리게 두고, 누르면 안내 메시지 표시(조용한 무반응 방지) */}
+                  <button
+                    onClick={() => send(it)}
+                    disabled={sendingId === it.id}
+                    className={`text-[11px] px-2 py-0.5 rounded border flex-shrink-0 transition-colors disabled:opacity-50 ${
+                      it.cmBriefId
+                        ? "border-emerald-300 text-emerald-600 bg-emerald-50 hover:bg-emerald-100"
+                        : it.cmCaseId
+                          ? "border-indigo-300 text-indigo-600 hover:bg-indigo-50"
+                          : "border-slate-300 text-slate-500 hover:bg-slate-50"
+                    }`}
+                    title={it.cmBriefId ? "사건 제출대기서면에 추가됨 (다시 누르면 갱신)" : "사건 제출대기서면으로 보내기"}>
+                    {sendingId === it.id ? "전송 중…" : it.cmBriefId ? "📄 전송됨 · 갱신" : "📄 사건에 보내기"}
+                  </button>
+                  {!it.cmCaseId && <span className="text-[11px] text-amber-500 flex-shrink-0">← 먼저 사건을 선택하세요</span>}
+                </div>
+              )}
 
               {/* 상세 설명: 보기 + 인라인 편집 */}
               {showDetails && expandedId === it.id && (
@@ -168,7 +177,7 @@ export default function ChecklistEditor({
                 <div className="text-[11px] text-red-500 ml-6 mt-0.5">⚠ {pushErr.msg}</div>
               )}
               {sendErr && sendErr.id === it.id && (
-                <div className="text-[11px] text-red-500 ml-6 mt-0.5">⚠ {sendErr.msg}</div>
+                <div className="text-[11px] text-red-600 font-medium ml-6 mt-1 px-2 py-1 rounded bg-red-50 border border-red-200 inline-block">⚠ {sendErr.msg}</div>
               )}
             </li>
           ))}
@@ -189,13 +198,13 @@ export default function ChecklistEditor({
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }}
           placeholder={placeholder}
-          className="input text-xs flex-[2_1_180px] min-w-[140px]"
+          className="input text-xs flex-[4_1_220px] min-w-[160px]"
         />
         {showCase && (
           <select
             value={caseId}
             onChange={(e) => setCaseId(e.target.value)}
-            className="input text-xs flex-[1_1_140px] min-w-[120px]">
+            className="input text-xs flex-[0_1_120px] min-w-[100px]">
             <option value="">관련 사건(선택)</option>
             {cases.map((c) => (
               <option key={c.id} value={c.id}>{c.title}</option>
@@ -207,7 +216,7 @@ export default function ChecklistEditor({
             type="date"
             value={due}
             onChange={(e) => setDue(e.target.value)}
-            className="input text-xs flex-[0_1_140px] min-w-[120px] font-mono"
+            className="input text-xs flex-[0_1_130px] min-w-[112px] font-mono"
           />
         )}
         <button
