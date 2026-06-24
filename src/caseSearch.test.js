@@ -26,8 +26,8 @@ test('의뢰인으로 매칭', () => {
 });
 
 test('대소문자 무시', () => {
-  const c = [{ id: 'x', title: 'ABC Corp', caseNumber: '', client: '' }];
-  assert.deepEqual(filterCasesByQuery(c, 'abc').map(c => c.id), ['x']);
+  const cases = [{ id: 'x', title: 'ABC Corp', caseNumber: '', client: '' }];
+  assert.deepEqual(filterCasesByQuery(cases, 'abc').map((c) => c.id), ['x']);
 });
 
 test('여러 토큰은 모두 포함(AND)', () => {
