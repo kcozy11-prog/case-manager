@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { todayStr, fmtDate } from "../utils";
+import { markBriefSubmitted, markBriefPending } from "../caseLink";
 
 // 가벼운 서면 제출현황 추적
 //  - 제출 대기: 작성해 두었으나 (아침 컨펌 전 등) 아직 제출하지 않은 서면
@@ -23,10 +24,8 @@ export default function BriefsTab({ c, onUpdate }) {
     setTitle("");
   };
 
-  const markSubmitted = (id) =>
-    onUpdate({ ...c, briefs: briefs.map((b) => b.id === id ? { ...b, status: "submitted", submittedDate: b.submittedDate || todayStr } : b) });
-  const markPending = (id) =>
-    onUpdate({ ...c, briefs: briefs.map((b) => b.id === id ? { ...b, status: "pending", submittedDate: "" } : b) });
+  const markSubmitted = (id) => onUpdate(markBriefSubmitted(c, id, todayStr));
+  const markPending = (id) => onUpdate(markBriefPending(c, id));
   const del = (id) => onUpdate({ ...c, briefs: briefs.filter((b) => b.id !== id) });
 
   return (
