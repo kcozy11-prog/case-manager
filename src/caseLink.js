@@ -57,3 +57,31 @@ export function computeRetainerPayups(cases = []) {
   }
   return out;
 }
+
+// 대기서면 제출 처리: status=submitted + submittedDate + 진행경과(timeline)에 "{제목} 제출" 자동 기록.
+// 같은 서면 재제출 시 submitTimelineId 재사용 → 진행경과 중복 없음. makeId/today 주입(테스트 결정론).
+export function markBriefSubmitted(caseObj, briefId, today = '', makeId = () => Date.now()) {
+  const briefs = Array.isArray(caseObj?.briefs) ? caseObj.briefs : [];
+  const target = briefs.find((b) => b && b.id === briefId);
+  if (!target) return caseObj;
+  const submittedDate = target.submittedDate || today;
+  const timelineId = target.submitTimelineId || makeId();
+  const nextBriefs = briefs.map((b) =>
+    b.id === briefId ? { ...b, status: 'submitted', submittedDate, submitTimelineId: timelineId } : b);
+  const withBriefs = { ...caseObj, briefs: nextBriefs };
+  return upsertTimelineEntry(withBriefs, { id: timelineId, date: submittedDate, content: `${target.title || '서면'} 제출` });
+}
+
+// 제출 대기로 되돌리기: status=pending + submittedDate/submitTimelineId 비움 + 연결된 진행경과 항목 제거.
+export function markBriefPending(caseObj, briefId) {
+  const briefs = Array.isArray(caseObj?.briefs) ? caseObj.briefs : [];
+  const target = briefs.find((b) => b && b.id === briefId);
+  if (!target) return caseObj;
+  const nextBriefs = briefs.map((b) =>
+    b.id === briefId ? { ...b, status: 'pending', submittedDate: '', submitTimelineId: '' } : b);
+  const timeline = Array.isArray(caseObj?.timeline) ? caseObj.timeline : [];
+  const nextTimeline = target.submitTimelineId
+    ? timeline.filter((t) => t && t.id !== target.submitTimelineId)
+    : timeline;
+  return { ...caseObj, briefs: nextBriefs, timeline: nextTimeline };
+}

@@ -6,6 +6,8 @@ import {
   upsertBrief,
   buildCallTimelineContent,
   computeRetainerPayups,
+  markBriefSubmitted,
+  markBriefPending,
 } from './caseLink.js';
 
 // ── upsertTimelineEntry ──────────────────────────────────────────────
@@ -123,4 +125,48 @@ test('computeRetainerPayups preserves other retainer fields', () => {
   const out = computeRetainerPayups(cases);
   assert.equal(out[0].retainer.date, '2026-01-15');
   assert.equal(out[0].retainer.successFee, '10%');
+});
+
+test('markBriefSubmitted: 진행경과에 "{제목} 제출" 자동 추가 + 서면 상태 갱신', () => {
+  const c = { id: 'c1', briefs: [{ id: 'b1', title: '준비서면 2호', status: 'pending', preparedDate: '2026-06-20', submittedDate: '' }], timeline: [] };
+  const out = markBriefSubmitted(c, 'b1', '2026-06-24', () => 999);
+  const b = out.briefs.find(x => x.id === 'b1');
+  assert.equal(b.status, 'submitted');
+  assert.equal(b.submittedDate, '2026-06-24');
+  assert.equal(b.submitTimelineId, 999);
+  assert.equal(out.timeline.length, 1);
+  assert.deepEqual(out.timeline[0], { id: 999, date: '2026-06-24', content: '준비서면 2호 제출' });
+});
+
+test('markBriefSubmitted: 재호출해도 진행경과 중복 없음(submitTimelineId 재사용)', () => {
+  const c = { id: 'c1', briefs: [{ id: 'b1', title: '답변서', status: 'pending', submittedDate: '' }], timeline: [] };
+  const once = markBriefSubmitted(c, 'b1', '2026-06-24', () => 111);
+  const twice = markBriefSubmitted(once, 'b1', '2026-06-25', () => 222);
+  assert.equal(twice.timeline.length, 1);
+  assert.equal(twice.timeline[0].id, 111);
+});
+
+test('markBriefPending: 연결된 진행경과 항목 제거 + 서면 필드 비움', () => {
+  const submitted = markBriefSubmitted(
+    { id: 'c1', briefs: [{ id: 'b1', title: '답변서', status: 'pending', submittedDate: '' }], timeline: [{ id: 'keep', date: '2026-06-01', content: '기존 기록' }] },
+    'b1', '2026-06-24', () => 555,
+  );
+  const out = markBriefPending(submitted, 'b1');
+  const b = out.briefs.find(x => x.id === 'b1');
+  assert.equal(b.status, 'pending');
+  assert.equal(b.submittedDate, '');
+  assert.equal(b.submitTimelineId, '');
+  assert.deepEqual(out.timeline.map(t => t.id), ['keep']);
+});
+
+test('markBriefPending: submitTimelineId 없으면 timeline 변경 없음', () => {
+  const c = { id: 'c1', briefs: [{ id: 'b1', title: 'x', status: 'submitted', submittedDate: '2026-06-24' }], timeline: [{ id: 't1', date: '2026-06-01', content: 'a' }] };
+  const out = markBriefPending(c, 'b1');
+  assert.deepEqual(out.timeline.map(t => t.id), ['t1']);
+});
+
+test('mark* : 없는 briefId면 원본 그대로', () => {
+  const c = { id: 'c1', briefs: [], timeline: [] };
+  assert.equal(markBriefSubmitted(c, 'nope', '2026-06-24'), c);
+  assert.equal(markBriefPending(c, 'nope'), c);
 });
