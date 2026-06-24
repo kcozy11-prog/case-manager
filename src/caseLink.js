@@ -67,7 +67,7 @@ export function markBriefSubmitted(caseObj, briefId, today = '', makeId = () => 
   const submittedDate = target.submittedDate || today;
   const timelineId = target.submitTimelineId || makeId();
   const nextBriefs = briefs.map((b) =>
-    b.id === briefId ? { ...b, status: 'submitted', submittedDate, submitTimelineId: timelineId } : b);
+    b && b.id === briefId ? { ...b, status: 'submitted', submittedDate, submitTimelineId: timelineId } : b);
   const withBriefs = { ...caseObj, briefs: nextBriefs };
   return upsertTimelineEntry(withBriefs, { id: timelineId, date: submittedDate, content: `${target.title || '서면'} 제출` });
 }
@@ -78,7 +78,7 @@ export function markBriefPending(caseObj, briefId) {
   const target = briefs.find((b) => b && b.id === briefId);
   if (!target) return caseObj;
   const nextBriefs = briefs.map((b) =>
-    b.id === briefId ? { ...b, status: 'pending', submittedDate: '', submitTimelineId: '' } : b);
+    b && b.id === briefId ? { ...b, status: 'pending', submittedDate: '', submitTimelineId: '' } : b);
   const timeline = Array.isArray(caseObj?.timeline) ? caseObj.timeline : [];
   const nextTimeline = target.submitTimelineId
     ? timeline.filter((t) => t && t.id !== target.submitTimelineId)
