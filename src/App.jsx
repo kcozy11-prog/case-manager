@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { auth, provider, db } from "./firebase";
 import { onAuthStateChanged, signOut, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
-import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, arrayUnion } from "firebase/firestore";
+import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, getDocFromServer, waitForPendingWrites, arrayUnion } from "firebase/firestore";
 import { TYPES, STATUSES, todayStr, dday, fmtDate, emptyCase, SAMPLE_CASES } from "./utils";
 import { TypeBadge } from "./components/Badges";
 import LoginScreen from "./components/LoginScreen";
@@ -165,8 +165,42 @@ export default function App() {
 
   const saveCase = useCallback(async (c) => {
     if (!user) return;
-    await setDoc(doc(db, "users", user.uid, "cases", c.id), c);
+    // 낙관적 즉시 반영 — onSnapshot 지연/누락(멀티탭 등)에도 화면이 바로 갱신되도록
+    setCases(prev => prev.some(x => x.id === c.id) ? prev.map(x => x.id === c.id ? c : x) : [...prev, c]);
     setSelectedId(c.id);
+    await setDoc(doc(db, "users", user.uid, "cases", c.id), c);
+  }, [user]);
+
+  // 업무일지 → 사건 기록 전용 저장:
+  //  ① 화면 즉시 반영(낙관적) — onSnapshot 누락/지연에도 사건탭이 바로 갱신
+  //  ② 서버 반영 '확인' — 오프라인 캐시는 로컬 커밋만으로 resolve 되므로, 서버 거부가
+  //     조용히 묻히지 않도록 보류 쓰기 완료를 기다린 뒤 서버에서 재확인. 실패 시 오류 표면화.
+  //  (네트워크 지연으로 확인이 늦어지면 false 오류 대신 낙관적으로 통과 — 화면엔 이미 반영됨)
+  const saveCaseFromJournal = useCallback(async (c) => {
+    if (!user) throw new Error("로그인이 필요합니다. 로그아웃 후 다시 로그인해 주세요.");
+    const stamp = new Date().toISOString();
+    const payload = { ...c, _savedAt: stamp };
+    const ref = doc(db, "users", user.uid, "cases", c.id);
+    setCases(prev => prev.some(x => x.id === c.id) ? prev.map(x => x.id === c.id ? payload : x) : [...prev, payload]);
+    setSelectedId(c.id);
+    await setDoc(ref, payload);
+
+    // 보류 쓰기가 서버에 반영(또는 거부)될 때까지 대기 — 단, 6초 내 미완료면 낙관적 통과
+    const settled = await Promise.race([
+      waitForPendingWrites(db).then(() => "settled", () => "settled"),
+      new Promise((res) => setTimeout(() => res("timeout"), 6000)),
+    ]);
+    if (settled === "timeout") return;
+
+    let snap;
+    try {
+      snap = await getDocFromServer(ref);
+    } catch (e) {
+      throw new Error(`서버 저장 실패: ${e.code || e.message}. 로그인·권한·네트워크 상태를 확인해 주세요.`);
+    }
+    if (!snap.exists() || snap.data()?._savedAt !== stamp) {
+      throw new Error("변경이 서버에 반영되지 않았습니다(거부/롤백). 다시 시도해 주세요.");
+    }
   }, [user]);
 
   const deleteCase = useCallback(async (caseId) => {
@@ -586,7 +620,7 @@ export default function App() {
 
         {/* 본문 */}
         {appMode === "journal" ? (
-          <JournalApp user={user} cases={cases} onPushTask={pushTaskToCalendar} onUpdateCase={saveCase} />
+          <JournalApp user={user} cases={cases} onPushTask={pushTaskToCalendar} onUpdateCase={saveCaseFromJournal} />
         ) : (
         <div className="flex flex-1 min-h-0">
           {/* 좌측 목록 */}

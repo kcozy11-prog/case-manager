@@ -121,7 +121,7 @@ export default function CaseNoteEditor({
                 )}
 
                 {err && err.id === it.id && (
-                  <div className="text-[11px] text-red-500 mt-1">⚠ {err.msg}</div>
+                  <div className="text-[11px] text-red-600 font-medium mt-1 px-2 py-1 rounded bg-red-50 border border-red-200 inline-block">⚠ {err.msg}</div>
                 )}
               </li>
             );
