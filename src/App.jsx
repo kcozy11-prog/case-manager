@@ -44,6 +44,7 @@ export default function App() {
   const [taskSyncing, setTaskSyncing] = useState(false);
   const [taskResult, setTaskResult] = useState(null);
   const [unmatchedTasks, setUnmatchedTasks] = useState(null); // null or array
+  const [caseSaveMsg, setCaseSaveMsg] = useState(null); // 업무일지→사건 저장 결과 진단 배너
   const autoCalendarSyncStarted = useRef(false);
   const autoTaskSyncStarted = useRef(false);
 
@@ -177,29 +178,44 @@ export default function App() {
   //     조용히 묻히지 않도록 보류 쓰기 완료를 기다린 뒤 서버에서 재확인. 실패 시 오류 표면화.
   //  (네트워크 지연으로 확인이 늦어지면 false 오류 대신 낙관적으로 통과 — 화면엔 이미 반영됨)
   const saveCaseFromJournal = useCallback(async (c) => {
-    if (!user) throw new Error("로그인이 필요합니다. 로그아웃 후 다시 로그인해 주세요.");
+    if (!user) { setCaseSaveMsg({ type: "err", text: "로그인이 필요합니다. 로그아웃 후 다시 로그인하세요." }); throw new Error("로그인 필요"); }
     const stamp = new Date().toISOString();
     const payload = { ...c, _savedAt: stamp };
     const ref = doc(db, "users", user.uid, "cases", c.id);
     setCases(prev => prev.some(x => x.id === c.id) ? prev.map(x => x.id === c.id ? payload : x) : [...prev, payload]);
     setSelectedId(c.id);
-    await setDoc(ref, payload);
+    setCaseSaveMsg({ type: "pending", text: `사건 "${c.title || c.id}" 저장 확인 중…` });
 
-    // 보류 쓰기가 서버에 반영(또는 거부)될 때까지 대기 — 단, 6초 내 미완료면 낙관적 통과
+    try {
+      await setDoc(ref, payload);
+    } catch (e) {
+      setCaseSaveMsg({ type: "err", text: `저장 실패(클라이언트): ${e.code || e.message}` });
+      throw e;
+    }
+
+    // 보류 쓰기가 서버에 반영(또는 거부)될 때까지 대기 — 10초 내 미완료면 지연 안내
     const settled = await Promise.race([
       waitForPendingWrites(db).then(() => "settled", () => "settled"),
-      new Promise((res) => setTimeout(() => res("timeout"), 6000)),
+      new Promise((res) => setTimeout(() => res("timeout"), 10000)),
     ]);
-    if (settled === "timeout") return;
+    if (settled === "timeout") {
+      setCaseSaveMsg({ type: "warn", text: "⏱ 서버 응답 지연(10초 초과). 네트워크/방화벽/확장프로그램이 Firestore를 막는지 확인하세요." });
+      return;
+    }
 
     let snap;
     try {
       snap = await getDocFromServer(ref);
     } catch (e) {
-      throw new Error(`서버 저장 실패: ${e.code || e.message}. 로그인·권한·네트워크 상태를 확인해 주세요.`);
+      setCaseSaveMsg({ type: "err", text: `✗ 서버 저장 실패: ${e.code || e.message}` });
+      return;
     }
-    if (!snap.exists() || snap.data()?._savedAt !== stamp) {
-      throw new Error("변경이 서버에 반영되지 않았습니다(거부/롤백). 다시 시도해 주세요.");
+    if (!snap.exists()) {
+      setCaseSaveMsg({ type: "err", text: "✗ 서버에 사건 문서가 없습니다(생성 실패)." });
+    } else if (snap.data()?._savedAt !== stamp) {
+      setCaseSaveMsg({ type: "err", text: "✗ 서버에 반영 안 됨(거부/롤백). 보안 규칙·권한·문서 크기(1MB)를 확인하세요." });
+    } else {
+      setCaseSaveMsg({ type: "ok", text: `✓ 사건 "${c.title || c.id}"에 저장 완료 (서버 확인됨)` });
     }
   }, [user]);
 
@@ -496,6 +512,18 @@ export default function App() {
       `}</style>
 
       <div className="flex flex-col h-screen bg-slate-100" style={{ minHeight: "100vh" }}>
+        {/* 업무일지→사건 저장 결과 진단 배너 */}
+        {caseSaveMsg && (
+          <div className={`px-4 py-2 text-sm flex items-center justify-between gap-3 ${
+            caseSaveMsg.type === "ok" ? "bg-emerald-600 text-white"
+            : caseSaveMsg.type === "warn" ? "bg-amber-500 text-white"
+            : caseSaveMsg.type === "pending" ? "bg-slate-700 text-white"
+            : "bg-red-600 text-white"
+          }`}>
+            <span className="font-medium break-all">{caseSaveMsg.text}</span>
+            <button onClick={() => setCaseSaveMsg(null)} className="flex-shrink-0 text-white/80 hover:text-white text-base leading-none px-1">✕</button>
+          </div>
+        )}
         {/* 헤더 */}
         <div style={{ background: "#0F172A" }} className="flex items-center justify-between px-4 sm:px-6 py-3">
           <div className="flex items-center gap-3">
