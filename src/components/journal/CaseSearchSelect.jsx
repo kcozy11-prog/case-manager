@@ -28,8 +28,8 @@ export default function CaseSearchSelect({ cases = [], value = "", onChange, pla
 
   const onKeyDown = (e) => {
     if (e.key === "Escape") { setOpen(false); setQuery(""); return; }
-    if (e.key === "ArrowDown") { e.preventDefault(); setHi((i) => Math.min(i + 1, filtered.length - 1)); return; }
-    if (e.key === "ArrowUp") { e.preventDefault(); setHi((i) => Math.max(i - 1, 0)); return; }
+    if (e.key === "ArrowDown") { e.preventDefault(); setHi(Math.min(safeHi + 1, filtered.length - 1)); return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); setHi(Math.max(safeHi - 1, 0)); return; }
     if (e.key === "Enter") { e.preventDefault(); const c = filtered[safeHi]; if (c) pick(c.id); return; }
   };
 
