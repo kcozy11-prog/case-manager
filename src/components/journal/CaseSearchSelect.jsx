@@ -12,6 +12,8 @@ export default function CaseSearchSelect({ cases = [], value = "", onChange, pla
 
   const selected = cases.find((c) => c.id === value) || null;
   const filtered = filterCasesByQuery(cases, query);
+  // 필터 결과가 줄어 hi가 범위를 벗어나도 항상 유효한 인덱스를 가리키게 클램프(Enter 무반응 방지)
+  const safeHi = filtered.length ? Math.min(hi, filtered.length - 1) : 0;
 
   useEffect(() => {
     if (!open) return;
@@ -28,13 +30,13 @@ export default function CaseSearchSelect({ cases = [], value = "", onChange, pla
     if (e.key === "Escape") { setOpen(false); setQuery(""); return; }
     if (e.key === "ArrowDown") { e.preventDefault(); setHi((i) => Math.min(i + 1, filtered.length - 1)); return; }
     if (e.key === "ArrowUp") { e.preventDefault(); setHi((i) => Math.max(i - 1, 0)); return; }
-    if (e.key === "Enter") { e.preventDefault(); const c = filtered[hi]; if (c) pick(c.id); return; }
+    if (e.key === "Enter") { e.preventDefault(); const c = filtered[safeHi]; if (c) pick(c.id); return; }
   };
 
   return (
     <div className={`relative ${className}`} ref={wrapRef}>
-      <div onClick={() => setOpen((o) => !o)}
-        className="input text-xs w-full text-left flex items-center justify-between gap-1 cursor-pointer">
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        className="input text-xs w-full text-left flex items-center justify-between gap-1">
         <span className={`truncate ${selected ? "text-slate-700" : "text-slate-400"}`}>
           {selected ? selected.title : placeholder}
         </span>
@@ -42,7 +44,7 @@ export default function CaseSearchSelect({ cases = [], value = "", onChange, pla
           <span onClick={(e) => { e.stopPropagation(); pick(""); }}
             className="text-slate-300 hover:text-red-500 flex-shrink-0 px-0.5" title="선택 해제">✕</span>
         ) : <span className="text-slate-300 flex-shrink-0">▾</span>}
-      </div>
+      </button>
       {open && (
         <div className="absolute z-20 mt-1 w-full min-w-[180px] bg-white border border-slate-200 rounded-lg shadow-lg">
           <input ref={inputRef} value={query}
@@ -59,7 +61,7 @@ export default function CaseSearchSelect({ cases = [], value = "", onChange, pla
               <li key={c.id}>
                 <button type="button" onClick={() => pick(c.id)} onMouseEnter={() => setHi(i)}
                   className={`w-full text-left text-xs px-2.5 py-1.5 truncate ${
-                    i === hi ? "bg-indigo-50 text-indigo-700" : "text-slate-700 hover:bg-slate-50"
+                    i === safeHi ? "bg-indigo-50 text-indigo-700" : "text-slate-700 hover:bg-slate-50"
                   } ${c.id === value ? "font-medium" : ""}`}>
                   {c.title}
                   {c.caseNumber && <span className="text-slate-400 ml-1.5">{c.caseNumber}</span>}
