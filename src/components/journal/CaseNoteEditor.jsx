@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import CaseSearchSelect from "./CaseSearchSelect";
 
 // 사건 연동 기록 에디터 (재사용)
 //  variant="progress" : 관련 사건 + 내용  → 사건 진행경과(timeline)
@@ -65,11 +66,8 @@ export default function CaseNoteEditor({
   };
 
   const caseSelect = (value, onPick, extraClass = "") => (
-    <select value={value} onChange={(e) => onPick(e.target.value)}
-      className={`input text-xs ${extraClass}`}>
-      <option value="">관련 사건(선택)</option>
-      {cases.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
-    </select>
+    <CaseSearchSelect cases={cases} value={value} onChange={onPick}
+      placeholder="관련 사건(선택)" className={extraClass} />
   );
 
   return (
