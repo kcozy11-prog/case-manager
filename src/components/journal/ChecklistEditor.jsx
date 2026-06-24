@@ -1,4 +1,5 @@
 import { useState } from "react";
+import CaseSearchSelect from "./CaseSearchSelect";
 
 // 재사용 체크리스트 에디터
 // items: [{ id, text, done, details?, dueDate?, assignee?, cmCaseId?, cmCaseTitle?, googleEventId?, cmBriefId?, sourceDate? }]
@@ -130,17 +131,12 @@ export default function ChecklistEditor({
               {onSendToCase && (
                 <div className="flex items-center gap-2 flex-wrap ml-6 mt-1">
                   <span className="text-[11px] text-slate-400 flex-shrink-0">사건 연동</span>
-                  <select
+                  <CaseSearchSelect
+                    cases={cases}
                     value={it.cmCaseId || ""}
-                    onChange={(e) => {
-                      const id = e.target.value;
-                      updateItem(it.id, { cmCaseId: id, cmCaseTitle: cases.find((c) => c.id === id)?.title || "" });
-                    }}
-                    className="input text-[11px] py-0.5 w-[150px] flex-shrink-0"
-                    title="관련 사건">
-                    <option value="">관련 사건 선택…</option>
-                    {cases.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
-                  </select>
+                    onChange={(id) => updateItem(it.id, { cmCaseId: id, cmCaseTitle: cases.find((c) => c.id === id)?.title || "" })}
+                    placeholder="관련 사건 선택…"
+                    className="w-[170px] flex-shrink-0" />
                   {/* 사건 미선택이어도 버튼은 눌리게 두고, 누르면 안내 메시지 표시(조용한 무반응 방지) */}
                   <button
                     onClick={() => send(it)}
@@ -201,15 +197,12 @@ export default function ChecklistEditor({
           className="input text-xs flex-[4_1_220px] min-w-[160px]"
         />
         {showCase && (
-          <select
+          <CaseSearchSelect
+            cases={cases}
             value={caseId}
-            onChange={(e) => setCaseId(e.target.value)}
-            className="input text-xs flex-[0_1_120px] min-w-[100px]">
-            <option value="">관련 사건(선택)</option>
-            {cases.map((c) => (
-              <option key={c.id} value={c.id}>{c.title}</option>
-            ))}
-          </select>
+            onChange={setCaseId}
+            placeholder="관련 사건(선택)"
+            className="flex-[0_1_150px] min-w-[120px]" />
         )}
         {showDate && (
           <input
