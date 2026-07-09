@@ -25,6 +25,12 @@ test('upsertTimelineEntry replaces date/content of an existing id (no duplicate)
   assert.deepEqual(out.timeline[0], { id: 7, date: '2026-01-02', content: '최종본' });
 });
 
+test('upsertTimelineEntry stores optional detail memo', () => {
+  const c = { id: 'c1', timeline: [] };
+  const out = upsertTimelineEntry(c, { id: 3, date: '2026-02-01', content: '준비서면 초안', detail: '쟁점별 증거 보강 필요' });
+  assert.deepEqual(out.timeline[0], { id: 3, date: '2026-02-01', content: '준비서면 초안', detail: '쟁점별 증거 보강 필요' });
+});
+
 test('upsertTimelineEntry handles a case with no timeline array', () => {
   const c = { id: 'c1' };
   const out = upsertTimelineEntry(c, { id: 1, date: '2026-01-01', content: 'x' });
@@ -69,6 +75,14 @@ test('upsertBrief updates title but preserves submitted status on re-send', () =
   assert.equal(out.briefs[0].title, '준비서면 2호(수정)');
   assert.equal(out.briefs[0].status, 'submitted');
   assert.equal(out.briefs[0].submittedDate, '2026-03-05');
+});
+
+test('upsertBrief stores and updates optional details memo', () => {
+  const c = { id: 'c1', briefs: [] };
+  const once = upsertBrief(c, { id: 9, title: '준비서면 2호', preparedDate: '2026-03-01', details: '증거 3호 첨부 확인' });
+  assert.equal(once.briefs[0].details, '증거 3호 첨부 확인');
+  const twice = upsertBrief(once, { id: 9, title: '준비서면 2호', preparedDate: '2026-03-01', details: '청구취지 수정 확인' });
+  assert.equal(twice.briefs[0].details, '청구취지 수정 확인');
 });
 
 // ── buildCallTimelineContent ─────────────────────────────────────────

@@ -59,11 +59,14 @@ export default function OverviewTab({ c, onUpdate }) {
   const [showMemoForm, setShowMemoForm] = useState(false);
   const [newMemo, setNewMemo] = useState({ category: "일반메모", title: "", content: "" });
   const [newTimeline, setNewTimeline] = useState("");
+  const [newTimelineDetail, setNewTimelineDetail] = useState("");
   const [newTimelineDate, setNewTimelineDate] = useState(todayStr);
   const [editingTimelineId, setEditingTimelineId] = useState(null);
   const [editingTimelineDate, setEditingTimelineDate] = useState("");
   const [editingTimelineContentId, setEditingTimelineContentId] = useState(null);
   const [editingTimelineContent, setEditingTimelineContent] = useState("");
+  const [editingTimelineDetailId, setEditingTimelineDetailId] = useState(null);
+  const [editingTimelineDetail, setEditingTimelineDetail] = useState("");
   const [editingMemoDate, setEditingMemoDate] = useState("");
   const [editingMemoId, setEditingMemoId] = useState(null);
   const [editingMemoFullId, setEditingMemoFullId] = useState(null);
@@ -71,8 +74,11 @@ export default function OverviewTab({ c, onUpdate }) {
 
   const addTimeline = () => {
     if (!newTimeline.trim()) return;
-    onUpdate({ ...c, timeline: [...(c.timeline || []), { id: Date.now(), date: newTimelineDate || todayStr, content: newTimeline.trim() }] });
+    onUpdate({ ...c, timeline: [...(c.timeline || []), {
+      id: Date.now(), date: newTimelineDate || todayStr, content: newTimeline.trim(), detail: newTimelineDetail.trim(),
+    }] });
     setNewTimeline("");
+    setNewTimelineDetail("");
     setNewTimelineDate(todayStr);
   };
 
@@ -114,6 +120,11 @@ export default function OverviewTab({ c, onUpdate }) {
     setEditingTimelineContentId(null);
   };
 
+  const saveTimelineDetail = (id) => {
+    onUpdate({ ...c, timeline: (c.timeline || []).map(t => t.id === id ? { ...t, detail: editingTimelineDetail } : t) });
+    setEditingTimelineDetailId(null);
+  };
+
   const deleteTimeline = (id) => {
     onUpdate({ ...c, timeline: (c.timeline || []).filter(t => t.id !== id) });
   };
@@ -138,6 +149,9 @@ export default function OverviewTab({ c, onUpdate }) {
   const timeline = c.timeline || [];
   const filteredMemos = memoTab === "전체" ? memos : memos.filter(m => m.category === memoTab);
   const sortedMemos = [...filteredMemos].sort((a, b) => new Date(b.date) - new Date(a.date));
+  // 하단 기존 메모 섹션은 상세 진행경과로 역할을 넘기고 화면에서는 숨긴다.
+  // 데이터는 그대로 보존되어 불변기간/자동 메모 등 기존 기능과 호환된다.
+  const showLegacyMemoSection = false;
 
   const toggleMemo = (id) => {
     setExpandedMemos(prev => {
@@ -290,14 +304,18 @@ export default function OverviewTab({ c, onUpdate }) {
 
       <Section title="진행경과">
         {/* 빠른 입력 */}
-        <div className="flex gap-2 mb-3">
-          <input type="date" className="input-sm" style={{ width: "130px" }} value={newTimelineDate}
-            onChange={e => setNewTimelineDate(e.target.value)} />
-          <input className="input-sm flex-1" placeholder="경과 한줄 입력..." value={newTimeline}
-            onChange={e => setNewTimeline(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter") addTimeline(); }} />
-          <button onClick={addTimeline} disabled={!newTimeline.trim()}
-            className="btn-primary text-xs px-3 py-1 disabled:opacity-40">추가</button>
+        <div className="mb-3 space-y-2 rounded-xl border border-slate-100 bg-slate-50/60 p-3">
+          <div className="flex gap-2">
+            <input type="date" className="input-sm" style={{ width: "130px" }} value={newTimelineDate}
+              onChange={e => setNewTimelineDate(e.target.value)} />
+            <input className="input-sm flex-1" placeholder="경과 한줄 입력..." value={newTimeline}
+              onChange={e => setNewTimeline(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") addTimeline(); }} />
+            <button onClick={addTimeline} disabled={!newTimeline.trim()}
+              className="btn-primary text-xs px-3 py-1 disabled:opacity-40">추가</button>
+          </div>
+          <textarea className="input-sm w-full min-h-[58px] text-xs" placeholder="상세 메모 (상담 내용, 다음 액션, 증거/서류 확인사항 등)"
+            value={newTimelineDetail} onChange={e => setNewTimelineDetail(e.target.value)} />
         </div>
         {timeline.length === 0 ? (
           <div className="text-sm text-slate-400 italic">등록된 경과가 없습니다.</div>
@@ -325,6 +343,9 @@ export default function OverviewTab({ c, onUpdate }) {
                   <div className="flex items-center gap-2">
                     <button onClick={() => { setEditingTimelineContentId(t.id); setEditingTimelineContent(t.content); }}
                       className="text-xs text-slate-300 hover:text-indigo-500 transition-colors" title="내용 수정">✎</button>
+                    <button onClick={() => { setEditingTimelineDetailId(t.id); setEditingTimelineDetail(t.detail || ""); }}
+                      className={`text-xs transition-colors ${t.detail ? "text-indigo-400 hover:text-indigo-600" : "text-slate-300 hover:text-indigo-500"}`}
+                      title={t.detail ? "상세메모 수정" : "상세메모 추가"}>상세</button>
                     <button onClick={() => deleteTimeline(t.id)}
                       className="text-xs text-slate-300 hover:text-red-500 transition-colors" title="삭제">✕</button>
                   </div>
@@ -342,12 +363,28 @@ export default function OverviewTab({ c, onUpdate }) {
                 ) : (
                   <div className="text-sm text-slate-700">{t.content}</div>
                 )}
+                {editingTimelineDetailId === t.id ? (
+                  <div className="mt-1 space-y-1">
+                    <textarea className="input-sm w-full min-h-[64px] text-xs"
+                      value={editingTimelineDetail}
+                      onChange={e => setEditingTimelineDetail(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Escape") setEditingTimelineDetailId(null); }}
+                      autoFocus />
+                    <div className="flex justify-end gap-2">
+                      <button onClick={() => setEditingTimelineDetailId(null)} className="text-xs text-slate-400 hover:text-slate-600 px-1">취소</button>
+                      <button onClick={() => saveTimelineDetail(t.id)} className="btn-primary text-xs px-2 py-1">상세 저장</button>
+                    </div>
+                  </div>
+                ) : (
+                  t.detail && <div className="text-xs text-slate-500 mt-1 whitespace-pre-wrap leading-relaxed bg-slate-50 border border-slate-100 rounded-md px-2 py-1.5">{t.detail}</div>
+                )}
               </div>
             ))}
           </div>
         )}
       </Section>
 
+      {showLegacyMemoSection && (
       <Section title="메모">
         <div className="flex gap-1 mb-3 flex-wrap">
           {["전체", ...MEMO_CATEGORIES].map(cat => (
@@ -473,6 +510,7 @@ export default function OverviewTab({ c, onUpdate }) {
             className="mt-3 text-xs text-indigo-500 hover:text-indigo-700 font-medium">+ 새 메모</button>
         )}
       </Section>
+      )}
     </div>
   );
 }

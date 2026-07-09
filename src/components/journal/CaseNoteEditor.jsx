@@ -2,9 +2,9 @@ import { useState, useEffect } from "react";
 import CaseSearchSelect from "./CaseSearchSelect";
 
 // 사건 연동 기록 에디터 (재사용)
-//  variant="progress" : 관련 사건 + 내용  → 사건 진행경과(timeline)
+//  variant="progress" : 관련 사건 + 제목/한줄 + 상세메모  → 사건 진행경과(timeline)
 //  variant="call"     : 관련 사건 + 제목 + 상세 + ☐의뢰인요청  → 진행경과(+의뢰인요청 메모)
-// item: { id, caseId, caseTitle, date, content?, title?, detail?, asClientRequest?, recordedAt?, timelineId?, memoId? }
+// item: { id, caseId, caseTitle, date, content?, detail?, title?, asClientRequest?, recordedAt?, timelineId?, memoId? }
 // onRecord(item, field): async → JournalApp 이 사건에 쓰고 item 에 recordedAt/timelineId/memoId 갱신·저장
 export default function CaseNoteEditor({
   items = [],
@@ -19,6 +19,7 @@ export default function CaseNoteEditor({
   const isCall = variant === "call";
   const [caseId, setCaseId] = useState("");
   const [content, setContent] = useState("");
+  const [progressDetail, setProgressDetail] = useState("");
   const [title, setTitle] = useState("");
   const [detail, setDetail] = useState("");
   const [date, setDate] = useState(defaultDate);
@@ -43,9 +44,9 @@ export default function CaseNoteEditor({
     };
     const item = isCall
       ? { ...base, title: title.trim(), detail: detail.trim(), asClientRequest }
-      : { ...base, content: content.trim() };
+      : { ...base, content: content.trim(), detail: progressDetail.trim() };
     onChange([...(items || []), item]);
-    setCaseId(""); setContent(""); setTitle(""); setDetail(""); setAsClientRequest(false);
+    setCaseId(""); setContent(""); setProgressDetail(""); setTitle(""); setDetail(""); setAsClientRequest(false);
   };
 
   const updateItem = (id, patch) =>
@@ -114,8 +115,12 @@ export default function CaseNoteEditor({
                     </label>
                   </div>
                 ) : (
-                  <input value={it.content || ""} onChange={(e) => updateItem(it.id, { content: e.target.value })}
-                    className="input text-xs w-full" placeholder={placeholder} />
+                  <div className="space-y-1">
+                    <input value={it.content || ""} onChange={(e) => updateItem(it.id, { content: e.target.value })}
+                      className="input text-xs w-full" placeholder={placeholder} />
+                    <textarea value={it.detail || ""} onChange={(e) => updateItem(it.id, { detail: e.target.value })}
+                      className="input text-xs w-full min-h-[44px]" placeholder="상세 메모" />
+                  </div>
                 )}
 
                 {err && err.id === it.id && (
@@ -151,11 +156,15 @@ export default function CaseNoteEditor({
             </div>
           </>
         ) : (
-          <div className="flex gap-1.5">
-            <input value={content} onChange={(e) => setContent(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }}
-              className="input text-xs flex-1" placeholder={placeholder} />
-            <button onClick={add} className="btn-ghost text-xs whitespace-nowrap px-3">+ 추가</button>
+          <div className="space-y-1.5">
+            <div className="flex gap-1.5">
+              <input value={content} onChange={(e) => setContent(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }}
+                className="input text-xs flex-1" placeholder={placeholder} />
+              <button onClick={add} className="btn-ghost text-xs whitespace-nowrap px-3">+ 추가</button>
+            </div>
+            <textarea value={progressDetail} onChange={(e) => setProgressDetail(e.target.value)}
+              className="input text-xs w-full min-h-[44px]" placeholder="상세 메모" />
           </div>
         )}
       </div>

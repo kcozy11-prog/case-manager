@@ -4,7 +4,7 @@ import CaseSearchSelect from "./CaseSearchSelect";
 // 재사용 체크리스트 에디터
 // items: [{ id, text, done, details?, dueDate?, assignee?, cmCaseId?, cmCaseTitle?, googleEventId?, cmBriefId?, sourceDate? }]
 // 옵션: showDate, showAssignee, showCase(+cases), showDetails, onPushItem(item, field)+field,
-//       onSendToCase(item, field) → 사건 제출대기서면 보내기(행별 사건 선택 활성), placeholder
+//       showAddDetails(신규 입력 시 상세 메모), onSendToCase(item, field) → 사건 제출대기서면 보내기(행별 사건 선택 활성), placeholder
 export default function ChecklistEditor({
   items = [],
   onChange,
@@ -14,6 +14,8 @@ export default function ChecklistEditor({
   showAssignee = false,
   showCase = false,
   showDetails = false,
+  showAddDetails = false,
+  addDetailsPlaceholder = "상세 메모",
   cases = [],
   onPushItem = null,
   onSendToCase = null,
@@ -23,6 +25,7 @@ export default function ChecklistEditor({
   const [due, setDue] = useState("");
   const [assignee, setAssignee] = useState("");
   const [caseId, setCaseId] = useState("");
+  const [details, setDetails] = useState("");
   const [expandedId, setExpandedId] = useState(null); // 상세 편집 중인 항목
   const [pushingId, setPushingId] = useState(null);
   const [pushErr, setPushErr] = useState(null);
@@ -39,7 +42,7 @@ export default function ChecklistEditor({
       id: mkId(),
       text: t,
       done: false,
-      details: "",
+      details: showDetails ? details.trim() : "",
       dueDate: showDate ? due : "",
       assignee: showAssignee ? assignee.trim() : "",
       cmCaseId: showCase ? caseId : "",
@@ -47,7 +50,7 @@ export default function ChecklistEditor({
       createdAt: new Date().toISOString(),
     };
     onChange([...items, item]);
-    setText(""); setDue(""); setAssignee(""); setCaseId("");
+    setText(""); setDue(""); setAssignee(""); setCaseId(""); setDetails("");
   };
 
   const updateItem = (id, patch) =>
@@ -180,41 +183,51 @@ export default function ChecklistEditor({
         </ul>
       )}
 
-      <div className="flex flex-wrap gap-1.5 pt-1">
-        {showAssignee && (
+      <div className="space-y-1.5 pt-1">
+        <div className="flex flex-wrap gap-1.5">
+          {showAssignee && (
+            <input
+              value={assignee}
+              onChange={(e) => setAssignee(e.target.value)}
+              placeholder="담당자"
+              className="input text-xs flex-[1_1_90px] min-w-[90px]"
+            />
+          )}
           <input
-            value={assignee}
-            onChange={(e) => setAssignee(e.target.value)}
-            placeholder="담당자"
-            className="input text-xs flex-[1_1_90px] min-w-[90px]"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }}
+            placeholder={placeholder}
+            className="input text-xs flex-[4_1_220px] min-w-[160px]"
+          />
+          {showCase && (
+            <CaseSearchSelect
+              cases={cases}
+              value={caseId}
+              onChange={setCaseId}
+              placeholder="관련 사건(선택)"
+              className="flex-[0_1_150px] min-w-[120px]" />
+          )}
+          {showDate && (
+            <input
+              type="date"
+              value={due}
+              onChange={(e) => setDue(e.target.value)}
+              className="input text-xs flex-[0_1_130px] min-w-[112px] font-mono"
+            />
+          )}
+          <button
+            onClick={add}
+            className="btn-ghost text-xs whitespace-nowrap px-3">+ 추가</button>
+        </div>
+        {showDetails && showAddDetails && (
+          <textarea
+            value={details}
+            onChange={(e) => setDetails(e.target.value)}
+            placeholder={addDetailsPlaceholder}
+            className="input text-xs w-full min-h-[52px]"
           />
         )}
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }}
-          placeholder={placeholder}
-          className="input text-xs flex-[4_1_220px] min-w-[160px]"
-        />
-        {showCase && (
-          <CaseSearchSelect
-            cases={cases}
-            value={caseId}
-            onChange={setCaseId}
-            placeholder="관련 사건(선택)"
-            className="flex-[0_1_150px] min-w-[120px]" />
-        )}
-        {showDate && (
-          <input
-            type="date"
-            value={due}
-            onChange={(e) => setDue(e.target.value)}
-            className="input text-xs flex-[0_1_130px] min-w-[112px] font-mono"
-          />
-        )}
-        <button
-          onClick={add}
-          className="btn-ghost text-xs whitespace-nowrap px-3">+ 추가</button>
       </div>
     </div>
   );

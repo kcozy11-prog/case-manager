@@ -14,9 +14,11 @@ function upsertById(list = [], item) {
   return next;
 }
 
-// 진행경과(timeline)에 { id, date, content } upsert
-export function upsertTimelineEntry(caseObj, { id, date, content }) {
-  return { ...caseObj, timeline: upsertById(caseObj?.timeline, { id, date, content }) };
+// 진행경과(timeline)에 { id, date, content, detail? } upsert
+export function upsertTimelineEntry(caseObj, { id, date, content, detail }) {
+  const item = { id, date, content };
+  if (detail !== undefined) item.detail = detail;
+  return { ...caseObj, timeline: upsertById(caseObj?.timeline, item) };
 }
 
 // 메모(memos)에 { id, category, title, content, date } upsert
@@ -27,12 +29,13 @@ export function upsertCaseMemo(caseObj, { id, category, title, content, date }) 
 // 제출대기서면(briefs)에 upsert.
 //  - 신규: status="pending", submittedDate=""
 //  - 기존: 제목/작성일만 갱신, status·submittedDate(이미 제출함 등)는 보존
-export function upsertBrief(caseObj, { id, title, preparedDate = '' }) {
+export function upsertBrief(caseObj, { id, title, preparedDate = '', details }) {
   const arr = Array.isArray(caseObj?.briefs) ? caseObj.briefs : [];
   const existing = arr.find((b) => b && b.id === id);
+  const detailPatch = details !== undefined ? { details } : {};
   const merged = existing
-    ? { ...existing, title, preparedDate: existing.preparedDate || preparedDate }
-    : { id, title, status: 'pending', preparedDate, submittedDate: '' };
+    ? { ...existing, title, preparedDate: existing.preparedDate || preparedDate, ...detailPatch }
+    : { id, title, status: 'pending', preparedDate, submittedDate: '', ...detailPatch };
   return { ...caseObj, briefs: upsertById(arr, merged) };
 }
 

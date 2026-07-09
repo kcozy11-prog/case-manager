@@ -82,6 +82,8 @@ function formToEntry(form) {
 function entryPreview(entry) {
   const parts = [];
   if (entry.todayWork) parts.push(entry.todayWork.replace(/\n/g, " "));
+  const calls = parseJsonArray(entry.callLogItems);
+  if (calls.length) parts.push(`통화 ${calls.length}`);
   const tasks = parseJsonArray(entry.todayTasks);
   if (tasks.length) parts.push(`할일 ${tasks.length}`);
   const learned = parseJsonArray(entry.learnedItems);
@@ -218,7 +220,12 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     const c = casesRef.current.find((x) => x.id === item.caseId);
     if (!c) throw new Error("선택한 사건을 찾을 수 없습니다.");
     const timelineId = item.timelineId || Date.now();
-    const updated = upsertTimelineEntry(c, { id: timelineId, date: item.date || currentDate, content: item.content });
+    const updated = upsertTimelineEntry(c, {
+      id: timelineId,
+      date: item.date || currentDate,
+      content: item.content,
+      detail: item.detail || "",
+    });
     await applyCaseRecord(fieldName, item.id, { timelineId, recordedAt: new Date().toISOString() }, updated);
   }, [applyCaseRecord, currentDate]);
 
@@ -246,7 +253,12 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     const c = casesRef.current.find((x) => x.id === item.cmCaseId);
     if (!c) throw new Error("선택한 사건을 찾을 수 없습니다.");
     const briefId = item.cmBriefId || Date.now();
-    const updated = upsertBrief(c, { id: briefId, title: item.text, preparedDate: item.dueDate || item.sourceDate || currentDate });
+    const updated = upsertBrief(c, {
+      id: briefId,
+      title: item.text,
+      preparedDate: item.dueDate || item.sourceDate || currentDate,
+      details: item.details || "",
+    });
     await applyCaseRecord(fieldName, item.id, { cmBriefId: briefId, cmBriefSyncedAt: new Date().toISOString() }, updated);
   }, [applyCaseRecord, currentDate]);
 
@@ -385,8 +397,9 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
               field="tomorrowTasks" onPushItem={onPushTask ? handlePushItem : null}
               onChange={(v) => update({ tomorrowTasks: v })} placeholder="내일 할 업무 입력 후 Enter" />
 
-            <SectionLabel hint="매일 이월 · 사건 선택 · 📄 사건 제출대기서면으로 보내기 · 📅 캘린더">제출 예정 서면</SectionLabel>
+            <SectionLabel hint="상세메모 입력 · 매일 이월 · 사건 선택 · 📄 사건 제출대기서면으로 보내기 · 📅 캘린더">제출 예정 서면</SectionLabel>
             <ChecklistEditor items={form.pendingDocItems} cases={cases} showCase showDetails
+              showAddDetails addDetailsPlaceholder="상세 내용 메모 (쟁점, 보완할 자료, 제출 전 확인사항 등)"
               field="pendingDocItems" onPushItem={onPushTask ? handlePushItem : null}
               onSendToCase={onUpdateCase ? handleSendDoc : null}
               onChange={handlePendingDocsChange} placeholder="제출 예정 서면 입력 후 Enter" />
@@ -396,15 +409,19 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
               field="delegatedItems" onPushItem={onPushTask ? handlePushItem : null}
               onChange={(v) => update({ delegatedItems: v })} placeholder="위임 업무 입력 후 Enter" />
 
-            <SectionLabel hint="간단 메모(자유 입력)">통화·상담 메모</SectionLabel>
-            <textarea value={form.callNotes} onChange={(e) => update({ callNotes: e.target.value })}
-              className="input w-full min-h-[80px] text-sm" placeholder={"[상대방] [시각] [내용] [후속조치]"} />
-
-            <SectionLabel hint="사건 선택+상세 · '사건에 기록' → 진행경과(+의뢰인요청 메모)">통화 상담 기록</SectionLabel>
+            <SectionLabel hint="여러 건 추가 · 사건 선택+상세 · '사건에 기록' → 진행경과(+의뢰인요청 메모)">통화·상담 메모</SectionLabel>
             <CaseNoteEditor variant="call" items={form.callLogItems} cases={cases}
               field="callLogItems" defaultDate={currentDate}
               onRecord={onUpdateCase ? handleRecordCall : null}
               onChange={(v) => update({ callLogItems: v })} />
+
+            {form.callNotes && (
+              <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2">
+                <div className="text-[11px] text-slate-400 mb-1">기존 자유 입력 통화·상담 메모</div>
+                <textarea value={form.callNotes} onChange={(e) => update({ callNotes: e.target.value })}
+                  className="input w-full min-h-[70px] text-sm" placeholder={"[상대방] [시각] [내용] [후속조치]"} />
+              </div>
+            )}
 
             <LearnedEditor items={form.learnedItems} topics={topicOptions}
               onChange={(v) => update({ learnedItems: v })} />
