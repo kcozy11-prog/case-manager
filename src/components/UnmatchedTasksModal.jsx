@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { fmtDate } from "../utils";
 
-export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onIgnore, onClose }) {
+export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onAddStandalone, onIgnore, onClose }) {
   // 각 태스크별 선택된 사건 ID 상태
   const [selections, setSelections] = useState(
     Object.fromEntries(tasks.map(({ task }) => [task.id, ""]))
@@ -19,6 +19,12 @@ export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onIgnor
     const caseObj = cases.find(c => c.id === caseId);
     if (!caseObj) return;
     onAddToCase(task, caseObj);
+    setDismissed(prev => new Set([...prev, task.id]));
+  };
+
+  const handleAddStandalone = (task) => {
+    if (!onAddStandalone) return;
+    onAddStandalone(task);
     setDismissed(prev => new Set([...prev, task.id]));
   };
 
@@ -48,7 +54,7 @@ export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onIgnor
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between" style={{ background: "#1E293B" }}>
           <div>
             <div className="text-white font-semibold">📋 미매칭 할 일</div>
-            <div className="text-slate-400 text-xs">사건에 추가하거나 무시할 수 있습니다 · 완료된 할일은 자동 숨김 · 무시 시 다시 안 나옵니다</div>
+            <div className="text-slate-400 text-xs">사건에 추가하거나 일반 할 일로 보관할 수 있습니다 · 완료된 할일은 자동 숨김 · 무시 시 다시 안 나옵니다</div>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>
@@ -78,9 +84,9 @@ export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onIgnor
                 </div>
 
                 {/* 사건 선택 + 버튼 */}
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <select
-                    className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-300 bg-white"
+                    className="flex-1 min-w-[220px] border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-300 bg-white"
                     value={selections[task.id]}
                     onChange={e => setSelection(task.id, e.target.value)}
                   >
@@ -99,6 +105,14 @@ export default function UnmatchedTasksModal({ tasks, cases, onAddToCase, onIgnor
                   >
                     이 사건에 추가
                   </button>
+                  {onAddStandalone && (
+                    <button
+                      onClick={() => handleAddStandalone(task)}
+                      className="text-xs bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded-lg transition-colors font-medium whitespace-nowrap"
+                    >
+                      일반 할 일로 추가
+                    </button>
+                  )}
                   <button
                     onClick={() => handleIgnore(task.id)}
                     title="이 할일을 영구히 숨깁니다 (다음 동기화에도 안 나옴)"

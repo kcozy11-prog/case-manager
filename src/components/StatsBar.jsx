@@ -2,7 +2,7 @@ import { useState } from "react";
 import { today, dday, fmtDate } from "../utils";
 import { buildPendingTodos } from "../statsTodos";
 
-export default function StatsBar({ cases, onSelectCase }) {
+export default function StatsBar({ cases, standaloneTodos = [], onSelectCase, onOpenStandaloneTodos }) {
   const [dropdown, setDropdown] = useState(null); // "month" | "week" | "todos" | null
 
   // 이번 달 기일 목록
@@ -21,7 +21,7 @@ export default function StatsBar({ cases, onSelectCase }) {
   ).sort((a, b) => new Date(a.date) - new Date(b.date));
 
   // 미완료 할 일 목록
-  const pendingTodos = buildPendingTodos(cases);
+  const pendingTodos = buildPendingTodos(cases, new Date(), standaloneTodos);
 
   // 불변기간 미체크 항목 (마감일 임박순 정렬)
   const uncheckedDeadlines = cases.filter(c => c.status === "진행중").flatMap(c =>
@@ -66,7 +66,12 @@ export default function StatsBar({ cases, onSelectCase }) {
   };
 
   const handleItemClick = (item, tab) => {
-    if (onSelectCase) onSelectCase(item.caseId, tab);
+    if (dropdown === "todos" && item.standalone) {
+      if (onOpenStandaloneTodos) onOpenStandaloneTodos();
+      setDropdown(null);
+      return;
+    }
+    if (onSelectCase && item.caseId) onSelectCase(item.caseId, tab);
     setDropdown(null);
   };
 

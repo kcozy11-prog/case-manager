@@ -13,6 +13,7 @@ import AiParseModal from "./components/AiParseModal";
 import CaseFormModal from "./components/CaseFormModal";
 import { fetchCalendarEvents, syncEventsWithCases, fetchWorkCalendarEvents, syncWorkEventsWithCases, inferCaseType, fetchWorkTasks, matchTasksToCases, mergeTaskIntoCaseTodos } from "./calendarSync";
 import UnmatchedTasksModal from "./components/UnmatchedTasksModal";
+import StandaloneTodosModal from "./components/StandaloneTodosModal";
 import { migrateLegacyData, exportToGoogleSheet } from "./migrateLegacy";
 import { openSpreadsheetUrl } from "./exportOpen";
 import JournalApp from "./components/journal/JournalApp";
@@ -21,11 +22,13 @@ import { computeRetainerPayups } from "./caseLink";
 import BriefsTab from "./components/BriefsTab";
 import GlobalSearch from "./components/GlobalSearch";
 import { ensureTaskCalendar, upsertTaskEvent, CalendarAuthError } from "./calendarPush";
+import { mergeGoogleTaskIntoStandaloneTodos, readStandaloneTodos } from "./standaloneTodos";
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [cases, setCases] = useState([]);
+  const [standaloneTodos, setStandaloneTodos] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("전체");
@@ -35,6 +38,7 @@ export default function App() {
   const [showSearch, setShowSearch] = useState(false);
   const [showAdv, setShowAdv] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [showStandaloneTodos, setShowStandaloneTodos] = useState(false);
   const [editCase, setEditCase] = useState(null);
   const [showAI, setShowAI] = useState(false);
   const [mobileView, setMobileView] = useState("list");
@@ -85,6 +89,18 @@ export default function App() {
       });
     }, (error) => {
       console.error("Firestore 동기화 오류:", error);
+    });
+    return unsub;
+  }, [user]);
+
+  // 사건과 연결하지 않는 일반 할 일 실시간 동기화
+  useEffect(() => {
+    if (!user) { setStandaloneTodos([]); return; }
+    const ref = doc(db, "users", user.uid, "meta", "standaloneTodos");
+    const unsub = onSnapshot(ref, (snapshot) => {
+      setStandaloneTodos(readStandaloneTodos(snapshot.data()));
+    }, (error) => {
+      console.error("일반 할 일 동기화 오류:", error);
     });
     return unsub;
   }, [user]);
@@ -170,6 +186,16 @@ export default function App() {
     setCases(prev => prev.some(x => x.id === c.id) ? prev.map(x => x.id === c.id ? c : x) : [...prev, c]);
     setSelectedId(c.id);
     await setDoc(doc(db, "users", user.uid, "cases", c.id), c);
+  }, [user]);
+
+  const saveStandaloneTodos = useCallback(async (standaloneCase) => {
+    if (!user) return;
+    const todos = Array.isArray(standaloneCase?.todos) ? standaloneCase.todos : [];
+    setStandaloneTodos(todos);
+    await setDoc(doc(db, "users", user.uid, "meta", "standaloneTodos"), {
+      todos,
+      updatedAt: new Date().toISOString(),
+    }, { merge: true });
   }, [user]);
 
   // 업무일지 → 사건 기록 전용 저장:
@@ -334,7 +360,26 @@ export default function App() {
       }
       if (tasks === null) { setTaskResult({ error: "Google Tasks 데이터를 가져올 수 없습니다." }); return; }
 
-      const { matched, unmatched } = matchTasksToCases(tasks, cases);
+      let tasksForCaseMatching = tasks;
+      let standaloneAddedCount = 0;
+      let standaloneUpdatedCount = 0;
+      const standaloneTaskIds = new Set((standaloneTodos || []).map(t => t.calendarTaskId).filter(Boolean));
+      if (standaloneTaskIds.size > 0) {
+        let nextStandaloneTodos = standaloneTodos;
+        for (const task of tasks) {
+          if (!task.id || !standaloneTaskIds.has(task.id)) continue;
+          const merged = mergeGoogleTaskIntoStandaloneTodos(nextStandaloneTodos, task);
+          nextStandaloneTodos = merged.todos;
+          if (merged.added) standaloneAddedCount++;
+          if (merged.updated) standaloneUpdatedCount++;
+        }
+        if (standaloneAddedCount || standaloneUpdatedCount) {
+          await saveStandaloneTodos({ todos: nextStandaloneTodos });
+        }
+        tasksForCaseMatching = tasks.filter(task => !standaloneTaskIds.has(task.id));
+      }
+
+      const { matched, unmatched } = matchTasksToCases(tasksForCaseMatching, cases);
 
       // 영구 무시 목록 로드 (기기 간 공유)
       let ignoredIds = new Set();
@@ -365,12 +410,17 @@ export default function App() {
         setUnmatchedTasks(visibleUnmatched);
       }
 
-      setTaskResult({ added: addedCount, updated: updatedCount, unmatched: visibleUnmatched.length, total: tasks.length });
+      setTaskResult({
+        added: addedCount + standaloneAddedCount,
+        updated: updatedCount + standaloneUpdatedCount,
+        unmatched: visibleUnmatched.length,
+        total: tasks.length,
+      });
       setTimeout(() => setTaskResult(null), 4000);
     } catch (e) {
       setTaskResult({ error: e.message });
     } finally { setTaskSyncing(false); }
-  }, [googleToken, cases, saveCase, refreshGoogleToken]);
+  }, [googleToken, cases, standaloneTodos, user, saveCase, saveStandaloneTodos, refreshGoogleToken]);
 
   // 미매칭 할일 영구 무시 (다음 동기화부터 숨김, 기기 간 공유)
   const ignoreUnmatchedTask = useCallback(async (taskId) => {
@@ -387,6 +437,13 @@ export default function App() {
     await saveCase(merged.caseObj);
     await ignoreUnmatchedTask(task.id);
   }, [saveCase, ignoreUnmatchedTask]);
+
+  // 미매칭 태스크를 사건과 연결하지 않는 일반 할 일로 추가
+  const addUnmatchedTaskToStandalone = useCallback(async (task) => {
+    const merged = mergeGoogleTaskIntoStandaloneTodos(standaloneTodos, task);
+    await saveStandaloneTodos({ todos: merged.todos });
+    await ignoreUnmatchedTask(task.id);
+  }, [standaloneTodos, saveStandaloneTodos, ignoreUnmatchedTask]);
 
   // ── 할일 → 구글 캘린더 쓰기 (전용 '업무 할일' 캘린더, 단방향) ──────────────
   const taskCalIdRef = useRef(null);
@@ -552,6 +609,10 @@ export default function App() {
               className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors">
               <span>🔍</span> <span className="hidden sm:inline">검색</span>
             </button>
+            <button onClick={() => setShowStandaloneTodos(true)}
+              className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors">
+              <span>📝</span> <span className="hidden sm:inline">일반 할 일</span>
+            </button>
             <button onClick={syncCalendar} disabled={calSyncing}
               className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50">
               <span>📅</span> <span className="hidden sm:inline">{calSyncing ? "동기화 중…" : "캘린더"}</span>
@@ -639,7 +700,7 @@ export default function App() {
         )}
 
         {/* 통계 바 */}
-        <StatsBar cases={cases} onSelectCase={(caseId, tab) => {
+        <StatsBar cases={cases} standaloneTodos={standaloneTodos} onOpenStandaloneTodos={() => setShowStandaloneTodos(true)} onSelectCase={(caseId, tab) => {
           setSelectedId(caseId);
           setActiveTab(tab || "overview");
           setMobileView("detail");
@@ -763,7 +824,12 @@ export default function App() {
       {showSearch && (
         <GlobalSearch
           cases={cases}
+          standaloneTodos={standaloneTodos}
           onClose={() => setShowSearch(false)}
+          onOpenStandaloneTodos={() => {
+            setShowSearch(false);
+            setShowStandaloneTodos(true);
+          }}
           onOpen={(caseId, tab) => {
             setSelectedId(caseId);
             setActiveTab(tab || "overview");
@@ -773,11 +839,20 @@ export default function App() {
         />
       )}
       {showAI && <AiParseModal cases={cases} onClose={() => setShowAI(false)} onApply={applyAI} />}
+      {showStandaloneTodos && (
+        <StandaloneTodosModal
+          todos={standaloneTodos}
+          onUpdate={saveStandaloneTodos}
+          onPushTodo={pushTaskToCalendar}
+          onClose={() => setShowStandaloneTodos(false)}
+        />
+      )}
       {unmatchedTasks && (
         <UnmatchedTasksModal
           tasks={unmatchedTasks}
           cases={cases}
           onAddToCase={addUnmatchedTaskToCase}
+          onAddStandalone={addUnmatchedTaskToStandalone}
           onIgnore={ignoreUnmatchedTask}
           onClose={() => setUnmatchedTasks(null)}
         />

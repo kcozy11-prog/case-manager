@@ -1,8 +1,9 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { TypeBadge } from "./Badges";
+import { STANDALONE_TODOS_TITLE } from "../standaloneTodos";
 
 // 전역 검색: 사건 기본정보 + 메모·진행경과·서면·할일 본문을 가로질러 검색
-export default function GlobalSearch({ cases, onClose, onOpen }) {
+export default function GlobalSearch({ cases, standaloneTodos = [], onClose, onOpen, onOpenStandaloneTodos }) {
   const [q, setQ] = useState("");
   const inputRef = useRef(null);
   useEffect(() => { inputRef.current?.focus(); }, []);
@@ -47,7 +48,23 @@ export default function GlobalSearch({ cases, onClose, onOpen }) {
     return out;
   }, [q, cases]);
 
-  const totalHits = results.reduce((n, r) => n + r.matches.length, 0);
+  const standaloneMatches = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    if (query.length < 1) return [];
+    const hit = (s) => s && String(s).toLowerCase().includes(query);
+    const snip = (s) => {
+      const str = String(s);
+      const i = str.toLowerCase().indexOf(query);
+      if (i < 0) return str.slice(0, 60);
+      const start = Math.max(0, i - 20);
+      return (start > 0 ? "…" : "") + str.slice(start, start + 60);
+    };
+    return (standaloneTodos || [])
+      .filter((t) => hit(t.text) || hit(t.details))
+      .map((t) => ({ todo: t, snippet: snip(`${t.text} ${t.details || ""}`) }));
+  }, [q, standaloneTodos]);
+
+  const totalHits = results.reduce((n, r) => n + r.matches.length, 0) + standaloneMatches.length;
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 pt-[10vh]" onClick={onClose}>
@@ -62,7 +79,7 @@ export default function GlobalSearch({ cases, onClose, onOpen }) {
         <div className="max-h-[60vh] overflow-y-auto">
           {q.trim() && (
             <div className="px-4 py-1.5 text-xs text-slate-400 border-b border-slate-50">
-              {results.length}개 사건 · {totalHits}건 일치
+              사건 {results.length}개 · 일반 할 일 {standaloneMatches.length}건 · 총 {totalHits}건 일치
             </div>
           )}
           {results.map(({ c, matches }) => (
@@ -81,7 +98,22 @@ export default function GlobalSearch({ cases, onClose, onOpen }) {
               ))}
             </div>
           ))}
-          {q.trim() && results.length === 0 && (
+          {standaloneMatches.length > 0 && (
+            <div className="border-b border-slate-50 last:border-b-0">
+              <div className="flex items-center gap-2 px-4 pt-3 pb-1">
+                <span className="text-[11px] text-amber-600 bg-amber-50 border border-amber-100 px-1.5 py-0.5 rounded">할 일</span>
+                <span className="text-sm font-semibold text-slate-800 truncate">{STANDALONE_TODOS_TITLE}</span>
+              </div>
+              {standaloneMatches.slice(0, 8).map(({ todo, snippet }) => (
+                <button key={todo.id} onClick={onOpenStandaloneTodos}
+                  className="w-full text-left px-4 py-2 hover:bg-amber-50 transition-colors flex items-center gap-2">
+                  <span className="text-[11px] text-amber-500 flex-shrink-0 w-20 truncate">일반 할 일</span>
+                  <span className="text-xs text-slate-500 truncate">{snippet}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {q.trim() && results.length === 0 && standaloneMatches.length === 0 && (
             <div className="px-4 py-10 text-center text-sm text-slate-400">검색 결과가 없습니다.</div>
           )}
           {!q.trim() && (

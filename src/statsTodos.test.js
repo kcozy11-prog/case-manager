@@ -46,3 +46,27 @@ test("buildPendingTodos marks overdue incomplete todos", () => {
 
   assert.equal(pendingTodos[0].overdue, true);
 });
+
+test("buildPendingTodos includes standalone todos in the same due-date order", () => {
+  const cases = [
+    {
+      id: "c1",
+      title: "사건 A",
+      status: "진행중",
+      todos: [
+        { id: 2, text: "사건 할 일", dueDate: "2026-04-20", done: false, priority: "보통" },
+      ],
+    },
+  ];
+  const standaloneTodos = [
+    { id: 1, text: "일반 할 일", dueDate: "2026-04-16", done: false, priority: "보통" },
+    { id: 3, text: "완료된 일반 할 일", dueDate: "2026-04-15", done: true, priority: "높음" },
+  ];
+
+  const pendingTodos = buildPendingTodos(cases, new Date("2026-04-15T00:00:00"), standaloneTodos);
+
+  assert.deepEqual(pendingTodos.map((item) => item.id), [1, 2]);
+  assert.equal(pendingTodos[0].caseTitle, "일반 할 일");
+  assert.equal(pendingTodos[0].standalone, true);
+  assert.equal(pendingTodos[1].standalone, false);
+});
