@@ -215,11 +215,166 @@ function extractHearingType(text) {
   return null;
 }
 
+function matchTextPart(a, b, minLength = 2) {
+  const left = normalize(a || "");
+  const right = normalize(b || "");
+  if (left.length < minLength || right.length < minLength) return false;
+  return left.includes(right) || right.includes(left);
+}
+
+function normalizeCourtAlias(value = "") {
+  return normalize(value)
+    .replace(/지방법원/g, "지법")
+    .replace(/고등법원/g, "고법")
+    .replace(/가정법원/g, "가법")
+    .replace(/행정법원/g, "행법")
+    .replace(/회생법원/g, "회생법")
+    .replace(/지방검찰청/g, "지검");
+}
+
+function matchCourtPart(a, b) {
+  const left = normalizeCourtAlias(a || "");
+  const right = normalizeCourtAlias(b || "");
+  if (left.length < 4 || right.length < 4) return false;
+  return left.includes(right) || right.includes(left);
+}
+
+function extractEventCaseNumber(summary, lbox) {
+  return lbox?.caseNumber || (summary.match(CASE_NUM_EXTRACT) || [])[1] || "";
+}
+
+function partyMatchesEvent(lbox, caseObj) {
+  const eventParty = lbox?.client || "";
+  if (!eventParty) return false;
+  const caseParties = [caseObj?.client, caseObj?.opponent].filter(Boolean);
+  if (caseParties.some((party) => matchTextPart(eventParty, party, 2))) return true;
+  // 기존 데이터에 상대방/의뢰인 필드가 비어 있는 경우를 위한 약한 보조 기준.
+  return matchTextPart(eventParty, caseObj?.title, 2);
+}
+
+export function scoreLboxCaseMatch(lbox, summary, caseObj) {
+  const eventCaseNumber = extractEventCaseNumber(summary, lbox);
+  const caseNumberMatch = !!eventCaseNumber && matchTextPart(eventCaseNumber, caseObj?.caseNumber, 4);
+  const courtMatch = !!lbox?.court && matchCourtPart(lbox.court, caseObj?.court);
+  const partyMatch = partyMatchesEvent(lbox, caseObj);
+  const score = [courtMatch, caseNumberMatch, partyMatch].filter(Boolean).length;
+  return { score, courtMatch, caseNumberMatch, partyMatch };
+}
+
+export function findStrictLboxCaseMatch(lbox, summary, cases = []) {
+  const candidates = cases
+    .filter((c) => c?.status !== "종결")
+    .map((caseObj) => ({ caseObj, ...scoreLboxCaseMatch(lbox, summary, caseObj) }))
+    .filter((m) => m.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  const automatic = candidates.filter((m) => m.score >= 2);
+  if (automatic.length === 0) return { caseObj: null, candidates, reason: "법원명·사건번호·당사자 중 2개 이상 일치하는 사건 없음" };
+
+  const topScore = automatic[0].score;
+  const top = automatic.filter((m) => m.score === topScore);
+  if (top.length > 1) return { caseObj: null, candidates, reason: "2개 이상 일치하는 후보가 여러 건이라 수동 확인 필요" };
+
+  return { caseObj: automatic[0].caseObj, candidates, reason: "" };
+}
+
+function buildManualCalendarEvent(ev, lbox, reason) {
+  const summary = ev.summary || "";
+  const date = ev.start?.date || (ev.start?.dateTime?.split("T")[0]) || "";
+  const time = lbox?.time || (ev.start?.dateTime
+    ? new Date(ev.start.dateTime).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })
+    : "");
+  return {
+    id: ev.id || `${summary}-${date}-${time}`,
+    event: ev,
+    summary,
+    date,
+    time,
+    court: lbox?.court || "",
+    caseNumber: extractEventCaseNumber(summary, lbox),
+    party: lbox?.client || "",
+    reason,
+  };
+}
+
+export function mergeCalendarEventIntoCase(caseObj, ev, { today, makeId = () => Date.now() + Math.floor(Math.random() * 10000) } = {}) {
+  const summary = ev.summary || "";
+  const eventDate = ev.start?.date || (ev.start?.dateTime?.split("T")[0]) || "";
+  const eventTime = ev.start?.dateTime
+    ? new Date(ev.start.dateTime).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })
+    : "";
+  const lbox = parseLboxEvent(summary);
+  const hType = lbox ? lbox.hearingType : extractHearingType(summary);
+  const hearingType = hType ? hType + "기일" : "기일";
+  const locationInfo = lbox ? (lbox.location ? `${lbox.court} ${lbox.location}` : lbox.court) : "";
+  const hearingTime = lbox?.time || eventTime;
+  const dateForLog = today || new Date().toISOString().split("T")[0];
+
+  const ref = { ...caseObj };
+  const hearings = Array.isArray(ref.hearings) ? ref.hearings : [];
+  const nextHearing = {
+    id: makeId(),
+    date: eventDate,
+    time: hearingTime,
+    type: hearingType,
+    result: locationInfo,
+    fromCalendar: true,
+    calendarEventId: ev.id,
+  };
+
+  const existingIndex = hearings.findIndex(h =>
+    (ev.id && h.calendarEventId === ev.id) ||
+    (h.date === eventDate && h.type === hearingType && (h.time || "") === (hearingTime || ""))
+  );
+
+  if (existingIndex >= 0) {
+    const existing = hearings[existingIndex];
+    const changed =
+      existing.date !== nextHearing.date ||
+      (existing.time || "") !== (nextHearing.time || "") ||
+      existing.type !== nextHearing.type ||
+      (existing.result || "") !== (nextHearing.result || "");
+
+    if (!changed) return { caseObj: ref, added: false, updated: false };
+
+    const updatedHearings = [...hearings];
+    updatedHearings[existingIndex] = { ...existing, ...nextHearing, id: existing.id || nextHearing.id };
+    return { caseObj: { ...ref, hearings: updatedHearings }, added: false, updated: true };
+  }
+
+  const memoContent = `• ${hearingType} ${eventDate}${hearingTime ? ` ${hearingTime}` : ""}${locationInfo ? `\n• 장소: ${locationInfo}` : ""}`;
+  const nextCase = {
+    ...ref,
+    hearings: [...hearings, nextHearing],
+    memos: [
+      ...(Array.isArray(ref.memos) ? ref.memos : []),
+      {
+        id: makeId(),
+        category: "기일메모",
+        title: `${hearingType} 지정`,
+        content: memoContent,
+        date: dateForLog,
+      },
+    ],
+    timeline: [
+      ...(Array.isArray(ref.timeline) ? ref.timeline : []),
+      {
+        id: makeId(),
+        date: dateForLog,
+        content: `${hearingType} ${eventDate}${hearingTime ? ` ${hearingTime}` : ""} 지정${lbox?.court ? ` (${lbox.court})` : ""}`,
+      },
+    ],
+  };
+
+  return { caseObj: nextCase, added: true, updated: false };
+}
+
 export function syncEventsWithCases(events, cases) {
   const updates = new Map();
   let newHearingCount = 0;
   let newCaseCount = 0;
   const skippedEvents = [];
+  const unmatchedEvents = [];
 
   const todayStr = new Date().toISOString().split("T")[0];
 
@@ -229,161 +384,46 @@ export function syncEventsWithCases(events, cases) {
     const summary = ev.summary || "";
     if (!summary.trim()) continue;
 
-    const eventDate = ev.start?.date || (ev.start?.dateTime?.split("T")[0]) || "";
-    const eventTime = ev.start?.dateTime
-      ? new Date(ev.start.dateTime).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })
-      : "";
-
-    // LBOX 여부: 형식이 아니라 키워드/출처로 판정
     const isLbox = isLboxEvent(ev);
-
-    // 1단계: LBOX 정규 형식 파싱 (성공하면 풍부한 정보 획득)
     const lbox = parseLboxEvent(summary);
+    const caseNum = extractEventCaseNumber(summary, lbox);
 
-    // 2단계: 사건 매칭 — 사건번호 우선, 텍스트 폴백
-    let matched = null;
-    if (lbox) {
-      matched = matchByCaseNumber(lbox.caseNumber, cases);
-    }
-    if (!matched) {
-      // LBOX 파싱 실패해도 사건번호가 텍스트에 있으면 추출
-      const caseNum = summary.match(CASE_NUM_EXTRACT);
-      if (caseNum) matched = matchByCaseNumber(caseNum[1], cases);
-    }
-    if (!matched) {
-      matched = cases.find(c => matchEventToCase(summary, c));
-    }
-    if (!matched) {
-      const caseNum = lbox?.caseNumber || (summary.match(CASE_NUM_EXTRACT) || [])[1] || "";
-
-      // LBOX 일정도 아니고 사건번호·형식 정보도 없음 → 스킵
-      if (!caseNum && !lbox && !isLbox) {
-        skippedEvents.push(summary);
-        continue;
-      }
-      // 사건번호 없이 LBOX 키워드만 있는 경우: 사건 신규 생성은 보류(오인 방지), 스킵
-      if (!caseNum) {
-        skippedEvents.push(summary);
-        continue;
-      }
-
-      // updates에서 같은 사건번호로 이미 생성된 신규 사건 확인
-      if (caseNum) {
-        const normCaseNum = normalize(caseNum);
-        for (const [, uc] of updates) {
-          if (uc.caseNumber && normalize(uc.caseNumber) === normCaseNum) {
-            matched = uc;
-            break;
-          }
-        }
-      }
-
-      // 신규 사건 자동 등록
-      if (!matched) {
-        const newId = `c${Date.now()}${Math.floor(Math.random() * 1000)}`;
-        const client = lbox?.client || "";
-        const court = lbox?.court || "";
-        const caseType = inferCaseType(caseNum, court, "");
-        const title = client
-          ? `${client} ${caseNum || "사건"}`
-          : caseNum || summary.slice(0, 30);
-
-        matched = {
-          id: newId, title, type: caseType, status: "진행중",
-          client, clientContact: "", opponent: "",
-          manager: "", managerOrg: "", managerContact: "",
-          court, caseNumber: caseNum,
-          retainer: { amount: "", date: "", successFee: "", successFeeAmount: "", paidAmount: "", successFeeCollected: "" },
-          closeResult: "", closeReason: "", closedDate: "",
-          hearings: [], timeline: [], memos: [], documents: [], todos: [], briefs: [],
-        };
-        newCaseCount++;
-        console.log(`[캘린더 동기화] + 신규 사건: "${title}" (${caseNum})`);
-      }
-    }
-
-    const ref = updates.get(matched.id) || { ...matched };
-    const hearings = ref.hearings || [];
-
-    // 기일 유형·장소·시간 결정 (LBOX 파싱 성공 시 상세 정보 사용, 실패 시 텍스트에서 추출)
-    const hType = lbox ? lbox.hearingType : extractHearingType(summary);
-    const hearingType = hType ? hType + "기일" : "기일";
-    const locationInfo = lbox ? (lbox.location ? `${lbox.court} ${lbox.location}` : lbox.court) : "";
-    const hearingTime = lbox?.time || eventTime;
-
-    const nextHearing = {
-      id: Date.now() + Math.floor(Math.random() * 10000),
-      date: eventDate,
-      time: hearingTime,
-      type: hearingType,
-      result: locationInfo,
-      fromCalendar: true,
-      calendarEventId: ev.id,
-    };
-
-    // 중복/업데이트 체크: calendarEventId 일치, 또는 같은 사건 내 날짜+유형+시간 동일.
-    // (전용 LBOX 캘린더와 개인 캘린더에 같은 기일이 다른 ID로 들어와도 중복 방지)
-    const existingIndex = hearings.findIndex(h =>
-      (ev.id && h.calendarEventId === ev.id) ||
-      (h.date === eventDate && h.type === hearingType && (h.time || "") === (hearingTime || ""))
-    );
-
-    if (existingIndex >= 0) {
-      const existing = hearings[existingIndex];
-      const changed =
-        existing.date !== nextHearing.date ||
-        (existing.time || "") !== (nextHearing.time || "") ||
-        existing.type !== nextHearing.type ||
-        (existing.result || "") !== (nextHearing.result || "");
-
-      if (changed) {
-        const updatedHearings = [...hearings];
-        updatedHearings[existingIndex] = { ...existing, ...nextHearing, id: existing.id || nextHearing.id };
-        ref.hearings = updatedHearings;
-        updates.set(matched.id, ref);
-        console.log(`[캘린더 동기화] ↻ 기일 업데이트: "${summary}" → ${matched.title}`);
-      }
+    // LBOX 일정도 아니고 사건번호·형식 정보도 없음 → 스킵
+    if (!caseNum && !lbox && !isLbox) {
+      skippedEvents.push(summary);
       continue;
     }
 
-    ref.hearings = [...hearings, nextHearing];
+    const currentCases = cases.map((c) => updates.get(c.id) || c);
+    const match = findStrictLboxCaseMatch(lbox, summary, currentCases);
+    const matched = match.caseObj;
 
-    // 기일메모 자동 추가
-    const memos = ref.memos || [];
-    const memoContent = `• ${hearingType} ${eventDate}${hearingTime ? ` ${hearingTime}` : ""}${locationInfo ? `\n• 장소: ${locationInfo}` : ""}`;
-    ref.memos = [
-      ...memos,
-      {
-        id: Date.now() + Math.floor(Math.random() * 10000) + 1,
-        category: "기일메모",
-        title: `${hearingType} 지정`,
-        content: memoContent,
-        date: todayStr,
-      },
-    ];
+    if (!matched) {
+      unmatchedEvents.push(buildManualCalendarEvent(ev, lbox, match.reason));
+      skippedEvents.push(summary);
+      continue;
+    }
 
-    // 진행경과 자동 추가
-    const timeline = ref.timeline || [];
-    ref.timeline = [
-      ...timeline,
-      {
-        id: Date.now() + Math.floor(Math.random() * 10000) + 2,
-        date: todayStr,
-        content: `${hearingType} ${eventDate}${hearingTime ? ` ${hearingTime}` : ""} 지정${lbox?.court ? ` (${lbox.court})` : ""}`,
-      },
-    ];
+    const ref = updates.get(matched.id) || { ...matched };
+    const merged = mergeCalendarEventIntoCase(ref, ev, { today: todayStr });
 
-    updates.set(matched.id, ref);
-    newHearingCount++;
-    console.log(`[캘린더 동기화] ✓ 기일 추가: "${summary}" → ${matched.title}`);
+    if (merged.added || merged.updated) {
+      updates.set(matched.id, merged.caseObj);
+      if (merged.added) {
+        newHearingCount++;
+        console.log(`[캘린더 동기화] ✓ 기일 추가: "${summary}" → ${matched.title}`);
+      } else {
+        console.log(`[캘린더 동기화] ↻ 기일 업데이트: "${summary}" → ${matched.title}`);
+      }
+    }
   }
 
   if (skippedEvents.length > 0) {
-    console.warn(`[캘린더 동기화] 매칭 실패 ${skippedEvents.length}건:`, skippedEvents);
+    console.warn(`[캘린더 동기화] 수동 확인/매칭 실패 ${skippedEvents.length}건:`, skippedEvents);
   }
-  console.log(`[캘린더 동기화] 완료: 신규 기일 ${newHearingCount}건 추가`);
+  console.log(`[캘린더 동기화] 완료: 신규 기일 ${newHearingCount}건 추가, 수동 확인 ${unmatchedEvents.length}건`);
 
-  return { updates, newTodoCount: 0, newHearingCount, newCaseCount, skippedCount: skippedEvents.length };
+  return { updates, newTodoCount: 0, newHearingCount, newCaseCount, skippedCount: skippedEvents.length, unmatchedEvents };
 }
 
 // ── Google Tasks API ──────────────────────────────────────────────────────────

@@ -88,3 +88,45 @@ export function markBriefPending(caseObj, briefId) {
     : timeline;
   return { ...caseObj, briefs: nextBriefs, timeline: nextTimeline };
 }
+
+export function buildTodoCompletionTimelineContent(todo = {}) {
+  const title = String(todo.text || '할 일').trim() || '할 일';
+  return `할 일 완료: ${title}`;
+}
+
+// 사건 할 일 완료 체크 → 진행경과 자동 기록. completedTimelineId를 todo에 보관해 중복을 막는다.
+export function markTodoDone(caseObj, todoId, today = '', makeId = () => Date.now()) {
+  const todos = Array.isArray(caseObj?.todos) ? caseObj.todos : [];
+  const target = todos.find((t) => t && t.id === todoId);
+  if (!target) return caseObj;
+  if (target.done && target.completedTimelineId) return caseObj;
+
+  const timelineId = target.completedTimelineId || makeId();
+  const nextTodos = todos.map((t) =>
+    t && t.id === todoId
+      ? { ...t, done: true, completedDate: today, completedTimelineId: timelineId }
+      : t);
+  const withTodos = { ...caseObj, todos: nextTodos };
+  return upsertTimelineEntry(withTodos, {
+    id: timelineId,
+    date: today,
+    content: buildTodoCompletionTimelineContent(target),
+    detail: target.details || '',
+  });
+}
+
+// 완료 체크를 되돌릴 때는 연결된 진행경과도 제거한다. 현재 UI는 완료 항목을 숨기지만 데이터 정합성을 위해 둔다.
+export function markTodoPending(caseObj, todoId) {
+  const todos = Array.isArray(caseObj?.todos) ? caseObj.todos : [];
+  const target = todos.find((t) => t && t.id === todoId);
+  if (!target) return caseObj;
+  const nextTodos = todos.map((t) =>
+    t && t.id === todoId
+      ? { ...t, done: false, completedDate: '', completedTimelineId: '' }
+      : t);
+  const timeline = Array.isArray(caseObj?.timeline) ? caseObj.timeline : [];
+  const nextTimeline = target.completedTimelineId
+    ? timeline.filter((entry) => entry && entry.id !== target.completedTimelineId)
+    : timeline;
+  return { ...caseObj, todos: nextTodos, timeline: nextTimeline };
+}

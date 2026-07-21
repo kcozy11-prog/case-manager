@@ -8,6 +8,8 @@ import {
   computeRetainerPayups,
   markBriefSubmitted,
   markBriefPending,
+  markTodoDone,
+  markTodoPending,
 } from './caseLink.js';
 
 // ── upsertTimelineEntry ──────────────────────────────────────────────
@@ -183,4 +185,58 @@ test('mark* : 없는 briefId면 원본 그대로', () => {
   const c = { id: 'c1', briefs: [], timeline: [] };
   assert.equal(markBriefSubmitted(c, 'nope', '2026-06-24'), c);
   assert.equal(markBriefPending(c, 'nope'), c);
+});
+
+test('markTodoDone: 할 일 완료 체크 시 진행경과에 자동 기록하고 todo에 연결 id를 보관', () => {
+  const c = {
+    id: 'c1',
+    todos: [{ id: 'todo1', text: '준비서면 초안 작성', details: '쟁점별 증거 정리', done: false }],
+    timeline: [{ id: 'keep', date: '2026-06-01', content: '기존 기록' }],
+  };
+
+  const out = markTodoDone(c, 'todo1', '2026-06-24', () => 777);
+  const todo = out.todos.find(x => x.id === 'todo1');
+
+  assert.equal(todo.done, true);
+  assert.equal(todo.completedDate, '2026-06-24');
+  assert.equal(todo.completedTimelineId, 777);
+  assert.deepEqual(out.timeline.map(t => t.id), ['keep', 777]);
+  assert.deepEqual(out.timeline[1], {
+    id: 777,
+    date: '2026-06-24',
+    content: '할 일 완료: 준비서면 초안 작성',
+    detail: '쟁점별 증거 정리',
+  });
+});
+
+test('markTodoDone: 이미 연결된 완료 진행경과가 있으면 중복 생성하지 않음', () => {
+  const c = {
+    id: 'c1',
+    todos: [{ id: 'todo1', text: '답변서 제출', done: true, completedTimelineId: 111 }],
+    timeline: [{ id: 111, date: '2026-06-20', content: '할 일 완료: 답변서 제출' }],
+  };
+
+  const out = markTodoDone(c, 'todo1', '2026-06-24', () => 222);
+
+  assert.equal(out, c);
+  assert.equal(out.timeline.length, 1);
+});
+
+test('markTodoPending: 완료 체크 취소 시 연결된 진행경과 항목 제거', () => {
+  const c = {
+    id: 'c1',
+    todos: [{ id: 'todo1', text: '자료 제출', done: true, completedDate: '2026-06-24', completedTimelineId: 999 }],
+    timeline: [
+      { id: 'keep', date: '2026-06-01', content: '기존 기록' },
+      { id: 999, date: '2026-06-24', content: '할 일 완료: 자료 제출' },
+    ],
+  };
+
+  const out = markTodoPending(c, 'todo1');
+  const todo = out.todos.find(x => x.id === 'todo1');
+
+  assert.equal(todo.done, false);
+  assert.equal(todo.completedDate, '');
+  assert.equal(todo.completedTimelineId, '');
+  assert.deepEqual(out.timeline.map(t => t.id), ['keep']);
 });

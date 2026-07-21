@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { sortPendingTodos } from "../todoSort";
 import { getDueDateLabel, getTodoCardTone, isOverdueTodo } from "../todoUi";
+import { todayStr } from "../utils";
+import { markTodoDone, markTodoPending } from "../caseLink";
 import { DdayBadge } from "./Badges";
 
 const EMPTY_TODO = { text: "", details: "", priority: "보통", dueDate: "" };
@@ -36,7 +38,9 @@ export default function TodosTab({ c, onUpdate, onPushTodo }) {
   const pending = todos.filter(t => !t.done);
 
   const toggleDone = (id) => {
-    onUpdate({ ...c, todos: todos.map(t => t.id === id ? { ...t, done: !t.done } : t) });
+    const target = todos.find(t => t.id === id);
+    if (!target) return;
+    onUpdate(target.done ? markTodoPending(c, id) : markTodoDone(c, id, todayStr));
   };
 
   const delTodo = (id) => {

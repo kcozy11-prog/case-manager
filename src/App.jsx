@@ -11,8 +11,9 @@ import OverviewTab from "./components/OverviewTab";
 import TodosTab from "./components/TodosTab";
 import AiParseModal from "./components/AiParseModal";
 import CaseFormModal from "./components/CaseFormModal";
-import { fetchCalendarEvents, syncEventsWithCases, fetchWorkCalendarEvents, syncWorkEventsWithCases, inferCaseType, fetchWorkTasks, matchTasksToCases, mergeTaskIntoCaseTodos } from "./calendarSync";
+import { fetchCalendarEvents, syncEventsWithCases, mergeCalendarEventIntoCase, fetchWorkCalendarEvents, syncWorkEventsWithCases, inferCaseType, fetchWorkTasks, matchTasksToCases, mergeTaskIntoCaseTodos } from "./calendarSync";
 import UnmatchedTasksModal from "./components/UnmatchedTasksModal";
+import UnmatchedCalendarEventsModal from "./components/UnmatchedCalendarEventsModal";
 import StandaloneTodosModal from "./components/StandaloneTodosModal";
 import { migrateLegacyData, exportToGoogleSheet } from "./migrateLegacy";
 import { openSpreadsheetUrl } from "./exportOpen";
@@ -48,6 +49,7 @@ export default function App() {
   const [taskSyncing, setTaskSyncing] = useState(false);
   const [taskResult, setTaskResult] = useState(null);
   const [unmatchedTasks, setUnmatchedTasks] = useState(null); // null or array
+  const [unmatchedCalendarEvents, setUnmatchedCalendarEvents] = useState(null); // null or array
   const [caseSaveMsg, setCaseSaveMsg] = useState(null); // 업무일지→사건 저장 결과 진단 배너
   const autoCalendarSyncStarted = useRef(false);
   const autoTaskSyncStarted = useRef(false);
@@ -331,7 +333,7 @@ export default function App() {
       }
       if (!data?.items) { setCalResult({ error: "캘린더 데이터를 가져올 수 없습니다." }); return; }
 
-      const { updates, newTodoCount, newHearingCount, newCaseCount, skippedCount } = syncEventsWithCases(data.items, cases);
+      const { updates, newTodoCount, newHearingCount, newCaseCount, skippedCount, unmatchedEvents } = syncEventsWithCases(data.items, cases);
       for (const [, uc] of updates) await saveCase(uc);
 
       // 회사업무 캘린더 → 공식결과메모
@@ -340,12 +342,24 @@ export default function App() {
       const workResult = syncWorkEventsWithCases(workEvents, mergedCases);
       for (const [, uc] of workResult.updates) await saveCase(uc);
 
-      setCalResult({ hearings: newHearingCount || 0, newCases: newCaseCount || 0, memos: workResult.newMemoCount || 0, total: data.items.length, skipped: skippedCount || 0 });
+      if (unmatchedEvents?.length > 0) {
+        setUnmatchedCalendarEvents(unmatchedEvents);
+      }
+
+      setCalResult({ hearings: newHearingCount || 0, newCases: newCaseCount || 0, memos: workResult.newMemoCount || 0, total: data.items.length, skipped: skippedCount || 0, manual: unmatchedEvents?.length || 0 });
       setTimeout(() => setCalResult(null), 4000);
     } catch (e) {
       setCalResult({ error: e.message });
     } finally { setCalSyncing(false); }
   }, [googleToken, cases, saveCase, refreshGoogleToken]);
+
+  // 수동 확인 LBOX 일정을 선택한 사건에 기일로 추가
+  const addUnmatchedCalendarEventToCase = useCallback(async (calendarItem, caseObj) => {
+    const ev = calendarItem?.event || calendarItem;
+    if (!ev || !caseObj) return;
+    const merged = mergeCalendarEventIntoCase({ ...caseObj, hearings: [...(caseObj.hearings || [])], memos: [...(caseObj.memos || [])], timeline: [...(caseObj.timeline || [])] }, ev);
+    await saveCase(merged.caseObj);
+  }, [saveCase]);
 
   // ── Google Tasks 동기화 ────────────────────────────────────────────────────
   const syncTasks = useCallback(async () => {
@@ -667,7 +681,7 @@ export default function App() {
           <div className={`text-xs px-4 py-1.5 text-center font-medium ${
             calResult.error ? "bg-red-500 text-white" : "bg-emerald-500 text-white"
           }`}>
-            {calResult.error || `LBOX ${calResult.total}건 — 기일 ${calResult.hearings}건${calResult.newCases ? `, 신규사건 ${calResult.newCases}건` : ""}${calResult.memos ? `, 업무메모 ${calResult.memos}건` : ""}${calResult.skipped ? ` · 미매칭 ${calResult.skipped}건` : ""}`}
+            {calResult.error || `LBOX ${calResult.total}건 — 기일 ${calResult.hearings}건${calResult.newCases ? `, 신규사건 ${calResult.newCases}건` : ""}${calResult.memos ? `, 업무메모 ${calResult.memos}건` : ""}${calResult.manual ? ` · 수동확인 ${calResult.manual}건` : ""}${calResult.skipped && !calResult.manual ? ` · 미매칭 ${calResult.skipped}건` : ""}`}
           </div>
         )}
 
@@ -855,6 +869,14 @@ export default function App() {
           onAddStandalone={addUnmatchedTaskToStandalone}
           onIgnore={ignoreUnmatchedTask}
           onClose={() => setUnmatchedTasks(null)}
+        />
+      )}
+      {unmatchedCalendarEvents && (
+        <UnmatchedCalendarEventsModal
+          events={unmatchedCalendarEvents}
+          cases={cases}
+          onAddToCase={addUnmatchedCalendarEventToCase}
+          onClose={() => setUnmatchedCalendarEvents(null)}
         />
       )}
       {showForm && (

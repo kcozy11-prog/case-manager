@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseLboxEvent, syncEventsWithCases, isLboxEvent } from "./calendarSync.js";
+import { parseLboxEvent, syncEventsWithCases, isLboxEvent, scoreLboxCaseMatch, mergeCalendarEventIntoCase } from "./calendarSync.js";
 
 test("isLboxEvent — 키워드/출처로 식별", () => {
   assert.equal(isLboxEvent({ _src: "LBOX", summary: "아무거나" }), true);
@@ -53,9 +53,10 @@ test("콤마 형식 기일이 사건번호로 관련 사건에 반영", () => {
     summary: "박제군, 변론, 수원지방법원 안양지원-2026가단100906 제406호 법정 11:20",
     start: { date: "2026-07-01" },
   }];
-  const { updates, newHearingCount, newCaseCount } = syncEventsWithCases(events, cases);
+  const { updates, newHearingCount, newCaseCount, unmatchedEvents } = syncEventsWithCases(events, cases);
   assert.equal(newCaseCount, 0, "기존 사건에 매칭되어 신규 생성 없어야 함");
   assert.equal(newHearingCount, 1);
+  assert.equal(unmatchedEvents.length, 0);
   const updated = updates.get("c1");
   assert.ok(updated, "c1 사건이 갱신되어야 함");
   const h = updated.hearings[0];
@@ -67,4 +68,57 @@ test("콤마 형식 기일이 사건번호로 관련 사건에 반영", () => {
   // 기일메모 / 진행경과 자동 생성 확인
   assert.ok(updated.memos.some((m) => m.category === "기일메모"));
   assert.ok(updated.timeline.some((t) => /변론기일/.test(t.content)));
+});
+
+test("LBOX 자동매칭 점수는 법원명·사건번호·당사자 3개 기준으로 계산", () => {
+  const lbox = parseLboxEvent("박제군, 변론, 수원지방법원 안양지원-2026가단100906 제406호 법정 11:20");
+  const score = scoreLboxCaseMatch(lbox, "", {
+    title: "박제군 대여금", client: "박제군", opponent: "",
+    caseNumber: "2026가단100906", court: "수원지법 안양지원",
+  });
+
+  assert.equal(score.score, 3);
+  assert.equal(score.courtMatch, true);
+  assert.equal(score.caseNumberMatch, true);
+  assert.equal(score.partyMatch, true);
+});
+
+test("LBOX 기일은 2개 이상 일치할 때만 자동 반영하고, 사건번호만 일치하면 수동 확인으로 보냄", () => {
+  const cases = [{
+    id: "c1", title: "다른 의뢰인 사건", client: "김철수", opponent: "",
+    caseNumber: "2026가단100906", court: "서울중앙지방법원",
+    hearings: [], memos: [], timeline: [],
+  }];
+  const events = [{
+    id: "ev1",
+    summary: "박제군, 변론, 수원지방법원 안양지원-2026가단100906 제406호 법정 11:20",
+    start: { date: "2026-07-01" },
+  }];
+
+  const { updates, newHearingCount, unmatchedEvents, skippedCount } = syncEventsWithCases(events, cases);
+
+  assert.equal(updates.size, 0);
+  assert.equal(newHearingCount, 0);
+  assert.equal(skippedCount, 1);
+  assert.equal(unmatchedEvents.length, 1);
+  assert.equal(unmatchedEvents[0].caseNumber, "2026가단100906");
+  assert.equal(unmatchedEvents[0].party, "박제군");
+  assert.match(unmatchedEvents[0].reason, /2개 이상/);
+});
+
+test("mergeCalendarEventIntoCase: 수동 선택된 LBOX 일정을 사건 기일·메모·진행경과로 병합", () => {
+  let id = 100;
+  const c = { id: "c1", title: "박제군 대여금", hearings: [], memos: [], timeline: [] };
+  const ev = {
+    id: "ev1",
+    summary: "박제군, 변론, 수원지방법원 안양지원-2026가단100906 제406호 법정 11:20",
+    start: { date: "2026-07-01" },
+  };
+
+  const result = mergeCalendarEventIntoCase(c, ev, { today: "2026-06-24", makeId: () => id++ });
+
+  assert.equal(result.added, true);
+  assert.equal(result.caseObj.hearings[0].calendarEventId, "ev1");
+  assert.equal(result.caseObj.memos[0].category, "기일메모");
+  assert.match(result.caseObj.timeline[0].content, /변론기일 2026-07-01 11:20 지정/);
 });
