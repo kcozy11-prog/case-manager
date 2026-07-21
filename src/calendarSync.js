@@ -232,7 +232,28 @@ function normalizeCourtAlias(value = "") {
     .replace(/지방검찰청/g, "지검");
 }
 
+function extractCourtBranchNames(value = "") {
+  const raw = String(value || "");
+  // "수원지방법원 안양지원"처럼 본원+지원이 같이 있으면 뒤의 지원명만 별도 기준으로 삼는다.
+  // 붙여 쓴 "수원지법안양지원"도 처리하기 위해 본원 명칭을 먼저 공백으로 치환한다.
+  const branchOnlyText = raw.replace(
+    /[가-힣]+(?:지방법원|고등법원|가정법원|행정법원|회생법원|법원|지법|고법|가법|행법|회생법|지방검찰청|검찰청|지검)/g,
+    " ",
+  );
+  return [...branchOnlyText.matchAll(/[가-힣]{2,}지원/g)]
+    .map((m) => normalizeCourtAlias(m[0]))
+    .filter(Boolean);
+}
+
 function matchCourtPart(a, b) {
+  const leftBranches = extractCourtBranchNames(a);
+  const rightBranches = extractCourtBranchNames(b);
+  if (leftBranches.length || rightBranches.length) {
+    return leftBranches.some((left) =>
+      rightBranches.some((right) => left === right || left.includes(right) || right.includes(left))
+    );
+  }
+
   const left = normalizeCourtAlias(a || "");
   const right = normalizeCourtAlias(b || "");
   if (left.length < 4 || right.length < 4) return false;

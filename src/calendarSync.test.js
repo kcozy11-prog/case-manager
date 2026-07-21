@@ -83,6 +83,51 @@ test("LBOX 자동매칭 점수는 법원명·사건번호·당사자 3개 기준
   assert.equal(score.partyMatch, true);
 });
 
+test("LBOX 법원명은 수원지방법원 안양지원 중 안양지원만 같아도 일치", () => {
+  const lbox = parseLboxEvent("박제군, 변론, 수원지방법원 안양지원-2026가단100906 제406호 법정 11:20");
+  const score = scoreLboxCaseMatch(lbox, "", {
+    title: "다른 의뢰인 사건", client: "김철수", opponent: "",
+    caseNumber: "2026가단100906", court: "안양지원",
+  });
+
+  assert.equal(score.courtMatch, true);
+  assert.equal(score.caseNumberMatch, true);
+  assert.equal(score.partyMatch, false);
+  assert.equal(score.score, 2);
+});
+
+test("LBOX 지원 일정은 본원명만 같은 사건을 법원명 일치로 보지 않음", () => {
+  const lbox = parseLboxEvent("박제군, 변론, 수원지방법원 안양지원-2026가단100906 제406호 법정 11:20");
+  const score = scoreLboxCaseMatch(lbox, "", {
+    title: "다른 의뢰인 사건", client: "김철수", opponent: "",
+    caseNumber: "2026가단100906", court: "수원지방법원",
+  });
+
+  assert.equal(score.courtMatch, false);
+  assert.equal(score.caseNumberMatch, true);
+  assert.equal(score.partyMatch, false);
+  assert.equal(score.score, 1);
+});
+
+test("LBOX 기일은 사건번호와 지원명만 일치해도 자동 반영", () => {
+  const cases = [{
+    id: "c1", title: "다른 의뢰인 사건", client: "김철수", opponent: "",
+    caseNumber: "2026가단100906", court: "안양지원",
+    hearings: [], memos: [], timeline: [],
+  }];
+  const events = [{
+    id: "ev1",
+    summary: "박제군, 변론, 수원지방법원 안양지원-2026가단100906 제406호 법정 11:20",
+    start: { date: "2026-07-01" },
+  }];
+
+  const { updates, newHearingCount, unmatchedEvents } = syncEventsWithCases(events, cases);
+
+  assert.equal(newHearingCount, 1);
+  assert.equal(unmatchedEvents.length, 0);
+  assert.ok(updates.get("c1"));
+});
+
 test("LBOX 기일은 2개 이상 일치할 때만 자동 반영하고, 사건번호만 일치하면 수동 확인으로 보냄", () => {
   const cases = [{
     id: "c1", title: "다른 의뢰인 사건", client: "김철수", opponent: "",
