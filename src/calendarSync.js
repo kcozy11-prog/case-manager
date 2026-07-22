@@ -285,7 +285,6 @@ export function scoreLboxCaseMatch(lbox, summary, caseObj) {
 export function findStrictLboxCaseMatch(lbox, summary, cases = []) {
   const eventCaseNumber = extractEventCaseNumber(summary, lbox);
   const candidates = cases
-    .filter((c) => c?.status !== "종결")
     .map((caseObj) => ({ caseObj, ...scoreLboxCaseMatch(lbox, summary, caseObj) }))
     .filter((m) => m.caseNumberMatch);
 
