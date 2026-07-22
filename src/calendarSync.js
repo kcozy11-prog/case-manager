@@ -292,6 +292,13 @@ export function findStrictLboxCaseMatch(lbox, summary, cases = []) {
   const automatic = candidates.filter((m) => m.score >= 2);
   if (automatic.length === 0) return { caseObj: null, candidates, reason: "법원명·사건번호·당사자 중 2개 이상 일치하는 사건 없음" };
 
+  if (automatic.length > 1) {
+    const caseNumberMatches = automatic.filter((m) => m.caseNumberMatch);
+    if (caseNumberMatches.length === 1) {
+      return { caseObj: caseNumberMatches[0].caseObj, candidates, reason: "" };
+    }
+  }
+
   const topScore = automatic[0].score;
   const top = automatic.filter((m) => m.score === topScore);
   if (top.length > 1) return { caseObj: null, candidates, reason: "2개 이상 일치하는 후보가 여러 건이라 수동 확인 필요" };

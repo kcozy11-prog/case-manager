@@ -151,6 +151,35 @@ test("LBOX 기일은 2개 이상 일치할 때만 자동 반영하고, 사건번
   assert.match(unmatchedEvents[0].reason, /2개 이상/);
 });
 
+test("LBOX 기일 후보가 여러 건이면 사건번호 일치 사건을 우선 자동 반영", () => {
+  const cases = [
+    {
+      id: "wrong-party-court",
+      title: "박제군 별도 사건", client: "박제군", opponent: "",
+      caseNumber: "2026가단999999", court: "안양지원",
+      hearings: [], memos: [], timeline: [],
+    },
+    {
+      id: "case-number-match",
+      title: "김철수 대여금", client: "김철수", opponent: "",
+      caseNumber: "2026가단100906", court: "안양지원",
+      hearings: [], memos: [], timeline: [],
+    },
+  ];
+  const events = [{
+    id: "ev1",
+    summary: "박제군, 변론, 수원지방법원 안양지원-2026가단100906 제406호 법정 11:20",
+    start: { date: "2026-07-01" },
+  }];
+
+  const { updates, newHearingCount, unmatchedEvents } = syncEventsWithCases(events, cases);
+
+  assert.equal(newHearingCount, 1);
+  assert.equal(unmatchedEvents.length, 0);
+  assert.equal(updates.has("wrong-party-court"), false);
+  assert.ok(updates.get("case-number-match"), "사건번호가 일치하는 사건에 기일이 반영되어야 함");
+});
+
 test("mergeCalendarEventIntoCase: 수동 선택된 LBOX 일정을 사건 기일·메모·진행경과로 병합", () => {
   let id = 100;
   const c = { id: "c1", title: "박제군 대여금", hearings: [], memos: [], timeline: [] };
