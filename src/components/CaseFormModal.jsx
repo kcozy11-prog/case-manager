@@ -12,7 +12,7 @@ function FormSection({ title, children }) {
 
 export default function CaseFormModal({ initial, onSave, onClose }) {
   const [form, setForm] = useState(initial || emptyCase());
-  const [newHearing, setNewHearing] = useState({ date: todayStr, time: "", type: "", result: "" });
+  const [newHearing, setNewHearing] = useState({ date: todayStr, time: "", type: "", result: "", memo: "" });
   const [newTimeline, setNewTimeline] = useState({ date: todayStr, content: "" });
   const set = (path, val) => {
     setForm(prev => {
@@ -27,7 +27,7 @@ export default function CaseFormModal({ initial, onSave, onClose }) {
   const addHearing = () => {
     if (!newHearing.date || !newHearing.type.trim()) return;
     setForm(p => ({ ...p, hearings: [...p.hearings, { id: Date.now(), ...newHearing }] }));
-    setNewHearing({ date: todayStr, time: "", type: "", result: "" });
+    setNewHearing({ date: todayStr, time: "", type: "", result: "", memo: "" });
   };
   const delHearing = (id) => setForm(p => ({ ...p, hearings: p.hearings.filter(h => h.id !== id) }));
 
@@ -146,6 +146,7 @@ export default function CaseFormModal({ initial, onSave, onClose }) {
                 {h.time && <span className="text-indigo-500 text-xs font-medium">{h.time}</span>}
                 <span className="text-slate-700 flex-1">{h.type}</span>
                 {h.result && <span className="text-slate-400 text-xs">{h.result}</span>}
+                {h.memo && <span className="text-indigo-400 text-xs truncate max-w-[160px]">메모: {h.memo}</span>}
                 <button onClick={() => delHearing(h.id)} className="text-slate-300 hover:text-red-400 ml-1">✕</button>
               </div>
             ))}
@@ -157,11 +158,14 @@ export default function CaseFormModal({ initial, onSave, onClose }) {
               <input className="input" placeholder="기일 종류" value={newHearing.type}
                 onChange={e => setNewHearing(p => ({ ...p, type: e.target.value }))} />
               <div className="flex gap-1">
-                <input className="input flex-1" placeholder="결과 (선택)" value={newHearing.result}
+                <input className="input flex-1" placeholder="결과/장소 (선택)" value={newHearing.result}
                   onChange={e => setNewHearing(p => ({ ...p, result: e.target.value }))} />
                 <button onClick={addHearing} className="btn-primary px-2.5">+</button>
               </div>
             </div>
+            <textarea className="input w-full mt-2 min-h-[58px] text-xs" placeholder="기일 메모 (선택)"
+              value={newHearing.memo}
+              onChange={e => setNewHearing(p => ({ ...p, memo: e.target.value }))} />
           </FormSection>
 
           <FormSection title="진행경과">

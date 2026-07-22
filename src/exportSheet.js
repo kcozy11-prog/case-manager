@@ -178,9 +178,9 @@ export function buildExportRows(cases = [], journalEntries = {}) {
   ];
 
   const hearingRows = [
-    ["사건명", "날짜", "시간", "유형", "결과/장소", "캘린더"],
+    ["사건명", "날짜", "시간", "유형", "결과/장소", "메모", "캘린더"],
     ...cases.flatMap(c =>
-      (c.hearings || []).map(h => [c.title, h.date, h.time, h.type, h.result, h.fromCalendar ? "LBOX" : ""])
+      (c.hearings || []).map(h => [c.title, h.date, h.time, h.type, h.result, h.memo, h.fromCalendar ? "LBOX" : ""])
     ),
   ];
 

@@ -17,7 +17,7 @@ test("buildExportBatchUpdateData quotes every sheet name in A1 ranges", () => {
       manager: "최자주",
       managerOrg: "의왕경찰서 여성청소년과",
       retainer: { date: "2026-05-25", amount: "6600000", successFee: "송치 또는 기소시", successFeeAmount: "11000000" },
-      hearings: [{ date: "2026-06-02", time: "", type: "조사", result: "1차 조사", fromCalendar: true }],
+      hearings: [{ date: "2026-06-02", time: "", type: "조사", result: "1차 조사", memo: "조사 전 통화", fromCalendar: true }],
       memos: [{ category: "일반메모", title: "메모", content: "내용", date: "2026-06-02", checked: false }],
       timeline: [{ date: "2026-06-02", content: "가해학생들 1차 조사" }],
       todos: [{ text: "송치 의견 확인", done: false, priority: "높음", dueDate: "2026-06-10" }],
@@ -36,7 +36,8 @@ test("buildExportBatchUpdateData quotes every sheet name in A1 ranges", () => {
     "'업무일지'!A1",
   ]);
   assert.equal(data[0].values[1][0], "경기외고 전성오 등 형사사건");
-  assert.equal(data[1].values[1][5], "LBOX");
+  assert.equal(data[1].values[1][5], "조사 전 통화");
+  assert.equal(data[1].values[1][6], "LBOX");
 });
 
 test("quoteSheetName escapes apostrophes for valid Google Sheets A1 notation", () => {

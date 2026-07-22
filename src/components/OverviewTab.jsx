@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { dday, fmtDate, fmtMoney, todayStr, addDays, MEMO_CATEGORIES, MEMO_CAT_STYLE } from "../utils";
 import { DdayBadge } from "./Badges";
+import { hearingMemoText, setHearingMemo } from "../hearingUtils";
 
 function InfoCard({ label, value, sub }) {
   return (
@@ -21,34 +22,69 @@ function Section({ title, children }) {
   );
 }
 
-function HearingRow({ h, upcoming, onDelete, onAddDeadline }) {
+function HearingRow({
+  h,
+  upcoming,
+  onDelete,
+  onAddDeadline,
+  editingMemo,
+  onStartMemo,
+  onChangeMemo,
+  onSaveMemo,
+  onCancelMemo,
+}) {
   const isJudgment = /선고|판결/.test(h.type || "");
+  const memo = hearingMemoText(h);
+  const isEditingMemo = editingMemo !== null;
   return (
-    <div className={`flex items-center justify-between rounded-lg px-3 py-2 ${
+    <div className={`rounded-lg px-3 py-2 ${
       upcoming ? "bg-indigo-50 border border-indigo-100" : "bg-slate-50"
     }`}>
-      <div className="flex items-center gap-3">
-        <DdayBadge dateStr={h.date} small />
-        <div>
-          <div className="text-sm font-medium text-slate-700">
-            {h.type}
-            {h.fromCalendar && <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-indigo-100 text-indigo-500 font-medium">LBOX</span>}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <DdayBadge dateStr={h.date} small />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-slate-700">
+              {h.type}
+              {h.fromCalendar && <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-indigo-100 text-indigo-500 font-medium">LBOX</span>}
+            </div>
+            {h.result && <div className="text-xs text-slate-400 truncate">{h.result}</div>}
           </div>
-          {h.result && <div className="text-xs text-slate-400">{h.result}</div>}
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {isJudgment && onAddDeadline && (
+            <button onClick={(e) => { e.stopPropagation(); onAddDeadline(h); }}
+              className="text-[11px] text-rose-500 hover:text-rose-700 border border-rose-200 hover:border-rose-400 rounded px-1.5 py-0.5 transition-colors"
+              title="이 선고 기준 상소기한을 불변기간으로 추가 (기산점·기간은 직접 확인)">↪ 상소기한</button>
+          )}
+          <button onClick={(e) => { e.stopPropagation(); onStartMemo(h); }}
+            className={`text-[11px] border rounded px-1.5 py-0.5 transition-colors ${
+              memo ? "text-indigo-500 border-indigo-200 hover:border-indigo-400" : "text-slate-400 border-slate-200 hover:text-indigo-500 hover:border-indigo-300"
+            }`}
+            title={memo ? "기일 메모 수정" : "기일 메모 추가"}>{memo ? "메모 수정" : "+ 메모"}</button>
+          <div className="text-xs text-slate-500">
+            {fmtDate(h.date)}{h.time && <span className="ml-1 text-indigo-500 font-medium">{h.time}</span>}
+          </div>
+          <button onClick={(e) => { e.stopPropagation(); onDelete(h.id); }}
+            className="text-xs text-red-300 hover:text-red-500 transition-colors" title="기일 삭제">✕</button>
         </div>
       </div>
-      <div className="flex items-center gap-2">
-        {isJudgment && onAddDeadline && (
-          <button onClick={(e) => { e.stopPropagation(); onAddDeadline(h); }}
-            className="text-[11px] text-rose-500 hover:text-rose-700 border border-rose-200 hover:border-rose-400 rounded px-1.5 py-0.5 transition-colors"
-            title="이 선고 기준 상소기한을 불변기간으로 추가 (기산점·기간은 직접 확인)">↪ 상소기한</button>
-        )}
-        <div className="text-xs text-slate-500">
-          {fmtDate(h.date)}{h.time && <span className="ml-1 text-indigo-500 font-medium">{h.time}</span>}
+      {isEditingMemo ? (
+        <div className="mt-2 space-y-1.5 pl-9">
+          <textarea className="input-sm w-full min-h-[64px] text-xs"
+            placeholder="기일 메모 입력..."
+            value={editingMemo}
+            onChange={e => onChangeMemo(e.target.value)}
+            onKeyDown={e => { if (e.key === "Escape") onCancelMemo(); }}
+            autoFocus />
+          <div className="flex justify-end gap-2">
+            <button onClick={onCancelMemo} className="text-xs text-slate-400 hover:text-slate-600 px-1">취소</button>
+            <button onClick={() => onSaveMemo(h.id)} className="btn-primary text-xs px-2 py-1">메모 저장</button>
+          </div>
         </div>
-        <button onClick={(e) => { e.stopPropagation(); onDelete(h.id); }}
-          className="text-xs text-red-300 hover:text-red-500 transition-colors" title="기일 삭제">✕</button>
-      </div>
+      ) : (
+        memo && <div className="mt-2 ml-9 text-xs text-slate-500 whitespace-pre-wrap leading-relaxed bg-white/70 border border-slate-100 rounded-md px-2 py-1.5">{memo}</div>
+      )}
     </div>
   );
 }
@@ -71,6 +107,8 @@ export default function OverviewTab({ c, onUpdate }) {
   const [editingMemoId, setEditingMemoId] = useState(null);
   const [editingMemoFullId, setEditingMemoFullId] = useState(null);
   const [editingMemoData, setEditingMemoData] = useState({});
+  const [editingHearingMemoId, setEditingHearingMemoId] = useState(null);
+  const [editingHearingMemo, setEditingHearingMemo] = useState("");
 
   const addTimeline = () => {
     if (!newTimeline.trim()) return;
@@ -84,6 +122,22 @@ export default function OverviewTab({ c, onUpdate }) {
 
   const deleteHearing = (id) => {
     onUpdate({ ...c, hearings: (c.hearings || []).filter(h => h.id !== id) });
+  };
+
+  const startEditHearingMemo = (h) => {
+    setEditingHearingMemoId(h.id);
+    setEditingHearingMemo(hearingMemoText(h));
+  };
+
+  const saveHearingMemo = (id) => {
+    onUpdate({ ...c, hearings: setHearingMemo(c.hearings || [], id, editingHearingMemo) });
+    setEditingHearingMemoId(null);
+    setEditingHearingMemo("");
+  };
+
+  const cancelHearingMemo = () => {
+    setEditingHearingMemoId(null);
+    setEditingHearingMemo("");
   };
 
   // ── 기한(불변기간) 일급 입력 ── (저장은 메모 category="불변기간" 으로 → 대시보드 호환)
@@ -286,7 +340,18 @@ export default function OverviewTab({ c, onUpdate }) {
               <>
                 <div className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-1">예정</div>
                 {upcomingHearings.map(h => (
-                  <HearingRow key={h.id} h={h} upcoming onDelete={deleteHearing} onAddDeadline={addAppealDeadline} />
+                  <HearingRow
+                    key={h.id}
+                    h={h}
+                    upcoming
+                    onDelete={deleteHearing}
+                    onAddDeadline={addAppealDeadline}
+                    editingMemo={editingHearingMemoId === h.id ? editingHearingMemo : null}
+                    onStartMemo={startEditHearingMemo}
+                    onChangeMemo={setEditingHearingMemo}
+                    onSaveMemo={saveHearingMemo}
+                    onCancelMemo={cancelHearingMemo}
+                  />
                 ))}
               </>
             )}
@@ -294,7 +359,17 @@ export default function OverviewTab({ c, onUpdate }) {
               <>
                 <div className="text-xs font-medium text-slate-400 uppercase tracking-wide mt-2 mb-1">지난 기일</div>
                 {pastHearings.map(h => (
-                  <HearingRow key={h.id} h={h} onDelete={deleteHearing} onAddDeadline={addAppealDeadline} />
+                  <HearingRow
+                    key={h.id}
+                    h={h}
+                    onDelete={deleteHearing}
+                    onAddDeadline={addAppealDeadline}
+                    editingMemo={editingHearingMemoId === h.id ? editingHearingMemo : null}
+                    onStartMemo={startEditHearingMemo}
+                    onChangeMemo={setEditingHearingMemo}
+                    onSaveMemo={saveHearingMemo}
+                    onCancelMemo={cancelHearingMemo}
+                  />
                 ))}
               </>
             )}
