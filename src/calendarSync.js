@@ -283,27 +283,16 @@ export function scoreLboxCaseMatch(lbox, summary, caseObj) {
 }
 
 export function findStrictLboxCaseMatch(lbox, summary, cases = []) {
+  const eventCaseNumber = extractEventCaseNumber(summary, lbox);
   const candidates = cases
     .filter((c) => c?.status !== "종결")
     .map((caseObj) => ({ caseObj, ...scoreLboxCaseMatch(lbox, summary, caseObj) }))
-    .filter((m) => m.score > 0)
-    .sort((a, b) => b.score - a.score);
+    .filter((m) => m.caseNumberMatch);
 
-  const automatic = candidates.filter((m) => m.score >= 2);
-  if (automatic.length === 0) return { caseObj: null, candidates, reason: "법원명·사건번호·당사자 중 2개 이상 일치하는 사건 없음" };
+  if (!eventCaseNumber) return { caseObj: null, candidates, reason: "일정에서 사건번호를 찾을 수 없음" };
+  if (candidates.length === 0) return { caseObj: null, candidates, reason: "사건번호가 일치하는 사건 없음" };
 
-  if (automatic.length > 1) {
-    const caseNumberMatches = automatic.filter((m) => m.caseNumberMatch);
-    if (caseNumberMatches.length === 1) {
-      return { caseObj: caseNumberMatches[0].caseObj, candidates, reason: "" };
-    }
-  }
-
-  const topScore = automatic[0].score;
-  const top = automatic.filter((m) => m.score === topScore);
-  if (top.length > 1) return { caseObj: null, candidates, reason: "2개 이상 일치하는 후보가 여러 건이라 수동 확인 필요" };
-
-  return { caseObj: automatic[0].caseObj, candidates, reason: "" };
+  return { caseObj: candidates[0].caseObj, candidates, reason: "" };
 }
 
 function buildManualCalendarEvent(ev, lbox, reason) {
