@@ -169,6 +169,55 @@ test("LBOX 기일은 법원명·당사자가 맞아도 사건번호가 다르면
   assert.match(unmatchedEvents[0].reason, /사건번호/);
 });
 
+test("LBOX 기일은 안양지원만 맞고 사건번호가 없으면 자동 반영하지 않음", () => {
+  const cases = [{
+    id: "same-court-only", title: "안양지원 사건", client: "박제군", opponent: "",
+    caseNumber: "2026가단100527", court: "수원지방법원 안양지원",
+    hearings: [], memos: [], timeline: [],
+  }];
+  const events = [{
+    id: "ev-court-only",
+    _src: "LBOX",
+    summary: "박제군, 변론, 수원지방법원 안양지원 제406호 법정 11:20",
+    start: { date: "2026-07-01" },
+  }];
+
+  const { updates, newHearingCount, unmatchedEvents, skippedCount } = syncEventsWithCases(events, cases);
+
+  assert.equal(updates.size, 0);
+  assert.equal(newHearingCount, 0);
+  assert.equal(skippedCount, 1);
+  assert.equal(unmatchedEvents.length, 1);
+  assert.match(unmatchedEvents[0].reason, /사건번호를 찾을 수 없음/);
+});
+
+test("LBOX 기일은 사건번호 숫자 1이 ㅂ으로 들어온 경우에도 같은 사건으로 본다", () => {
+  const cases = [
+    {
+      id: "target", title: "안양지원 대여금", client: "김철수", opponent: "",
+      caseNumber: "2026가단100527", court: "수원지방법원 안양지원",
+      hearings: [], memos: [], timeline: [],
+    },
+    {
+      id: "same-court-wrong-number", title: "다른 안양지원 사건", client: "박제군", opponent: "",
+      caseNumber: "2026가단999999", court: "안양지원",
+      hearings: [], memos: [], timeline: [],
+    },
+  ];
+  const events = [{
+    id: "ev-ocr-typo",
+    summary: "박제군, 변론, 수원지방법원 안양지원-2026가단ㅂ00527 제406호 법정 11:20",
+    start: { date: "2026-07-01" },
+  }];
+
+  const { updates, newHearingCount, unmatchedEvents } = syncEventsWithCases(events, cases);
+
+  assert.equal(newHearingCount, 1);
+  assert.equal(unmatchedEvents.length, 0);
+  assert.ok(updates.get("target"), "정규화된 사건번호가 일치하는 사건에 반영되어야 함");
+  assert.equal(updates.has("same-court-wrong-number"), false, "안양지원 법원명만 같은 사건에는 반영하면 안 됨");
+});
+
 test("LBOX 기일 후보가 여러 건이면 사건번호 일치 사건을 우선 자동 반영", () => {
   const cases = [
     {

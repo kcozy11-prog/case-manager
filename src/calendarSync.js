@@ -86,10 +86,10 @@ export async function fetchLboxKeywordEvents(token) {
 //  (A) 대괄호 형식 : [이계원] 변론 서울중앙지방법원 2025가단99078 동관452호 10:40
 //  (B) 콤마 형식   : 박제군, 변론, 수원지방법원 안양지원-2026가단100906 제406호 법정 11:20
 
-const LBOX_RE = /^\[(.+?)\]\s+(\S+)\s+(\S+(?:법원|검찰청|경찰서))\s+(\d{4}[가-힣]+\d+)\s*(.*?)\s*(\d{1,2}:\d{2})?\s*$/;
+const LBOX_RE = /^\[(.+?)\]\s+(\S+)\s+(\S+(?:법원|검찰청|경찰서))\s+(\d{4}[가-힣]+(?:[ㄱ-ㅎ]+)?\d+)\s*(.*?)\s*(\d{1,2}:\d{2})?\s*$/;
 
 // 공통 추출 패턴
-const LBOX_CASE_NUM_RE = /(\d{4}[가-힣]{1,4}\d+)/;                 // 2026가단100906
+const LBOX_CASE_NUM_RE = /(\d{4}[가-힣]{1,4}(?:[ㄱ-ㅎ]+)?\d+)/;    // 2026가단100906, 2026가단ㅂ00527(1 오입력)
 const LBOX_TIME_RE = /(\d{1,2}:\d{2})\s*$/;                       // 끝의 11:20
 // 법원/지원/검찰청/경찰서 (예: "수원지방법원 안양지원")
 const LBOX_COURT_RE = /([가-힣]+(?:지방법원|고등법원|가정법원|행정법원|회생법원|지방검찰청|검찰청|경찰서|법원))(?:\s+([가-힣]+지원))?/;
@@ -157,17 +157,38 @@ export function isLboxEvent(ev) {
   return LBOX_KEYWORD_RE.test(hay);
 }
 
-// ── 매칭 로직: 사건번호 우선, 3글자 이상 연속 일치 ──────────────────────────
+// ── 매칭 로직: 사건번호는 정규화 후 전체 일치, 법원명/당사자는 보조 점수 ────────
 
-const normalize = (s) => s.replace(/[\s()㈜㈔·\-_.,'"]/g, "");
+const normalize = (s) => String(s || "").replace(/[\s()㈜㈔·\-_.,'"]/g, "");
+
+const CASE_NUMBER_JAMO_DIGITS = {
+  // 모바일/한글 입력 상태에서 숫자 1이 단독 자모 ㅂ으로 들어오는 LBOX/캘린더 오입력 보정.
+  // 예: 2026가단ㅂ00527 → 2026가단100527
+  "ㅂ": "1",
+};
+
+function normalizeCaseNumberForMatch(value = "") {
+  const compact = normalize(value).replace(/[０-９]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 0xfee0));
+  const m = compact.match(/^(\d{4})([가-힣]{1,4})([ㄱ-ㅎ]+)?(\d+)$/);
+  if (!m) return compact;
+
+  const [, year, caseType, jamoDigits = "", serialDigits] = m;
+  const mappedJamoDigits = [...jamoDigits].map((ch) => CASE_NUMBER_JAMO_DIGITS[ch] || ch).join("");
+  return `${year}${caseType}${mappedJamoDigits}${serialDigits}`;
+}
+
+function matchCaseNumberPart(a, b) {
+  const left = normalizeCaseNumberForMatch(a);
+  const right = normalizeCaseNumberForMatch(b);
+  if (!left || !right || left.length < 6 || right.length < 6) return false;
+  return left === right;
+}
 
 function matchByCaseNumber(caseNumber, cases) {
   if (!caseNumber) return null;
-  const cn = normalize(caseNumber);
   for (const c of cases) {
     if (!c.caseNumber || c.caseNumber === "—") continue;
-    const target = normalize(c.caseNumber);
-    if (cn.length >= 4 && (target.includes(cn) || cn.includes(target))) return c;
+    if (matchCaseNumberPart(caseNumber, c.caseNumber)) return c;
   }
   return null;
 }
@@ -189,7 +210,7 @@ export function matchEventToCase(eventText, caseObj) {
 // ── LBOX 이벤트 → 기일 + 기일메모 + 진행경과 변환 ──────────────────────────
 
 // 사건번호 추출 (어떤 형식의 텍스트에서든)
-const CASE_NUM_EXTRACT = /(\d{4}[가-힣]{1,4}\d+)/;
+const CASE_NUM_EXTRACT = /(\d{4}[가-힣]{1,4}(?:[ㄱ-ㅎ]+)?\d+)/;
 
 // 사건번호·법원·제목 기반 사건유형 추론
 export function inferCaseType(caseNumber, court, title) {
@@ -275,7 +296,7 @@ function partyMatchesEvent(lbox, caseObj) {
 
 export function scoreLboxCaseMatch(lbox, summary, caseObj) {
   const eventCaseNumber = extractEventCaseNumber(summary, lbox);
-  const caseNumberMatch = !!eventCaseNumber && matchTextPart(eventCaseNumber, caseObj?.caseNumber, 4);
+  const caseNumberMatch = !!eventCaseNumber && matchCaseNumberPart(eventCaseNumber, caseObj?.caseNumber);
   const courtMatch = !!lbox?.court && matchCourtPart(lbox.court, caseObj?.court);
   const partyMatch = partyMatchesEvent(lbox, caseObj);
   const score = [courtMatch, caseNumberMatch, partyMatch].filter(Boolean).length;
