@@ -5,6 +5,7 @@ import {
   serializeChecklistItems,
   carryForwardTomorrowTasks,
   carryForwardPendingDocs,
+  carryForwardDelegatedTasks,
   sortDelegatedTasks,
   buildLearnedTopicGroups,
   filterLearnedItemsByTopic,
@@ -176,6 +177,43 @@ test('sortDelegatedTasks orders by nearest due date and pushes undated items las
   const sorted = sortDelegatedTasks(tasks);
 
   assert.deepEqual(sorted.map((item) => item.id), ['3', '2', '1']);
+});
+
+test('carryForwardDelegatedTasks keeps unfinished delegated work visible with assignee and source date', () => {
+  const entries = {
+    '2026-04-14': {
+      delegatedItems: JSON.stringify([
+        { id: 'd1', assignee: '김실장', text: '등본 발급 확인', dueDate: '2026-04-15', done: false, cmCaseId: 'c1', cmCaseTitle: '손해배상 사건' },
+        { id: 'd2', assignee: '박대리', text: '완료된 조사', dueDate: '2026-04-15', done: true },
+      ]),
+    },
+    '2026-04-15': {
+      delegatedItems: JSON.stringify([{ id: 'd3', assignee: '이사무', text: '오늘 새 위임', dueDate: '', done: false }]),
+    },
+  };
+
+  const carried = carryForwardDelegatedTasks(entries, '2026-04-15');
+
+  assert.deepEqual(carried.map((item) => item.id), ['d1', 'd3']);
+  assert.equal(carried[0].sourceDate, '2026-04-14');
+  assert.equal(carried[0].assignee, '김실장');
+  assert.equal(carried[0].cmCaseTitle, '손해배상 사건');
+});
+
+test('carryForwardDelegatedTasks does not duplicate an already-copied delegated task', () => {
+  const entries = {
+    '2026-04-14': {
+      delegatedItems: JSON.stringify([{ id: 'd1', assignee: '김실장', text: '등본 발급 확인', dueDate: '2026-04-15', done: false }]),
+    },
+    '2026-04-15': {
+      // 자동 추적 도입 전 사용자가 직접 다음 날 일지에 베껴둔 경우
+      delegatedItems: JSON.stringify([{ id: 'manual-copy', assignee: '김실장', text: '등본 발급 확인', dueDate: '2026-04-15', done: false }]),
+    },
+  };
+
+  const carried = carryForwardDelegatedTasks(entries, '2026-04-15');
+
+  assert.deepEqual(carried.map((item) => item.id), ['manual-copy']);
 });
 
 test('buildLearnedTopicGroups groups learned notes by topic and keeps date labels', () => {

@@ -7,6 +7,7 @@ import {
   buildLearnedTopicGroups, searchLearnedItems, buildLearnedArchiveStats,
   buildLearnedTopicOptions,
   diffResolvedItems, createTaskCompletion, createPendingDocCompletion, mergeCompletions, pruneCompletionsForActive,
+  carryForwardDelegatedTasks, createDelegatedCompletion,
 } from "../../journalLogic";
 import ChecklistEditor from "./ChecklistEditor";
 import CaseNoteEditor from "./CaseNoteEditor";
@@ -41,6 +42,7 @@ function entryToForm(entry, dateKey) {
     tomorrowTasks: parseJsonArray(e.tomorrowTasks),
     pendingDocItems: parseJsonArray(e.pendingDocItems),
     delegatedItems: parseJsonArray(e.delegatedItems),
+    delegatedCompletions: e.delegatedCompletions || "",
     learnedItems: parseJsonArray(e.learnedItems),
     // 사건 연동 기록
     caseProgressItems: parseJsonArray(e.caseProgressItems),
@@ -68,7 +70,8 @@ function formToEntry(form) {
     pendingDocItems: JSON.stringify(form.pendingDocItems || []),
     pendingDocs: (form.pendingDocItems || []).map((i) => i.text).join("\n"),
     delegatedItems: JSON.stringify(form.delegatedItems || []),
-    delegated: (form.delegatedItems || []).map((i) => `${i.assignee ? i.assignee + ": " : ""}${i.text}`).join("\n"),
+    delegated: (form.delegatedItems || []).map((i) => `${i.done ? "[완료] " : ""}${i.assignee ? i.assignee + ": " : ""}${i.text}`).join("\n"),
+    delegatedCompletions: form.delegatedCompletions || "",
     learnedItems: JSON.stringify(form.learnedItems || []),
     learned: (form.learnedItems || []).map((i) => `[${i.topic}] ${i.title} — ${i.content}`).join("\n"),
     caseProgressItems: JSON.stringify(form.caseProgressItems || []),
@@ -86,6 +89,11 @@ function entryPreview(entry) {
   if (calls.length) parts.push(`통화 ${calls.length}`);
   const tasks = parseJsonArray(entry.todayTasks);
   if (tasks.length) parts.push(`할일 ${tasks.length}`);
+  const delegated = parseJsonArray(entry.delegatedItems);
+  if (delegated.length) {
+    const pendingDelegated = delegated.filter((item) => item && !item.done).length;
+    parts.push(`위임 ${pendingDelegated}/${delegated.length}`);
+  }
   const learned = parseJsonArray(entry.learnedItems);
   if (learned.length) parts.push(`배운점 ${learned.length}`);
   return parts.join(" · ").slice(0, 60) || "(빈 일지)";
@@ -97,6 +105,21 @@ const SectionLabel = ({ children, hint }) => (
     {hint && <span className="text-xs text-slate-400">{hint}</span>}
   </div>
 );
+
+function daysBetweenDateKeys(startDate, endDate) {
+  if (!startDate || !endDate) return null;
+  const start = Date.parse(`${startDate}T00:00:00+09:00`);
+  const end = Date.parse(`${endDate}T00:00:00+09:00`);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return Math.max(0, Math.floor((end - start) / (24 * 60 * 60 * 1000)));
+}
+
+function delegatedBadge(item, currentDate) {
+  if (item?.dueDate && item.dueDate < currentDate) return { text: "기한초과", tone: "red" };
+  const days = daysBetweenDateKeys(item?.sourceDate, currentDate);
+  if (days && days > 0) return { text: `D+${days}`, tone: days >= 3 ? "amber" : "slate" };
+  return { text: "오늘 위임", tone: "slate" };
+}
 
 export default function JournalApp({ user, cases = [], onPushTask = null, onUpdateCase = null }) {
   const [entries, setEntries] = useState({});
@@ -127,6 +150,8 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     const f = entryToForm(base, currentDate);
     // 저장 이력이 없는 새 날짜에만 어제 '내일 할 일'/제출 예정 서면을 자동 이월
     // (저장된(빈) 일지에는 이월하지 않아, 사용자가 지운 항목이 되살아나지 않음)
+    // 위임 업무는 완료/취소 전까지 회수 추적이 필요하므로 저장된 날짜에도 과거 미완료 항목을 병합한다.
+    f.delegatedItems = carryForwardDelegatedTasks(entries, currentDate);
     if (!base) {
       const carriedTasks = carryForwardTomorrowTasks(entries, currentDate);
       const carriedDocs = carryForwardPendingDocs(entries, currentDate);
@@ -167,6 +192,30 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     });
     setDirty(true);
   }, [currentDate]);
+
+  // 위임 업무 변경: 체크·삭제된 항목을 완료 기록(delegatedCompletions)에 남겨
+  // 다음 날 미확인 위임 업무로 되살아나지 않게 한다.
+  const handleDelegatedChange = useCallback((v) => {
+    const now = new Date().toISOString();
+    setForm((prev) => {
+      const records = diffResolvedItems(prev.delegatedItems, v)
+        .map((it) => createDelegatedCompletion(it, now, it.sourceDate || currentDate));
+      const merged = mergeCompletions(prev.delegatedCompletions, records);
+      return { ...prev, delegatedItems: v, delegatedCompletions: pruneCompletionsForActive(merged, v) };
+    });
+    setDirty(true);
+  }, [currentDate]);
+
+  const markDelegatedDone = useCallback((id) => {
+    const cur = formRef.current;
+    handleDelegatedChange((cur.delegatedItems || []).map((item) =>
+      item.id === id ? { ...item, done: true } : item));
+  }, [handleDelegatedChange]);
+
+  const cancelDelegated = useCallback((id) => {
+    const cur = formRef.current;
+    handleDelegatedChange((cur.delegatedItems || []).filter((item) => item.id !== id));
+  }, [handleDelegatedChange]);
 
   const save = useCallback(async () => {
     if (!user) return;
@@ -291,11 +340,38 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
       .map((k) => ({ k, e: entries[k] }))
       .filter(({ e }) => {
         const hay = [e.todayWork, e.callNotes, e.writtenDocs, e.etc, e.learned,
-          e.todayTasks, e.tomorrowTasks, e.pendingDocs, e.delegated]
+          e.todayTasks, e.tomorrowTasks, e.pendingDocs, e.pendingDocItems, e.delegated, e.delegatedItems]
           .filter(Boolean).join(" ").toLowerCase();
         return hay.includes(q);
       });
   }, [search, recentDates, entries]);
+
+  const pendingDelegatedItems = useMemo(() => (
+    (form.delegatedItems || []).filter((item) => item && item.text && !item.done)
+  ), [form.delegatedItems]);
+
+  const dailyCheckItems = useMemo(() => {
+    const items = [];
+    const pendingTodayTasks = (form.todayTasks || []).filter((item) => item && item.text && !item.done).length;
+    const pendingDocs = (form.pendingDocItems || []).filter((item) => item && item.text && !item.done).length;
+    const unrecordedProgress = (form.caseProgressItems || []).filter((item) => item && item.content && !item.recordedAt).length;
+    const unrecordedCalls = (form.callLogItems || []).filter((item) => item && (item.title || item.detail) && !item.recordedAt).length;
+    if (pendingDelegatedItems.length) items.push(`미확인 위임 업무 ${pendingDelegatedItems.length}건`);
+    if (pendingDocs) items.push(`제출 예정 서면 ${pendingDocs}건`);
+    if (pendingTodayTasks) items.push(`오늘 할 일 미완료 ${pendingTodayTasks}건`);
+    if (unrecordedProgress) items.push(`사건에 미반영된 진행 기록 ${unrecordedProgress}건`);
+    if (unrecordedCalls) items.push(`사건에 미반영된 통화·상담 기록 ${unrecordedCalls}건`);
+    if (!(form.tomorrowTasks || []).some((item) => item && item.text && !item.done)) items.push("내일 할 일이 비어 있음");
+    return items;
+  }, [form, pendingDelegatedItems]);
+
+  const runDailyCloseCheck = useCallback(() => {
+    if (!dailyCheckItems.length) {
+      window.alert("오늘 마감 점검 완료: 미확인 항목이 없습니다.");
+      return;
+    }
+    window.alert(`오늘 마감 점검\n\n${dailyCheckItems.map((item) => `- ${item}`).join("\n")}`);
+  }, [dailyCheckItems]);
 
   const navBtn = (key, icon, label) => (
     <button
@@ -355,6 +431,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
               <div className="flex items-center gap-2">
                 {savedFlash && <span className="text-xs text-emerald-600">✓ 저장됨</span>}
                 {dirty && <span className="text-xs text-amber-500">● 미저장</span>}
+                <button onClick={runDailyCloseCheck} className="btn-ghost text-sm">마감 점검</button>
                 <button onClick={save} className="btn-primary text-sm">저장</button>
               </div>
             </div>
@@ -374,6 +451,53 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
                   className="input text-xs w-28" />
               </label>
             </div>
+
+            {pendingDelegatedItems.length > 0 && (
+              <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50/80 p-3 shadow-sm">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div>
+                    <div className="text-sm font-semibold text-amber-900">미확인 위임 업무</div>
+                    <div className="text-xs text-amber-700 mt-0.5">완료·취소 처리 전까지 과거 일지에서 자동으로 따라옵니다.</div>
+                  </div>
+                  <span className="text-xs font-semibold text-amber-800 bg-white/70 border border-amber-200 rounded-full px-2 py-0.5">
+                    {pendingDelegatedItems.length}건
+                  </span>
+                </div>
+                <ul className="space-y-1.5">
+                  {pendingDelegatedItems.map((item) => {
+                    const badge = delegatedBadge(item, currentDate);
+                    const badgeClass = badge.tone === "red"
+                      ? "bg-red-100 text-red-700 border-red-200"
+                      : badge.tone === "amber"
+                        ? "bg-amber-100 text-amber-700 border-amber-200"
+                        : "bg-slate-100 text-slate-600 border-slate-200";
+                    return (
+                      <li key={item.id} className="bg-white rounded-lg border border-amber-100 px-2.5 py-2">
+                        <div className="flex items-start gap-2">
+                          <span className={`text-[11px] rounded-full border px-1.5 py-0.5 flex-shrink-0 ${badgeClass}`}>{badge.text}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm text-slate-800 leading-snug">
+                              {item.assignee && <span className="font-semibold text-indigo-600 mr-1">@{item.assignee}</span>}
+                              {item.text}
+                            </div>
+                            <div className="text-[11px] text-slate-400 mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5">
+                              {item.sourceDate && <span>위임일 {item.sourceDate}</span>}
+                              {item.dueDate && <span>확인일 {item.dueDate}</span>}
+                              {item.cmCaseTitle && <span>사건 {item.cmCaseTitle}</span>}
+                            </div>
+                            {item.details && <div className="text-xs text-slate-500 mt-1 whitespace-pre-wrap">{item.details}</div>}
+                          </div>
+                          <div className="flex items-center gap-1 flex-shrink-0">
+                            <button onClick={() => markDelegatedDone(item.id)} className="text-[11px] px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100">완료</button>
+                            <button onClick={() => cancelDelegated(item.id)} className="text-[11px] px-2 py-1 rounded bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100">취소</button>
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
 
             <SectionLabel hint="사건별 진행·서면·회의·행정">오늘 업무</SectionLabel>
             <textarea value={form.todayWork} onChange={(e) => update({ todayWork: e.target.value })}
@@ -404,10 +528,10 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
               onSendToCase={onUpdateCase ? handleSendDoc : null}
               onChange={handlePendingDocsChange} placeholder="제출 예정 서면 입력 후 Enter" />
 
-            <SectionLabel hint="담당자별 · 상세·캘린더 등록 가능">위임 업무</SectionLabel>
-            <ChecklistEditor items={form.delegatedItems} showAssignee showDate showDetails
+            <SectionLabel hint="담당자별 · 미완료 자동 추적 · 관련 사건 선택 · 상세·캘린더 등록 가능">위임 업무</SectionLabel>
+            <ChecklistEditor items={form.delegatedItems} cases={cases} showCase showAssignee showDate showDetails
               field="delegatedItems" onPushItem={onPushTask ? handlePushItem : null}
-              onChange={(v) => update({ delegatedItems: v })} placeholder="위임 업무 입력 후 Enter" />
+              onChange={handleDelegatedChange} placeholder="위임 업무 입력 후 Enter" emptyHint="미확인 위임 업무가 없습니다." />
 
             <SectionLabel hint="여러 건 추가 · 사건 선택+상세 · '사건에 기록' → 진행경과(+의뢰인요청 메모)">통화·상담 메모</SectionLabel>
             <CaseNoteEditor variant="call" items={form.callLogItems} cases={cases}

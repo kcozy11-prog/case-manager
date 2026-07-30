@@ -111,7 +111,14 @@ function joinChecklist(raw) {
 function joinDelegated(raw) {
   return parseArr(raw)
     .filter(it => it && String(it.text || "").trim())
-    .map(it => `${it.assignee ? it.assignee + ": " : ""}${it.text}${it.done ? " [완료]" : ""}`)
+    .map(it => {
+      const mark = it.done ? "[완료] " : "";
+      const assignee = it.assignee ? `${it.assignee}: ` : "";
+      const cse = it.cmCaseTitle ? ` (${it.cmCaseTitle})` : "";
+      const due = it.dueDate ? ` ~${it.dueDate}` : "";
+      const source = it.sourceDate ? ` ←${it.sourceDate}` : "";
+      return `${mark}${assignee}${it.text}${cse}${due}${source}`;
+    })
     .join("\n");
 }
 

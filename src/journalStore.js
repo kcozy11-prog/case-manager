@@ -14,7 +14,7 @@ export const JOURNAL_FIELDS = [
   "entryDate", "arrivalTime", "leaveTime",
   "todayTasks", "todayTaskCompletions", "todayWork", "eventMemos", "callNotes", "writtenDocs",
   "submittedDocItems", "pendingDocs", "pendingDocItems", "pendingDocCompletions",
-  "delegated", "delegatedItems", "learned", "learnedItems",
+  "delegated", "delegatedItems", "delegatedCompletions", "learned", "learnedItems",
   "tomorrowTasks", "etc",
   // 사건 연동: 진행 기록 / 통화 상담 기록 (JSON 배열 문자열)
   "caseProgressItems", "callLogItems",

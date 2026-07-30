@@ -6,8 +6,10 @@ import {
   carryForwardTomorrowTasks,
   carryForwardPendingDocs,
   createPendingDocCompletion,
+  createDelegatedCompletion,
   mergeCompletions,
   pruneCompletionsForActive,
+  carryForwardDelegatedTasks,
 } from './journalLogic.js';
 
 // ── diffResolvedItems: 체크(done) 또는 삭제된 항목을 골라낸다 ──────────────────
@@ -100,6 +102,38 @@ test('checking a carried pending-doc records a completion that suppresses re-car
     },
   };
   assert.deepEqual(carryForwardPendingDocs(entries, '2026-06-22').map((i) => i.text), []);
+});
+
+test('checking a carried delegated task records a completion that suppresses re-carry', () => {
+  const resolved = diffResolvedItems(
+    [{ id: 'd1', assignee: '김실장', text: '등본 발급 확인', dueDate: '2026-06-21', done: false, sourceDate: '2026-06-20' }],
+    [{ id: 'd1', assignee: '김실장', text: '등본 발급 확인', dueDate: '2026-06-21', done: true, sourceDate: '2026-06-20' }],
+  );
+  const completions = resolved.map((i) => createDelegatedCompletion(i, '2026-06-21T01:00:00.000Z', i.sourceDate));
+  const entries = {
+    '2026-06-20': { delegatedItems: JSON.stringify([{ id: 'd1', assignee: '김실장', text: '등본 발급 확인', dueDate: '2026-06-21', done: false }]) },
+    '2026-06-21': {
+      delegatedItems: JSON.stringify([]),
+      delegatedCompletions: JSON.stringify(completions),
+    },
+  };
+  assert.deepEqual(carryForwardDelegatedTasks(entries, '2026-06-22').map((i) => i.text), []);
+});
+
+test('deleting a carried delegated task treats it as resolved and does not revive it', () => {
+  const resolved = diffResolvedItems(
+    [{ id: 'd1', assignee: '김실장', text: '등본 발급 확인', dueDate: '2026-06-21', done: false, sourceDate: '2026-06-20' }],
+    [],
+  );
+  const completions = resolved.map((i) => createDelegatedCompletion(i, '2026-06-21T01:00:00.000Z', i.sourceDate));
+  const entries = {
+    '2026-06-20': { delegatedItems: JSON.stringify([{ id: 'd1', assignee: '김실장', text: '등본 발급 확인', dueDate: '2026-06-21', done: false }]) },
+    '2026-06-21': {
+      delegatedItems: JSON.stringify([]),
+      delegatedCompletions: JSON.stringify(completions),
+    },
+  };
+  assert.deepEqual(carryForwardDelegatedTasks(entries, '2026-06-22').map((i) => i.text), []);
 });
 
 // ── 체크 후 다시 체크 해제(uncheck)하면 완료 기록을 회수해 다시 이월되게 ──────────

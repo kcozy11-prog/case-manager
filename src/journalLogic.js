@@ -399,6 +399,97 @@ export function carryForwardPendingDocs(entries = {}, targetDate) {
   return sortChecklistByDueDate(current);
 }
 
+// ── 위임 업무 완료/삭제 기록(delegatedCompletions) ──────────────────────────
+// 위임 업무는 단순 일지 메모가 아니라 "회수할 때까지 추적"해야 하므로,
+// 과거 일지의 미완료 위임 항목을 오늘 일지로 모아 보여준다. 체크/삭제된 항목은
+// 완료 기록으로 남겨 다음 날 다시 살아나지 않게 한다.
+function delegatedCompletionKeys(item, fallbackSourceDate = '') {
+  if (!item || !item.text || !item.text.trim()) return [];
+  const sourceDate = item.sourceDate || fallbackSourceDate || '';
+  const text = item.text.trim();
+  const assignee = (item.assignee || '').trim();
+  const dueDate = item.dueDate || '';
+  const baseKey = `text:${text}|assignee:${assignee}|due:${dueDate}`;
+  const sourceKey = `${baseKey}|source:${sourceDate}`;
+  return item.id ? [`id:${item.id}|source:${sourceDate}`, sourceKey, baseKey] : [sourceKey, baseKey];
+}
+
+function normalizeDelegatedCompletion(item, fallbackSourceDate = '') {
+  if (!item || !item.text || !item.text.trim()) return null;
+  return {
+    id: item.id || '',
+    text: item.text.trim(),
+    assignee: (item.assignee || '').trim(),
+    dueDate: item.dueDate || '',
+    sourceDate: item.sourceDate || fallbackSourceDate || '',
+    completedAt: item.completedAt || '',
+  };
+}
+
+function collectDelegatedCompletionKeys(entries = {}, targetDate) {
+  const completed = new Set();
+  Object.keys(entries)
+    .filter((dateKey) => dateKey <= targetDate)
+    .forEach((dateKey) => {
+      parseJsonArray(entries[dateKey]?.delegatedCompletions)
+        .map((item) => normalizeDelegatedCompletion(item, dateKey))
+        .filter(Boolean)
+        .forEach((item) => delegatedCompletionKeys(item, item.sourceDate || dateKey).forEach((key) => completed.add(key)));
+    });
+  return completed;
+}
+
+function hasDelegatedCompletion(completedKeys, item, fallbackSourceDate = '') {
+  return delegatedCompletionKeys(item, fallbackSourceDate).some((key) => completedKeys.has(key));
+}
+
+function addDelegatedIdentityKeys(keySet, item, fallbackSourceDate = '') {
+  delegatedCompletionKeys(item, fallbackSourceDate).forEach((key) => keySet.add(key));
+}
+
+function hasDelegatedIdentity(keySet, item, fallbackSourceDate = '') {
+  return delegatedCompletionKeys(item, fallbackSourceDate).some((key) => keySet.has(key));
+}
+
+export function createDelegatedCompletion(item, completedAt = new Date().toISOString(), fallbackSourceDate = '') {
+  const normalized = normalizeDelegatedCompletion(item, fallbackSourceDate);
+  if (!normalized) return null;
+  return { ...normalized, completedAt };
+}
+
+export function carryForwardDelegatedTasks(entries = {}, targetDate) {
+  const completedKeys = collectDelegatedCompletionKeys(entries, targetDate);
+  const current = parseJsonArray(entries[targetDate]?.delegatedItems)
+    .map((item) => normalizeTaskItem(item, 'delegated'))
+    .filter(Boolean);
+  const existingKeys = new Set();
+  current.forEach((item) => addDelegatedIdentityKeys(existingKeys, item, item.sourceDate || targetDate));
+
+  const previousDates = Object.keys(entries)
+    .filter((dateKey) => dateKey < targetDate)
+    .sort((a, b) => b.localeCompare(a));
+
+  previousDates.forEach((dateKey) => {
+    const delegatedTasks = parseJsonArray(entries[dateKey]?.delegatedItems)
+      .map((item) => normalizeTaskItem(item, 'delegated'))
+      .filter(Boolean);
+
+    delegatedTasks.forEach((item) => {
+      const sourceDate = item.sourceDate || dateKey;
+      const forwarded = { ...item, sourceDate, done: false };
+      if (
+        item.done ||
+        hasDelegatedCompletion(completedKeys, forwarded, sourceDate) ||
+        hasDelegatedIdentity(existingKeys, forwarded, sourceDate)
+      ) return;
+      addDelegatedIdentityKeys(existingKeys, forwarded, sourceDate);
+      current.push(forwarded);
+    });
+  });
+
+  return sortDelegatedTasks(current);
+}
+
 export function sortDelegatedTasks(items = []) {
   return [...items]
     .map((item) => normalizeTaskItem(item, 'delegated'))
