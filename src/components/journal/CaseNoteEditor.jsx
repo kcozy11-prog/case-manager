@@ -1,10 +1,11 @@
 import { useState, useEffect } from "react";
 import CaseSearchSelect from "./CaseSearchSelect";
+import { DEFAULT_TIMELINE_ACTIVITY_TYPE, TIMELINE_ACTIVITY_TYPES } from "../../timelineActivity";
 
 // 사건 연동 기록 에디터 (재사용)
 //  variant="progress" : 관련 사건 + 제목/한줄 + 상세메모  → 사건 진행경과(timeline)
 //  variant="call"     : 관련 사건 + 제목 + 상세 + ☐의뢰인요청  → 진행경과(+의뢰인요청 메모)
-// item: { id, caseId, caseTitle, date, content?, detail?, title?, asClientRequest?, recordedAt?, timelineId?, memoId? }
+// item: { id, caseId, caseTitle, date, activityType?, content?, detail?, title?, asClientRequest?, recordedAt?, timelineId?, memoId? }
 // onRecord(item, field): async → JournalApp 이 사건에 쓰고 item 에 recordedAt/timelineId/memoId 갱신·저장
 export default function CaseNoteEditor({
   items = [],
@@ -23,6 +24,7 @@ export default function CaseNoteEditor({
   const [title, setTitle] = useState("");
   const [detail, setDetail] = useState("");
   const [date, setDate] = useState(defaultDate);
+  const [activityType, setActivityType] = useState(DEFAULT_TIMELINE_ACTIVITY_TYPE);
   const [asClientRequest, setAsClientRequest] = useState(false);
   const [recordingId, setRecordingId] = useState(null);
   const [err, setErr] = useState(null);
@@ -43,10 +45,11 @@ export default function CaseNoteEditor({
       date: date || defaultDate,
     };
     const item = isCall
-      ? { ...base, title: title.trim(), detail: detail.trim(), asClientRequest }
-      : { ...base, content: content.trim(), detail: progressDetail.trim() };
+      ? { ...base, title: title.trim(), detail: detail.trim(), activityType: "call", asClientRequest }
+      : { ...base, content: content.trim(), detail: progressDetail.trim(), activityType };
     onChange([...(items || []), item]);
-    setCaseId(""); setContent(""); setProgressDetail(""); setTitle(""); setDetail(""); setAsClientRequest(false);
+    setCaseId(""); setContent(""); setProgressDetail(""); setTitle(""); setDetail("");
+    setActivityType(DEFAULT_TIMELINE_ACTIVITY_TYPE); setAsClientRequest(false);
   };
 
   const updateItem = (id, patch) =>
@@ -85,6 +88,16 @@ export default function CaseNoteEditor({
                   <input type="date" value={it.date || ""}
                     onChange={(e) => updateItem(it.id, { date: e.target.value })}
                     className="input text-xs flex-[0_1_135px] min-w-[120px] font-mono" />
+                  {!isCall && (
+                    <select value={it.activityType || ""}
+                      onChange={(e) => updateItem(it.id, { activityType: e.target.value })}
+                      className="input text-xs flex-[0_1_105px] min-w-[96px]">
+                      <option value="">유형 미지정</option>
+                      {TIMELINE_ACTIVITY_TYPES.map((type) => (
+                        <option key={type.value} value={type.value}>{type.label}</option>
+                      ))}
+                    </select>
+                  )}
                   <button
                     onClick={() => record(it)}
                     disabled={recordingId === it.id}
@@ -138,6 +151,14 @@ export default function CaseNoteEditor({
           {caseSelect(caseId, setCaseId, "flex-[1_1_140px] min-w-[120px]")}
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
             className="input text-xs flex-[0_1_135px] min-w-[120px] font-mono" />
+          {!isCall && (
+            <select value={activityType} onChange={(e) => setActivityType(e.target.value)}
+              className="input text-xs flex-[0_1_110px] min-w-[100px]" aria-label="진행경과 유형">
+              {TIMELINE_ACTIVITY_TYPES.map((type) => (
+                <option key={type.value} value={type.value}>{type.label}</option>
+              ))}
+            </select>
+          )}
         </div>
         {isCall ? (
           <>

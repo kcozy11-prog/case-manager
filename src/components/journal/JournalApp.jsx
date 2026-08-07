@@ -274,6 +274,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
       date: item.date || currentDate,
       content: item.content,
       detail: item.detail || "",
+      activityType: item.activityType,
     });
     await applyCaseRecord(fieldName, item.id, { timelineId, recordedAt: new Date().toISOString() }, updated);
   }, [applyCaseRecord, currentDate]);
@@ -284,7 +285,12 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     if (!c) throw new Error("선택한 사건을 찾을 수 없습니다.");
     const timelineId = item.timelineId || Date.now();
     const content = buildCallTimelineContent({ title: item.title, detail: item.detail });
-    let updated = upsertTimelineEntry(c, { id: timelineId, date: item.date || currentDate, content });
+    let updated = upsertTimelineEntry(c, {
+      id: timelineId,
+      date: item.date || currentDate,
+      content,
+      activityType: "call",
+    });
     const patch = { timelineId, recordedAt: new Date().toISOString() };
     if (item.asClientRequest) {
       const memoId = item.memoId || Date.now() + 1;

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { todayStr, fmtDate, TYPES, emptyCase, MEMO_CATEGORIES, MEMO_CAT_STYLE } from "../utils";
+import { getTimelineActivity, DEFAULT_TIMELINE_ACTIVITY_TYPE, TIMELINE_ACTIVITY_TYPES } from "../timelineActivity";
 
 function FormSection({ title, children }) {
   return (
@@ -13,7 +14,7 @@ function FormSection({ title, children }) {
 export default function CaseFormModal({ initial, onSave, onClose }) {
   const [form, setForm] = useState(initial || emptyCase());
   const [newHearing, setNewHearing] = useState({ date: todayStr, time: "", type: "", result: "", memo: "" });
-  const [newTimeline, setNewTimeline] = useState({ date: todayStr, content: "" });
+  const [newTimeline, setNewTimeline] = useState({ date: todayStr, content: "", activityType: DEFAULT_TIMELINE_ACTIVITY_TYPE });
   const set = (path, val) => {
     setForm(prev => {
       const next = { ...prev };
@@ -34,7 +35,7 @@ export default function CaseFormModal({ initial, onSave, onClose }) {
   const addTimeline = () => {
     if (!newTimeline.content.trim()) return;
     setForm(p => ({ ...p, timeline: [...p.timeline, { id: Date.now(), ...newTimeline }] }));
-    setNewTimeline({ date: todayStr, content: "" });
+    setNewTimeline({ date: todayStr, content: "", activityType: DEFAULT_TIMELINE_ACTIVITY_TYPE });
   };
   const delTimeline = (id) => setForm(p => ({ ...p, timeline: p.timeline.filter(t => t.id !== id) }));
 
@@ -172,6 +173,11 @@ export default function CaseFormModal({ initial, onSave, onClose }) {
             {form.timeline.map(t => (
               <div key={t.id} className="flex items-start gap-2 text-sm mb-1.5 bg-slate-50 rounded px-2 py-1.5">
                 <span className="text-slate-400 w-24 flex-shrink-0">{fmtDate(t.date)}</span>
+                {getTimelineActivity(t.activityType) && (
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-medium flex-shrink-0 ${getTimelineActivity(t.activityType).className}`}>
+                    {getTimelineActivity(t.activityType).label}
+                  </span>
+                )}
                 <span className="text-slate-700 flex-1">{t.content}</span>
                 <button onClick={() => delTimeline(t.id)} className="text-slate-300 hover:text-red-400 ml-1">✕</button>
               </div>
@@ -179,6 +185,10 @@ export default function CaseFormModal({ initial, onSave, onClose }) {
             <div className="flex flex-col sm:flex-row gap-2 mt-2">
               <input className="input w-full sm:w-36 flex-shrink-0" type="date" value={newTimeline.date}
                 onChange={e => setNewTimeline(p => ({ ...p, date: e.target.value }))} />
+              <select className="input w-full sm:w-28 flex-shrink-0" value={newTimeline.activityType}
+                onChange={e => setNewTimeline(p => ({ ...p, activityType: e.target.value }))} aria-label="진행경과 유형">
+                {TIMELINE_ACTIVITY_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
+              </select>
               <input className="input flex-1" placeholder="경과 내용" value={newTimeline.content}
                 onChange={e => setNewTimeline(p => ({ ...p, content: e.target.value }))} />
               <button onClick={addTimeline} className="btn-primary px-2.5">+</button>

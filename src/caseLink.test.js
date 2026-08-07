@@ -33,6 +33,18 @@ test('upsertTimelineEntry stores optional detail memo', () => {
   assert.deepEqual(out.timeline[0], { id: 3, date: '2026-02-01', content: '준비서면 초안', detail: '쟁점별 증거 보강 필요' });
 });
 
+test('upsertTimelineEntry stores an activity type only for new typed records', () => {
+  const c = { id: 'c1', timeline: [{ id: 1, date: '2026-01-01', content: '기존 기록' }] };
+  const out = upsertTimelineEntry(c, {
+    id: 2, date: '2026-02-01', content: '준비서면 제출', activityType: 'document',
+  });
+
+  assert.deepEqual(out.timeline, [
+    { id: 1, date: '2026-01-01', content: '기존 기록' },
+    { id: 2, date: '2026-02-01', content: '준비서면 제출', activityType: 'document' },
+  ]);
+});
+
 test('upsertTimelineEntry handles a case with no timeline array', () => {
   const c = { id: 'c1' };
   const out = upsertTimelineEntry(c, { id: 1, date: '2026-01-01', content: 'x' });
@@ -151,7 +163,12 @@ test('markBriefSubmitted: 진행경과에 "{제목} 제출" 자동 추가 + 서�
   assert.equal(b.submittedDate, '2026-06-24');
   assert.equal(b.submitTimelineId, 999);
   assert.equal(out.timeline.length, 1);
-  assert.deepEqual(out.timeline[0], { id: 999, date: '2026-06-24', content: '준비서면 2호 제출' });
+  assert.deepEqual(out.timeline[0], {
+    id: 999,
+    date: '2026-06-24',
+    content: '준비서면 2호 제출',
+    activityType: 'document',
+  });
 });
 
 test('markBriefSubmitted: 재호출해도 진행경과 중복 없음(submitTimelineId 재사용)', () => {

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { dday, fmtDate, fmtMoney, todayStr, addDays, MEMO_CATEGORIES, MEMO_CAT_STYLE } from "../utils";
+import { getTimelineActivity, DEFAULT_TIMELINE_ACTIVITY_TYPE, TIMELINE_ACTIVITY_TYPES } from "../timelineActivity";
 import { DdayBadge } from "./Badges";
 import { hearingMemoText, setHearingMemo } from "../hearingUtils";
 
@@ -96,6 +97,7 @@ export default function OverviewTab({ c, onUpdate }) {
   const [newMemo, setNewMemo] = useState({ category: "일반메모", title: "", content: "" });
   const [newTimeline, setNewTimeline] = useState("");
   const [newTimelineDetail, setNewTimelineDetail] = useState("");
+  const [newTimelineActivityType, setNewTimelineActivityType] = useState(DEFAULT_TIMELINE_ACTIVITY_TYPE);
   const [newTimelineDate, setNewTimelineDate] = useState(todayStr);
   const [editingTimelineId, setEditingTimelineId] = useState(null);
   const [editingTimelineDate, setEditingTimelineDate] = useState("");
@@ -113,10 +115,15 @@ export default function OverviewTab({ c, onUpdate }) {
   const addTimeline = () => {
     if (!newTimeline.trim()) return;
     onUpdate({ ...c, timeline: [...(c.timeline || []), {
-      id: Date.now(), date: newTimelineDate || todayStr, content: newTimeline.trim(), detail: newTimelineDetail.trim(),
+      id: Date.now(),
+      date: newTimelineDate || todayStr,
+      content: newTimeline.trim(),
+      detail: newTimelineDetail.trim(),
+      activityType: newTimelineActivityType,
     }] });
     setNewTimeline("");
     setNewTimelineDetail("");
+    setNewTimelineActivityType(DEFAULT_TIMELINE_ACTIVITY_TYPE);
     setNewTimelineDate(todayStr);
   };
 
@@ -380,10 +387,14 @@ export default function OverviewTab({ c, onUpdate }) {
       <Section title="진행경과">
         {/* 빠른 입력 */}
         <div className="mb-3 space-y-2 rounded-xl border border-slate-100 bg-slate-50/60 p-3">
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <input type="date" className="input-sm" style={{ width: "130px" }} value={newTimelineDate}
               onChange={e => setNewTimelineDate(e.target.value)} />
-            <input className="input-sm flex-1" placeholder="경과 한줄 입력..." value={newTimeline}
+            <select className="input-sm" style={{ width: "108px" }} value={newTimelineActivityType}
+              onChange={e => setNewTimelineActivityType(e.target.value)} aria-label="진행경과 유형">
+              {TIMELINE_ACTIVITY_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
+            </select>
+            <input className="input-sm flex-1 min-w-[180px]" placeholder="경과 한줄 입력..." value={newTimeline}
               onChange={e => setNewTimeline(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter") addTimeline(); }} />
             <button onClick={addTimeline} disabled={!newTimeline.trim()}
@@ -397,7 +408,9 @@ export default function OverviewTab({ c, onUpdate }) {
         ) : (
           <div className="relative pl-4">
             <div className="absolute left-1.5 top-0 bottom-0 w-px bg-slate-200" />
-            {[...timeline].sort((a, b) => new Date(b.date) - new Date(a.date)).map((t) => (
+            {[...timeline].sort((a, b) => new Date(b.date) - new Date(a.date)).map((t) => {
+              const activity = getTimelineActivity(t.activityType);
+              return (
               <div key={t.id} className="relative mb-3 last:mb-0">
                 <div className="absolute -left-2.5 top-1.5 w-2 h-2 rounded-full bg-indigo-400 border-2 border-white" />
                 <div className="flex items-center justify-between gap-1.5 mb-0.5">
@@ -436,7 +449,14 @@ export default function OverviewTab({ c, onUpdate }) {
                     <button onClick={() => setEditingTimelineContentId(null)} className="text-xs text-slate-400 hover:text-slate-600 px-1">취소</button>
                   </div>
                 ) : (
-                  <div className="text-sm text-slate-700">{t.content}</div>
+                  <div className="text-sm text-slate-700 flex items-center gap-1.5 flex-wrap">
+                    {activity && (
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${activity.className}`}>
+                        {activity.label}
+                      </span>
+                    )}
+                    <span>{t.content}</span>
+                  </div>
                 )}
                 {editingTimelineDetailId === t.id ? (
                   <div className="mt-1 space-y-1">
@@ -454,7 +474,8 @@ export default function OverviewTab({ c, onUpdate }) {
                   t.detail && <div className="text-xs text-slate-500 mt-1 whitespace-pre-wrap leading-relaxed bg-slate-50 border border-slate-100 rounded-md px-2 py-1.5">{t.detail}</div>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </Section>

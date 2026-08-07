@@ -14,10 +14,12 @@ function upsertById(list = [], item) {
   return next;
 }
 
-// 진행경과(timeline)에 { id, date, content, detail? } upsert
-export function upsertTimelineEntry(caseObj, { id, date, content, detail }) {
+// 진행경과(timeline)에 { id, date, content, detail?, activityType? } upsert.
+// activityType이 없는 기존 기록은 그대로 보존해 유형 배지를 새로 붙이지 않는다.
+export function upsertTimelineEntry(caseObj, { id, date, content, detail, activityType }) {
   const item = { id, date, content };
   if (detail !== undefined) item.detail = detail;
+  if (activityType) item.activityType = activityType;
   return { ...caseObj, timeline: upsertById(caseObj?.timeline, item) };
 }
 
@@ -72,7 +74,12 @@ export function markBriefSubmitted(caseObj, briefId, today = '', makeId = () => 
   const nextBriefs = briefs.map((b) =>
     b && b.id === briefId ? { ...b, status: 'submitted', submittedDate, submitTimelineId: timelineId } : b);
   const withBriefs = { ...caseObj, briefs: nextBriefs };
-  return upsertTimelineEntry(withBriefs, { id: timelineId, date: submittedDate, content: `${target.title || '서면'} 제출` });
+  return upsertTimelineEntry(withBriefs, {
+    id: timelineId,
+    date: submittedDate,
+    content: `${target.title || '서면'} 제출`,
+    activityType: 'document',
+  });
 }
 
 // 제출 대기로 되돌리기: status=pending + submittedDate/submitTimelineId 비움 + 연결된 진행경과 항목 제거.
