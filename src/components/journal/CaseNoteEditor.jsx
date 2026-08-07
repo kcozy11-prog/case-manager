@@ -89,10 +89,9 @@ export default function CaseNoteEditor({
                     onChange={(e) => updateItem(it.id, { date: e.target.value })}
                     className="input text-xs flex-[0_1_135px] min-w-[120px] font-mono" />
                   {!isCall && (
-                    <select value={it.activityType || ""}
+                    <select value={it.activityType || DEFAULT_TIMELINE_ACTIVITY_TYPE}
                       onChange={(e) => updateItem(it.id, { activityType: e.target.value })}
                       className="input text-xs flex-[0_1_105px] min-w-[96px]">
-                      <option value="">유형 미지정</option>
                       {TIMELINE_ACTIVITY_TYPES.map((type) => (
                         <option key={type.value} value={type.value}>{type.label}</option>
                       ))}

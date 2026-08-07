@@ -399,6 +399,7 @@ export function mergeCalendarEventIntoCase(caseObj, ev, { today, makeId = () => 
         id: makeId(),
         date: dateForLog,
         content: `${hearingType} ${eventDate}${hearingTime ? ` ${hearingTime}` : ""} 지정${lbox?.court ? ` (${lbox.court})` : ""}`,
+        activityType: "other",
       },
     ],
   };

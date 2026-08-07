@@ -12,6 +12,7 @@ import {
 import ChecklistEditor from "./ChecklistEditor";
 import CaseNoteEditor from "./CaseNoteEditor";
 import JournalMigratePanel from "./JournalMigratePanel";
+import { DEFAULT_TIMELINE_ACTIVITY_TYPE } from "../../timelineActivity";
 import { upsertTimelineEntry, upsertCaseMemo, upsertBrief, buildCallTimelineContent } from "../../caseLink";
 
 const DEFAULT_TOPICS = ["법리·판례", "실무 팁", "절차적 교훈", "문서작성", "증거/입증", "상담/수임", "커뮤니케이션", "기타"];
@@ -274,7 +275,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
       date: item.date || currentDate,
       content: item.content,
       detail: item.detail || "",
-      activityType: item.activityType,
+      activityType: item.activityType || DEFAULT_TIMELINE_ACTIVITY_TYPE,
     });
     await applyCaseRecord(fieldName, item.id, { timelineId, recordedAt: new Date().toISOString() }, updated);
   }, [applyCaseRecord, currentDate]);

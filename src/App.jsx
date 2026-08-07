@@ -286,7 +286,10 @@ export default function App() {
 
       if (result.timelineContent) {
         updated.timeline = [...(updated.timeline || []), {
-          id: Date.now() + 2, date: todayStr, content: result.timelineContent
+          id: Date.now() + 2,
+          date: todayStr,
+          content: result.timelineContent,
+          activityType: "other",
         }];
       }
 

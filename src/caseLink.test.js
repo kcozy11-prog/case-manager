@@ -223,6 +223,7 @@ test('markTodoDone: 할 일 완료 체크 시 진행경과에 자동 기록하�
     date: '2026-06-24',
     content: '할 일 완료: 준비서면 초안 작성',
     detail: '쟁점별 증거 정리',
+    activityType: 'other',
   });
 });
 

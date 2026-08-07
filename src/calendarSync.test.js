@@ -281,4 +281,5 @@ test("mergeCalendarEventIntoCase: 수동 선택된 LBOX 일정을 사건 기일�
   assert.equal(result.caseObj.hearings[0].calendarEventId, "ev1");
   assert.equal(result.caseObj.memos[0].category, "기일메모");
   assert.match(result.caseObj.timeline[0].content, /변론기일 2026-07-01 11:20 지정/);
+  assert.equal(result.caseObj.timeline[0].activityType, "other");
 });

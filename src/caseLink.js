@@ -119,6 +119,7 @@ export function markTodoDone(caseObj, todoId, today = '', makeId = () => Date.no
     date: today,
     content: buildTodoCompletionTimelineContent(target),
     detail: target.details || '',
+    activityType: 'other',
   });
 }
 
