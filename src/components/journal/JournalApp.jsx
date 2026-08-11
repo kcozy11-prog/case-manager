@@ -7,7 +7,7 @@ import {
   buildLearnedTopicGroups, searchLearnedItems, buildLearnedArchiveStats,
   buildLearnedTopicOptions,
   diffResolvedItems, createTaskCompletion, createPendingDocCompletion, mergeCompletions, pruneCompletionsForActive,
-  carryForwardDelegatedTasks, createDelegatedCompletion,
+  carryForwardDelegatedTasks, createDelegatedCompletion, rescheduleDelegatedTask,
 } from "../../journalLogic";
 import ChecklistEditor from "./ChecklistEditor";
 import CaseNoteEditor from "./CaseNoteEditor";
@@ -207,6 +207,21 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     setDirty(true);
   }, [currentDate]);
 
+  // 확인 결과 보완 등이 생긴 경우, 업무를 새로 만들지 않고 같은 위임 업무의
+  // 확인기한과 변경 사유를 조정 이력으로 누적한다.
+  const handleDelegatedReschedule = useCallback((item, { dueDate, reason }) => {
+    const changedAt = new Date().toISOString();
+    setForm((prev) => ({
+      ...prev,
+      delegatedItems: (prev.delegatedItems || []).map((existing) => (
+        existing.id === item.id
+          ? rescheduleDelegatedTask(existing, dueDate, { changedAt, changedDate: currentDate, reason }) || existing
+          : existing
+      )),
+    }));
+    setDirty(true);
+  }, [currentDate]);
+
   const markDelegatedDone = useCallback((id) => {
     const cur = formRef.current;
     handleDelegatedChange((cur.delegatedItems || []).map((item) =>
@@ -241,7 +256,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     });
     const cur = formRef.current;
     const arr = (cur[fieldName] || []).map((it) =>
-      it.id === item.id ? { ...it, googleEventId: eventId } : it);
+      it.id === item.id ? { ...it, googleEventId: eventId, needsCalendarSync: false } : it);
     const next = { ...cur, [fieldName]: arr };
     setForm(next);
     if (user) {
@@ -535,8 +550,9 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
               onSendToCase={onUpdateCase ? handleSendDoc : null}
               onChange={handlePendingDocsChange} placeholder="제출 예정 서면 입력 후 Enter" />
 
-            <SectionLabel hint="담당자별 · 미완료 자동 추적 · 관련 사건 선택 · 상세·캘린더 등록 가능">위임 업무</SectionLabel>
+            <SectionLabel hint="담당자별 · 미완료 자동 추적 · 확인기한 변경 이력 · 관련 사건·상세·캘린더 등록">위임 업무</SectionLabel>
             <ChecklistEditor items={form.delegatedItems} cases={cases} showCase showAssignee showDate showDetails
+              allowDueDateEdit onRescheduleItem={handleDelegatedReschedule}
               field="delegatedItems" onPushItem={onPushTask ? handlePushItem : null}
               onChange={handleDelegatedChange} placeholder="위임 업무 입력 후 Enter" emptyHint="미확인 위임 업무가 없습니다." />
 

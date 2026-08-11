@@ -31,6 +31,24 @@ test("buildJournalRows flattens checklist JSON fields into readable text", () =>
   assert.match(rows[1][4], /전화/);
 });
 
+test("buildJournalRows preserves delegated-work deadline changes for export", () => {
+  const entries = {
+    "2026-08-11": {
+      delegatedItems: JSON.stringify([
+        {
+          assignee: "김실장", text: "보정서 보완 확인", dueDate: "2026-08-17", sourceDate: "2026-08-10",
+          dueDateChanges: [{ fromDate: "2026-08-11", toDate: "2026-08-17", changedDate: "2026-08-11", reason: "1차 확인 결과 보완 필요" }],
+        },
+      ]),
+    },
+  };
+
+  const rows = buildJournalRows(entries);
+  assert.match(rows[1][7], /1차/);
+  assert.match(rows[1][7], /2026-08-11→2026-08-17/);
+  assert.match(rows[1][7], /1차 확인 결과 보완 필요/);
+});
+
 test("buildExportBatchUpdateData includes 서면 and 업무일지 ranges with data", () => {
   const cases = [{ title: "사건A", briefs: [{ id: 1, title: "준비서면 2호", status: "pending", preparedDate: "2026-06-20", submittedDate: "" }] }];
   const journal = { "2026-06-20": { todayWork: "x" } };

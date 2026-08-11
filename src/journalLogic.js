@@ -9,6 +9,50 @@ function makeId(prefix = 'item') {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+// 위임 업무의 기한 조정은 현재 기한만 덮어쓰지 않고, 업무일지에서 확인 경위를
+// 다시 볼 수 있도록 변경 전·후 기한과 사유를 함께 보존한다.
+export function normalizeDueDateChanges(rawChanges = []) {
+  const changes = Array.isArray(rawChanges) ? rawChanges : [];
+  return changes
+    .filter((change) => change && typeof change === 'object')
+    .map((change) => ({
+      fromDate: String(change.fromDate || ''),
+      toDate: String(change.toDate || ''),
+      changedAt: String(change.changedAt || ''),
+      changedDate: String(change.changedDate || ''),
+      reason: String(change.reason || '').trim(),
+    }))
+    .filter((change) => change.fromDate !== change.toDate);
+}
+
+export function rescheduleDelegatedTask(item, nextDueDate = '', options = {}) {
+  const normalized = normalizeTaskItem(item, 'delegated');
+  if (!normalized) return null;
+
+  const fromDate = normalized.dueDate || '';
+  const toDate = String(nextDueDate || '');
+  if (fromDate === toDate) return normalized;
+
+  const changedAt = options.changedAt || new Date().toISOString();
+  return {
+    ...normalized,
+    dueDate: toDate,
+    // 이미 캘린더에 등록한 업무는 날짜 변경 후 사용자가 한 번 눌러 갱신해야 한다.
+    // 기존의 ✓ 표시는 그대로 두지 않아 실제 일정과 일지가 어긋나는 것을 막는다.
+    needsCalendarSync: Boolean(normalized.googleEventId) || Boolean(normalized.needsCalendarSync),
+    dueDateChanges: [
+      ...normalizeDueDateChanges(normalized.dueDateChanges),
+      {
+        fromDate,
+        toDate,
+        changedAt,
+        changedDate: options.changedDate || '',
+        reason: String(options.reason || '').trim(),
+      },
+    ],
+  };
+}
+
 export function parseJsonArray(raw, fallback = []) {
   if (!raw) return [...fallback];
   try {
@@ -83,6 +127,7 @@ export function normalizeTaskItem(item, prefix = 'task') {
     text: item.text.trim(),
     done: Boolean(item.done),
     dueDate: item.dueDate || '',
+    dueDateChanges: normalizeDueDateChanges(item.dueDateChanges),
     assignee: item.assignee || '',
     sourceDate: item.sourceDate || '',
     createdAt: item.createdAt || '',
@@ -91,6 +136,7 @@ export function normalizeTaskItem(item, prefix = 'task') {
     cmCaseId: item.cmCaseId || '',
     cmCaseTitle: item.cmCaseTitle || '',
     googleEventId: item.googleEventId || '',
+    needsCalendarSync: Boolean(item.needsCalendarSync),
     cmBriefId: item.cmBriefId || '',
     cmBriefSyncedAt: item.cmBriefSyncedAt || '',
   };

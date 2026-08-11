@@ -7,6 +7,7 @@ import {
   carryForwardPendingDocs,
   carryForwardDelegatedTasks,
   sortDelegatedTasks,
+  rescheduleDelegatedTask,
   buildLearnedTopicGroups,
   filterLearnedItemsByTopic,
   searchLearnedItems,
@@ -177,6 +178,48 @@ test('sortDelegatedTasks orders by nearest due date and pushes undated items las
   const sorted = sortDelegatedTasks(tasks);
 
   assert.deepEqual(sorted.map((item) => item.id), ['3', '2', '1']);
+});
+
+test('rescheduleDelegatedTask changes only the deadline and preserves an auditable change history', () => {
+  const first = rescheduleDelegatedTask(
+    { id: 'd1', assignee: '김실장', text: '보정서 보완 확인', dueDate: '2026-08-11', sourceDate: '2026-08-10', done: false, googleEventId: 'calendar-event-1' },
+    '2026-08-17',
+    { changedAt: '2026-08-11T03:00:00.000Z', changedDate: '2026-08-11', reason: '1차 확인 결과 보완 필요' },
+  );
+  const second = rescheduleDelegatedTask(
+    first,
+    '2026-08-20',
+    { changedAt: '2026-08-17T03:00:00.000Z', changedDate: '2026-08-17', reason: '2차 확인 후 추가 검토' },
+  );
+
+  assert.equal(second.dueDate, '2026-08-20');
+  assert.equal(second.sourceDate, '2026-08-10');
+  assert.equal(second.needsCalendarSync, true);
+  assert.deepEqual(second.dueDateChanges, [
+    { fromDate: '2026-08-11', toDate: '2026-08-17', changedAt: '2026-08-11T03:00:00.000Z', changedDate: '2026-08-11', reason: '1차 확인 결과 보완 필요' },
+    { fromDate: '2026-08-17', toDate: '2026-08-20', changedAt: '2026-08-17T03:00:00.000Z', changedDate: '2026-08-17', reason: '2차 확인 후 추가 검토' },
+  ]);
+});
+
+test('carryForwardDelegatedTasks keeps a rescheduled task as one item instead of reviving the old deadline', () => {
+  const entries = {
+    '2026-08-10': {
+      delegatedItems: JSON.stringify([
+        { id: 'd1', assignee: '김실장', text: '보정서 보완 확인', dueDate: '2026-08-11', done: false },
+      ]),
+    },
+    '2026-08-11': {
+      delegatedItems: JSON.stringify([
+        { id: 'd1', assignee: '김실장', text: '보정서 보완 확인', dueDate: '2026-08-17', sourceDate: '2026-08-10', done: false,
+          dueDateChanges: [{ fromDate: '2026-08-11', toDate: '2026-08-17', changedAt: '2026-08-11T03:00:00.000Z', changedDate: '2026-08-11', reason: '1차 확인 결과 보완 필요' }] },
+      ]),
+    },
+  };
+
+  const carried = carryForwardDelegatedTasks(entries, '2026-08-12');
+  assert.equal(carried.length, 1);
+  assert.equal(carried[0].dueDate, '2026-08-17');
+  assert.equal(carried[0].dueDateChanges[0].reason, '1차 확인 결과 보완 필요');
 });
 
 test('carryForwardDelegatedTasks keeps unfinished delegated work visible with assignee and source date', () => {

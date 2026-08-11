@@ -108,6 +108,20 @@ function joinChecklist(raw) {
     .join("\n");
 }
 
+function formatDelegatedDueDateChanges(rawChanges) {
+  if (!Array.isArray(rawChanges) || rawChanges.length === 0) return "";
+  const history = rawChanges
+    .filter(change => change && typeof change === "object" && String(change.fromDate || "") !== String(change.toDate || ""))
+    .map((change, index) => {
+      const changedDate = String(change.changedDate || change.changedAt || "").slice(0, 10);
+      const from = change.fromDate || "미지정";
+      const to = change.toDate || "미지정";
+      const reason = String(change.reason || "").trim();
+      return `${index + 1}차${changedDate ? ` · ${changedDate}` : ""} ${from}→${to}${reason ? ` (${reason})` : ""}`;
+    });
+  return history.length ? ` [기한 변경: ${history.join(" / ")}]` : "";
+}
+
 function joinDelegated(raw) {
   return parseArr(raw)
     .filter(it => it && String(it.text || "").trim())
@@ -117,7 +131,8 @@ function joinDelegated(raw) {
       const cse = it.cmCaseTitle ? ` (${it.cmCaseTitle})` : "";
       const due = it.dueDate ? ` ~${it.dueDate}` : "";
       const source = it.sourceDate ? ` ←${it.sourceDate}` : "";
-      return `${mark}${assignee}${it.text}${cse}${due}${source}`;
+      const dueDateChanges = formatDelegatedDueDateChanges(it.dueDateChanges);
+      return `${mark}${assignee}${it.text}${cse}${due}${source}${dueDateChanges}`;
     })
     .join("\n");
 }

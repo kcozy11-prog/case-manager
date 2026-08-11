@@ -4,7 +4,9 @@ import CaseSearchSelect from "./CaseSearchSelect";
 // 재사용 체크리스트 에디터
 // items: [{ id, text, done, details?, dueDate?, assignee?, cmCaseId?, cmCaseTitle?, googleEventId?, cmBriefId?, sourceDate? }]
 // 옵션: showDate, showAssignee, showCase(+cases), showDetails, onPushItem(item, field)+field,
-//       showAddDetails(신규 입력 시 상세 메모), onSendToCase(item, field) → 사건 제출대기서면 보내기(행별 사건 선택 활성), placeholder
+//       showAddDetails(신규 입력 시 상세 메모), onSendToCase(item, field) → 사건 제출대기서면 보내기,
+//       allowDueDateEdit + onRescheduleItem(item, { dueDate, reason }) → 기한 변경 이력 보존
+//       placeholder
 export default function ChecklistEditor({
   items = [],
   onChange,
@@ -19,6 +21,8 @@ export default function ChecklistEditor({
   cases = [],
   onPushItem = null,
   onSendToCase = null,
+  allowDueDateEdit = false,
+  onRescheduleItem = null,
   emptyHint = "항목이 없습니다.",
 }) {
   const [text, setText] = useState("");
@@ -31,6 +35,9 @@ export default function ChecklistEditor({
   const [pushErr, setPushErr] = useState(null);
   const [sendingId, setSendingId] = useState(null);
   const [sendErr, setSendErr] = useState(null);
+  const [rescheduleId, setRescheduleId] = useState(null);
+  const [rescheduleDue, setRescheduleDue] = useState("");
+  const [rescheduleReason, setRescheduleReason] = useState("");
 
   const mkId = () => `item_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -57,6 +64,22 @@ export default function ChecklistEditor({
     onChange(items.map((it) => (it.id === id ? { ...it, ...patch } : it)));
   const toggle = (id) => updateItem(id, { done: !items.find((i) => i.id === id)?.done });
   const remove = (id) => onChange(items.filter((it) => it.id !== id));
+  const openReschedule = (item) => {
+    setRescheduleId(item.id);
+    setRescheduleDue(item.dueDate || "");
+    setRescheduleReason("");
+  };
+  const closeReschedule = () => {
+    setRescheduleId(null);
+    setRescheduleDue("");
+    setRescheduleReason("");
+  };
+  const applyReschedule = (item) => {
+    if ((item.dueDate || "") === rescheduleDue) { closeReschedule(); return; }
+    if (onRescheduleItem) onRescheduleItem(item, { dueDate: rescheduleDue, reason: rescheduleReason });
+    else updateItem(item.id, { dueDate: rescheduleDue });
+    closeReschedule();
+  };
 
   const push = async (item) => {
     if (!onPushItem || !item.dueDate) return;
@@ -107,6 +130,14 @@ export default function ChecklistEditor({
                 {it.dueDate && (
                   <span className="text-[11px] text-slate-400 font-mono flex-shrink-0">{it.dueDate.slice(5)}</span>
                 )}
+                {showDate && allowDueDateEdit && (
+                  <button
+                    onClick={() => rescheduleId === it.id ? closeReschedule() : openReschedule(it)}
+                    className="text-[11px] text-indigo-500 hover:text-indigo-700 flex-shrink-0"
+                    title="확인기한 변경">
+                    {rescheduleId === it.id ? "닫기" : "기한 변경"}
+                  </button>
+                )}
                 {showDetails && (
                   <button
                     onClick={() => setExpandedId(expandedId === it.id ? null : it.id)}
@@ -118,10 +149,18 @@ export default function ChecklistEditor({
                     onClick={() => push(it)}
                     disabled={pushingId === it.id}
                     className={`flex-shrink-0 text-xs px-1 disabled:opacity-40 ${
-                      it.googleEventId ? "text-emerald-500 hover:text-emerald-600" : "text-slate-300 hover:text-indigo-400"
+                      it.needsCalendarSync
+                        ? "text-amber-600 hover:text-amber-700"
+                        : it.googleEventId
+                          ? "text-emerald-500 hover:text-emerald-600"
+                          : "text-slate-300 hover:text-indigo-400"
                     }`}
-                    title={it.googleEventId ? "캘린더에 동기화됨 (다시 누르면 갱신)" : "구글 캘린더에 추가"}>
-                    {pushingId === it.id ? "…" : it.googleEventId ? "📅✓" : "📅"}
+                    title={it.needsCalendarSync
+                      ? "기한이 변경되었습니다. 눌러 구글 캘린더 일정도 갱신하세요."
+                      : it.googleEventId
+                        ? "캘린더에 동기화됨 (다시 누르면 갱신)"
+                        : "구글 캘린더에 추가"}>
+                    {pushingId === it.id ? "…" : it.needsCalendarSync ? "📅!" : it.googleEventId ? "📅✓" : "📅"}
                   </button>
                 )}
                 <button
@@ -129,6 +168,47 @@ export default function ChecklistEditor({
                   className="text-slate-300 hover:text-red-500 text-sm flex-shrink-0 opacity-0 group-hover:opacity-100"
                   title="삭제">✕</button>
               </div>
+
+              {showDate && allowDueDateEdit && rescheduleId === it.id && (
+                <div className="ml-6 mt-1.5 rounded-lg border border-indigo-100 bg-indigo-50/50 p-2 flex flex-wrap items-end gap-1.5">
+                  <label className="text-[11px] text-slate-500">
+                    새 확인기한
+                    <input
+                      type="date"
+                      value={rescheduleDue}
+                      onChange={(e) => setRescheduleDue(e.target.value)}
+                      className="input block mt-0.5 text-xs w-[132px] font-mono"
+                      autoFocus />
+                  </label>
+                  <label className="text-[11px] text-slate-500 flex-1 min-w-[150px]">
+                    변경 사유 <span className="text-slate-300">(선택)</span>
+                    <input
+                      value={rescheduleReason}
+                      onChange={(e) => setRescheduleReason(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); applyReschedule(it); } }}
+                      placeholder="예: 1차 확인 결과 보완 필요"
+                      className="input block mt-0.5 text-xs w-full" />
+                  </label>
+                  <button
+                    onClick={() => applyReschedule(it)}
+                    disabled={(it.dueDate || "") === rescheduleDue}
+                    className="text-[11px] px-2 py-1 rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">
+                    적용
+                  </button>
+                  <button onClick={closeReschedule} className="text-[11px] px-1.5 py-1 text-slate-500 hover:text-slate-700">취소</button>
+                </div>
+              )}
+
+              {showDate && allowDueDateEdit && Array.isArray(it.dueDateChanges) && it.dueDateChanges.length > 0 && (
+                <div className="ml-6 mt-1 text-[11px] text-slate-400 leading-relaxed">
+                  <span className="text-slate-500">기한 변경 이력</span>
+                  {it.dueDateChanges.map((change, index) => (
+                    <span key={`${change.changedAt || change.changedDate || index}_${index}`} className="ml-1.5">
+                      {index + 1}차 · {change.changedDate || String(change.changedAt || "").slice(0, 10)} {change.fromDate || "미지정"}→{change.toDate || "미지정"}{change.reason ? ` (${change.reason})` : ""}
+                    </span>
+                  ))}
+                </div>
+              )}
 
               {/* 사건 연동: 관련 사건 선택 + 사건 제출대기서면으로 보내기 (전용 줄로 분리해 눈에 잘 띄게) */}
               {onSendToCase && (
