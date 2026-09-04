@@ -1,6 +1,21 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { todayStr, fmtDate } from "../utils";
 import { markBriefSubmitted, markBriefPending } from "../caseLink";
+
+// 입력 중에는 로컬 상태만 쓰고, 포커스를 벗어날 때 한 번만 상위로 저장한다.
+// 키 입력마다 Firestore 에 쓰고 그 반향으로 값이 되돌아와 한글 조합(IME)이
+// 끊기던 문제(초성만 입력됨)를 막는다.
+function BufferedTextarea({ value, onCommit, ...props }) {
+  const [draft, setDraft] = useState(value ?? "");
+  const focused = useRef(false);
+  useEffect(() => { if (!focused.current) setDraft(value ?? ""); }, [value]);
+  return (
+    <textarea {...props} value={draft}
+      onFocus={() => { focused.current = true; }}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => { focused.current = false; if (draft !== (value ?? "")) onCommit(draft); }} />
+  );
+}
 
 // 가벼운 서면 제출현황 추적
 //  - 제출 대기: 작성해 두었으나 (아침 컨펌 전 등) 아직 제출하지 않은 서면
@@ -70,8 +85,8 @@ export default function BriefsTab({ c, onUpdate }) {
                   <button onClick={() => markSubmitted(b.id)} className="text-xs text-amber-600 hover:text-amber-800 font-medium flex-shrink-0">제출함</button>
                   <button onClick={() => del(b.id)} className="text-slate-300 hover:text-red-400 flex-shrink-0 text-xs px-1">✕</button>
                 </div>
-                <textarea className="input-sm w-full min-h-[52px] mt-2 text-xs bg-white/80" placeholder="상세 내용 메모"
-                  value={b.details || ""} onChange={(e) => updateBrief(b.id, { details: e.target.value })} />
+                <BufferedTextarea className="input-sm w-full min-h-[52px] mt-2 text-xs bg-white/80" placeholder="상세 내용 메모"
+                  value={b.details || ""} onCommit={(v) => updateBrief(b.id, { details: v })} />
               </div>
             ))}
           </div>
@@ -102,8 +117,8 @@ export default function BriefsTab({ c, onUpdate }) {
                   <button onClick={() => del(b.id)} className="text-slate-300 hover:text-red-400 flex-shrink-0 text-xs px-1">✕</button>
                 </div>
                 {(b.details || "").trim() ? (
-                  <textarea className="input-sm w-full min-h-[52px] mt-2 text-xs bg-white/80" placeholder="상세 내용 메모"
-                    value={b.details || ""} onChange={(e) => updateBrief(b.id, { details: e.target.value })} />
+                  <BufferedTextarea className="input-sm w-full min-h-[52px] mt-2 text-xs bg-white/80" placeholder="상세 내용 메모"
+                    value={b.details || ""} onCommit={(v) => updateBrief(b.id, { details: v })} />
                 ) : null}
               </div>
             ))}

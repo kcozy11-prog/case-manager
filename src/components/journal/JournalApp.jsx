@@ -132,6 +132,8 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
   const [search, setSearch] = useState("");
   const [learnedTopic, setLearnedTopic] = useState("전체");
   const loadedDateRef = useRef(null);
+  // 마지막으로 폼에 반영한 서버 판본(_savedAt). 이 값이 그대로면 스냅샷이 와도 폼을 다시 만들지 않는다.
+  const loadedSavedAtRef = useRef(null);
   const formRef = useRef(form);
   useEffect(() => { formRef.current = form; }, [form]);
   const casesRef = useRef(cases);
@@ -148,6 +150,10 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     // 편집 중(dirty)이면 덮어쓰지 않음
     if (dirty && loadedDateRef.current === currentDate) return;
     const base = entries[currentDate] || null;
+    // 같은 날짜가 이미 로드되어 있고 서버 판본(_savedAt)도 그대로면 폼을 다시 만들지 않는다.
+    // 저장 반향이나 다른 날짜 문서의 스냅샷마다 폼이 리셋되어, 입력 중 한글 조합이 끊기고
+    // (초성만 남음) 값이 롤백되던 문제를 막는다.
+    if (loadedDateRef.current === currentDate && ((base && base._savedAt) || null) === loadedSavedAtRef.current) return;
     const f = entryToForm(base, currentDate);
     // 저장 이력이 없는 새 날짜에만 어제 '내일 할 일'/제출 예정 서면을 자동 이월
     // (저장된(빈) 일지에는 이월하지 않아, 사용자가 지운 항목이 되살아나지 않음)
@@ -161,6 +167,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     }
     setForm(f);
     loadedDateRef.current = currentDate;
+    loadedSavedAtRef.current = (base && base._savedAt) || null;
     setDirty(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentDate, entries, user]);
@@ -236,7 +243,8 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
   const save = useCallback(async () => {
     if (!user) return;
     const entry = formToEntry({ ...form, entryDate: currentDate });
-    await saveJournalEntry(user.uid, currentDate, entry);
+    const saved = await saveJournalEntry(user.uid, currentDate, entry);
+    if (saved && saved._savedAt) loadedSavedAtRef.current = saved._savedAt;
     setDirty(false);
     setSavedFlash(true);
     setTimeout(() => setSavedFlash(false), 1800);
@@ -261,6 +269,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     setForm(next);
     if (user) {
       saveJournalEntry(user.uid, currentDate, formToEntry({ ...next, entryDate: currentDate }))
+        .then((saved) => { if (saved && saved._savedAt) loadedSavedAtRef.current = saved._savedAt; })
         .catch((e) => console.warn("[journal] 캘린더 후 저장 실패", e));
     }
     return eventId;
@@ -276,6 +285,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     setForm(next);
     if (user) {
       saveJournalEntry(user.uid, currentDate, formToEntry({ ...next, entryDate: currentDate }))
+        .then((saved) => { if (saved && saved._savedAt) loadedSavedAtRef.current = saved._savedAt; })
         .catch((e) => console.warn("[journal] 사건 기록 후 저장 실패", e));
     }
   }, [onUpdateCase, user, currentDate]);

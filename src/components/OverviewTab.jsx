@@ -131,6 +131,18 @@ export default function OverviewTab({ c, onUpdate }) {
     onUpdate({ ...c, hearings: (c.hearings || []).filter(h => h.id !== id) });
   };
 
+  // ── 기일 직접 추가 ── (LBOX 캘린더 동기화 없이도 변론기일 등을 수기로 등록)
+  const HEARING_TYPES = ["변론기일", "변론준비기일", "조정기일", "심문기일", "공판기일", "선고기일", "직접 입력"];
+  const [newHearing, setNewHearing] = useState({ type: "변론기일", customType: "", date: "", time: "" });
+  const newHearingType = newHearing.type === "직접 입력" ? newHearing.customType.trim() : newHearing.type;
+  const addHearing = () => {
+    if (!newHearing.date || !newHearingType) return;
+    onUpdate({ ...c, hearings: [...(c.hearings || []), {
+      id: Date.now(), date: newHearing.date, time: newHearing.time, type: newHearingType, result: "",
+    }] });
+    setNewHearing({ type: "변론기일", customType: "", date: "", time: "" });
+  };
+
   const startEditHearingMemo = (h) => {
     setEditingHearingMemoId(h.id);
     setEditingHearingMemo(hearingMemoText(h));
@@ -339,8 +351,24 @@ export default function OverviewTab({ c, onUpdate }) {
       </Section>
 
       <Section title="기일">
+        <div className="flex gap-2 mb-2 flex-wrap">
+          <select className="input-sm" style={{ width: "118px" }} value={newHearing.type}
+            onChange={e => setNewHearing(p => ({ ...p, type: e.target.value }))} aria-label="기일 유형">
+            {HEARING_TYPES.map(t => <option key={t}>{t}</option>)}
+          </select>
+          {newHearing.type === "직접 입력" && (
+            <input className="input-sm" style={{ width: "110px" }} placeholder="유형 입력"
+              value={newHearing.customType} onChange={e => setNewHearing(p => ({ ...p, customType: e.target.value }))} />
+          )}
+          <input className="input-sm" style={{ width: "140px" }} type="date" value={newHearing.date}
+            onChange={e => setNewHearing(p => ({ ...p, date: e.target.value }))} />
+          <input className="input-sm" style={{ width: "100px" }} type="time" value={newHearing.time}
+            onChange={e => setNewHearing(p => ({ ...p, time: e.target.value }))} title="시각 (선택)" />
+          <button onClick={addHearing} disabled={!newHearing.date || !newHearingType}
+            className="btn-primary text-xs px-3 py-1 disabled:opacity-40">추가</button>
+        </div>
         {hearings.length === 0 ? (
-          <div className="text-sm text-slate-400 italic">등록된 기일이 없습니다.</div>
+          <div className="text-sm text-slate-400 italic">등록된 기일이 없습니다. 위에서 유형과 날짜를 골라 추가하세요.</div>
         ) : (
           <div className="space-y-1.5">
             {upcomingHearings.length > 0 && (
