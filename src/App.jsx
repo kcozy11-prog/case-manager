@@ -2,7 +2,7 @@ import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { auth, provider, db } from "./firebase";
 import { onAuthStateChanged, signOut, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
 import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, getDocFromServer, waitForPendingWrites, arrayUnion } from "firebase/firestore";
-import { TYPES, STATUSES, todayStr, dday, fmtDate, emptyCase, SAMPLE_CASES } from "./utils";
+import { TYPES, STATUSES, todayStr, localDateStr, fmtDate, emptyCase, SAMPLE_CASES } from "./utils";
 import { TypeBadge } from "./components/Badges";
 import LoginScreen from "./components/LoginScreen";
 import StatsBar from "./components/StatsBar";
@@ -24,6 +24,7 @@ import BriefsTab from "./components/BriefsTab";
 import GlobalSearch from "./components/GlobalSearch";
 import { ensureTaskCalendar, upsertTaskEvent, CalendarAuthError } from "./calendarPush";
 import { mergeGoogleTaskIntoStandaloneTodos, readStandaloneTodos } from "./standaloneTodos";
+import { selectUpcomingHearings, upsertHearing } from "./hearingUtils";
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -53,6 +54,19 @@ export default function App() {
   const [caseSaveMsg, setCaseSaveMsg] = useState(null); // 업무일지→사건 저장 결과 진단 배너
   const autoCalendarSyncStarted = useRef(false);
   const autoTaskSyncStarted = useRef(false);
+  // 앱을 켜 둔 채 자정을 넘기면 D-day와 기일 건수가 어제 기준으로 멈춘다.
+  // 날짜가 바뀌면 이 값이 바뀌어 화면 전체가 오늘 기준으로 다시 계산된다.
+  const [dayKey, setDayKey] = useState(() => localDateStr(new Date()));
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setDayKey(prev => {
+        const now = localDateStr(new Date());
+        return now === prev ? prev : now;
+      });
+    }, 60000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Auth 상태 감지
   useEffect(() => {
@@ -166,21 +180,11 @@ export default function App() {
     return matchSearch && matchStatus && matchType;
   }), [cases, search, statusFilter, typeFilter]);
 
-  // 가장 가까운 예정 기일 계산
-  const nextHearing = useMemo(() => {
-    let best = null;
-    for (const c of cases) {
-      if (c.status === "종결") continue;
-      for (const h of (c.hearings || [])) {
-        const d = dday(h.date);
-        if (d === null || d < 0) continue;
-        if (!best || d < best.dday) {
-          best = { ...h, dday: d, caseTitle: c.title, caseId: c.id, client: c.client };
-        }
-      }
-    }
-    return best;
-  }, [cases]);
+  // 가장 가까운 예정 기일 (통계 바와 같은 기준 — 진행 중 사건, 중복 기일 제외)
+  const nextHearing = useMemo(
+    () => selectUpcomingHearings(cases, new Date())[0] || null,
+    [cases, dayKey],
+  );
 
   const saveCase = useCallback(async (c) => {
     if (!user) return;
@@ -279,9 +283,10 @@ export default function App() {
       }
 
       if (result.hearingDate && result.hearingType) {
-        updated.hearings = [...(updated.hearings || []), {
+        // 같은 기일이 이미 등록돼 있으면(LBOX 동기화 등) 중복으로 넣지 않는다.
+        updated.hearings = upsertHearing(updated.hearings || [], {
           id: Date.now() + 1, date: result.hearingDate, time: result.hearingTime || "", type: result.hearingType, result: ""
-        }];
+        }).hearings;
       }
 
       if (result.timelineContent) {

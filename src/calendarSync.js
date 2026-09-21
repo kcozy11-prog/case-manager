@@ -1,6 +1,7 @@
 // ── Google Calendar API ──────────────────────────────────────────────────────
 
 import { localDateStr } from "./utils.js";
+import { upsertHearing } from "./hearingUtils.js";
 
 const LBOX_CAL_ID = "5dd32843ebd4cd2e01b418ad5add2f9dade2e80a033bc6d74742580fdc98d022@group.calendar.google.com";
 
@@ -375,30 +376,19 @@ export function mergeCalendarEventIntoCase(caseObj, ev, { today, makeId = () => 
     calendarEventId: ev.id,
   };
 
-  const existingIndex = hearings.findIndex(h =>
-    (ev.id && h.calendarEventId === ev.id) ||
-    (h.date === eventDate && h.type === hearingType && (h.time || "") === (hearingTime || ""))
-  );
-
-  if (existingIndex >= 0) {
-    const existing = hearings[existingIndex];
-    const changed =
-      existing.date !== nextHearing.date ||
-      (existing.time || "") !== (nextHearing.time || "") ||
-      existing.type !== nextHearing.type ||
-      (existing.result || "") !== (nextHearing.result || "");
-
-    if (!changed) return { caseObj: ref, added: false, updated: false };
-
-    const updatedHearings = [...hearings];
-    updatedHearings[existingIndex] = { ...existing, ...nextHearing, id: existing.id || nextHearing.id };
-    return { caseObj: { ...ref, hearings: updatedHearings }, added: false, updated: true };
+  // 이미 들어와 있는 기일이면 새로 만들지 않고 비어 있던 값만 채운다.
+  // 같은 기일이 다른 캘린더를 거쳐 일정 ID가 다른 채로 한 번 더 들어오거나,
+  // 한쪽에 시각·기일유형이 빠져 있어도 같은 기일로 본다.
+  const upserted = upsertHearing(hearings, nextHearing);
+  if (!upserted.added) {
+    if (!upserted.updated) return { caseObj: ref, added: false, updated: false };
+    return { caseObj: { ...ref, hearings: upserted.hearings }, added: false, updated: true };
   }
 
   const memoContent = `• ${hearingType} ${eventDate}${hearingTime ? ` ${hearingTime}` : ""}${locationInfo ? `\n• 장소: ${locationInfo}` : ""}`;
   const nextCase = {
     ...ref,
-    hearings: [...hearings, nextHearing],
+    hearings: upserted.hearings,
     memos: [
       ...(Array.isArray(ref.memos) ? ref.memos : []),
       {

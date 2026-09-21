@@ -1,24 +1,17 @@
 import { useState } from "react";
-import { today, dday, fmtDate } from "../utils";
+import { dday, fmtDate } from "../utils";
 import { buildPendingTodos } from "../statsTodos";
+import { selectMonthHearings, selectWeekHearings } from "../hearingUtils";
 
 export default function StatsBar({ cases, standaloneTodos = [], onSelectCase, onOpenStandaloneTodos }) {
   const [dropdown, setDropdown] = useState(null); // "month" | "week" | "todos" | null
 
-  // 이번 달 기일 목록
-  const monthHearings = cases.flatMap(c =>
-    (c.hearings || []).filter(h => {
-      const d = new Date(h.date);
-      return d.getFullYear() === today.getFullYear() && d.getMonth() === today.getMonth() && dday(h.date) >= 0;
-    }).map(h => ({ ...h, caseId: c.id, caseTitle: c.title }))
-  ).sort((a, b) => new Date(a.date) - new Date(b.date));
+  const now = new Date();
 
-  // 7일 내 기일 목록
-  const weekHearings = cases.flatMap(c =>
-    (c.hearings || []).filter(h => {
-      const n = dday(h.date); return n !== null && n >= 0 && n <= 7;
-    }).map(h => ({ ...h, caseId: c.id, caseTitle: c.title }))
-  ).sort((a, b) => new Date(a.date) - new Date(b.date));
+  // 이번 달에 남은 기일 / 7일 내 기일.
+  // 진행 중 사건만, 날짜가 있는 기일만, 같은 기일이 두 번 들어가 있으면 한 번만 센다.
+  const monthHearings = selectMonthHearings(cases, now);
+  const weekHearings = selectWeekHearings(cases, now);
 
   // 미완료 할 일 목록
   const pendingTodos = buildPendingTodos(cases, new Date(), standaloneTodos);
@@ -49,7 +42,7 @@ export default function StatsBar({ cases, standaloneTodos = [], onSelectCase, on
 
   const stats = [
     { key: "active", label: "진행 중 사건", value: active, unit: "건", color: "#60A5FA", items: null },
-    { key: "month", label: "이번 달 기일", value: monthHearings.length, unit: "건", color: "#34D399", items: monthHearings },
+    { key: "month", label: "이번 달 남은 기일", value: monthHearings.length, unit: "건", color: "#34D399", items: monthHearings },
     { key: "week", label: "7일 내 기일", value: weekHearings.length, unit: "건", color: weekHearings.length > 0 ? "#F87171" : "#94A3B8", items: weekHearings },
     { key: "todos", label: "미완료 할 일", value: pendingTodos.length, unit: "건", color: pendingTodos.length > 0 ? "#FBBF24" : "#94A3B8", items: pendingTodos },
     { key: "deadlines", label: "불변기간", value: uncheckedDeadlines.length, unit: "건", color: uncheckedDeadlines.length > 0 ? "#F43F5E" : "#94A3B8", items: uncheckedDeadlines },

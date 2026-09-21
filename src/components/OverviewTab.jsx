@@ -2,7 +2,7 @@ import { useState } from "react";
 import { dday, fmtDate, fmtMoney, todayStr, addDays, MEMO_CATEGORIES, MEMO_CAT_STYLE } from "../utils";
 import { getTimelineActivity, DEFAULT_TIMELINE_ACTIVITY_TYPE, TIMELINE_ACTIVITY_TYPES, setTimelineActivityType, collectTimelineActivityTypes } from "../timelineActivity";
 import { DdayBadge } from "./Badges";
-import { hearingMemoText, setHearingMemo } from "../hearingUtils";
+import { hearingMemoText, setHearingMemo, splitCaseHearings, upsertHearing } from "../hearingUtils";
 
 function InfoCard({ label, value, sub }) {
   return (
@@ -48,6 +48,10 @@ function HearingRow({
             <div className="text-sm font-medium text-slate-700">
               {h.type}
               {h.fromCalendar && <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-indigo-100 text-indigo-500 font-medium">LBOX</span>}
+              {h.isDuplicate && (
+                <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-rose-100 text-rose-600 font-medium"
+                  title="같은 기일이 이미 위에 있습니다. 건수에는 한 번만 반영되며, 이 줄은 지워도 됩니다.">중복</span>
+              )}
             </div>
             {h.result && <div className="text-xs text-slate-400 truncate">{h.result}</div>}
           </div>
@@ -137,11 +141,17 @@ export default function OverviewTab({ c, onUpdate }) {
   const HEARING_TYPES = ["변론기일", "변론준비기일", "조정기일", "심문기일", "공판기일", "선고기일", "직접 입력"];
   const [newHearing, setNewHearing] = useState({ type: "변론기일", customType: "", date: "", time: "" });
   const newHearingType = newHearing.type === "직접 입력" ? newHearing.customType.trim() : newHearing.type;
+  const [hearingNotice, setHearingNotice] = useState("");
+  // 입력을 고치면 직전 안내문은 지운다.
+  const editNewHearing = (patch) => { setHearingNotice(""); setNewHearing(p => ({ ...p, ...patch })); };
   const addHearing = () => {
     if (!newHearing.date || !newHearingType) return;
-    onUpdate({ ...c, hearings: [...(c.hearings || []), {
+    // 같은 날짜·유형·시각의 기일이 이미 있으면 또 만들지 않고 비어 있던 값만 채운다.
+    const next = upsertHearing(c.hearings || [], {
       id: Date.now(), date: newHearing.date, time: newHearing.time, type: newHearingType, result: "",
-    }] });
+    });
+    if (next.added || next.updated) onUpdate({ ...c, hearings: next.hearings });
+    setHearingNotice(next.added ? "" : "같은 기일이 이미 등록되어 있어 중복으로 추가하지 않았습니다.");
     setNewHearing({ type: "변론기일", customType: "", date: "", time: "" });
   };
 
@@ -267,12 +277,9 @@ export default function OverviewTab({ c, onUpdate }) {
     onUpdate({ ...c, memos: memos.map(m => m.id === id ? { ...m, checked: !m.checked } : m) });
   };
 
-  const upcomingHearings = [...hearings]
-    .filter(h => dday(h.date) >= 0)
-    .sort((a, b) => new Date(a.date) - new Date(b.date));
-  const pastHearings = [...hearings]
-    .filter(h => dday(h.date) < 0)
-    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  // 날짜가 없는 기일은 '날짜 미정'으로 따로 뺀다 — dday(null) >= 0 이 참이 되어
+  // 날짜 없는 기일이 '예정'에 섞여 들어가던 문제를 막는다.
+  const { upcoming: upcomingHearings, past: pastHearings, undated: undatedHearings } = splitCaseHearings(hearings);
 
   return (
     <div className="space-y-5">
@@ -371,20 +378,21 @@ export default function OverviewTab({ c, onUpdate }) {
       <Section title="기일">
         <div className="flex gap-2 mb-2 flex-wrap">
           <select className="input-sm" style={{ width: "118px" }} value={newHearing.type}
-            onChange={e => setNewHearing(p => ({ ...p, type: e.target.value }))} aria-label="기일 유형">
+            onChange={e => editNewHearing({ type: e.target.value })} aria-label="기일 유형">
             {HEARING_TYPES.map(t => <option key={t}>{t}</option>)}
           </select>
           {newHearing.type === "직접 입력" && (
             <input className="input-sm" style={{ width: "110px" }} placeholder="유형 입력"
-              value={newHearing.customType} onChange={e => setNewHearing(p => ({ ...p, customType: e.target.value }))} />
+              value={newHearing.customType} onChange={e => editNewHearing({ customType: e.target.value })} />
           )}
           <input className="input-sm" style={{ width: "140px" }} type="date" value={newHearing.date}
-            onChange={e => setNewHearing(p => ({ ...p, date: e.target.value }))} />
+            onChange={e => editNewHearing({ date: e.target.value })} />
           <input className="input-sm" style={{ width: "100px" }} type="time" value={newHearing.time}
-            onChange={e => setNewHearing(p => ({ ...p, time: e.target.value }))} title="시각 (선택)" />
+            onChange={e => editNewHearing({ time: e.target.value })} title="시각 (선택)" />
           <button onClick={addHearing} disabled={!newHearing.date || !newHearingType}
             className="btn-primary text-xs px-3 py-1 disabled:opacity-40">추가</button>
         </div>
+        {hearingNotice && <div className="text-xs text-rose-500 mb-2">{hearingNotice}</div>}
         {hearings.length === 0 ? (
           <div className="text-sm text-slate-400 italic">등록된 기일이 없습니다. 위에서 유형과 날짜를 골라 추가하세요.</div>
         ) : (
@@ -397,6 +405,24 @@ export default function OverviewTab({ c, onUpdate }) {
                     key={h.id}
                     h={h}
                     upcoming
+                    onDelete={deleteHearing}
+                    onAddDeadline={addAppealDeadline}
+                    editingMemo={editingHearingMemoId === h.id ? editingHearingMemo : null}
+                    onStartMemo={startEditHearingMemo}
+                    onChangeMemo={setEditingHearingMemo}
+                    onSaveMemo={saveHearingMemo}
+                    onCancelMemo={cancelHearingMemo}
+                  />
+                ))}
+              </>
+            )}
+            {undatedHearings.length > 0 && (
+              <>
+                <div className="text-xs font-medium text-slate-400 uppercase tracking-wide mt-2 mb-1">날짜 미정</div>
+                {undatedHearings.map(h => (
+                  <HearingRow
+                    key={h.id}
+                    h={h}
                     onDelete={deleteHearing}
                     onAddDeadline={addAppealDeadline}
                     editingMemo={editingHearingMemoId === h.id ? editingHearingMemo : null}

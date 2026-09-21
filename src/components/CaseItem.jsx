@@ -1,10 +1,11 @@
 import { dday, fmtDate, TYPE_STYLE } from "../utils";
 import { DdayBadge, TypeBadge } from "./Badges";
+import { nextCaseHearing } from "../hearingUtils";
 
 export default function CaseItem({ c, selected, onClick }) {
-  const nextHearing = c.hearings
-    .filter(h => dday(h.date) >= 0)
-    .sort((a, b) => new Date(a.date) - new Date(b.date))[0];
+  // 날짜가 비어 있는 기일은 제외한다 — dday(null) >= 0 이 참이 되어
+  // 날짜 없는 기일이 '다음 기일'로 뜨던 문제를 막는다.
+  const nextHearing = nextCaseHearing(c.hearings);
   const dot = TYPE_STYLE[c.type]?.dot || "#94A3B8";
   const urgent = nextHearing && dday(nextHearing.date) <= 7;
 

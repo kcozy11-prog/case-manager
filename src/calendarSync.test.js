@@ -410,3 +410,30 @@ test("예전에 날짜별로 쌓인 요약 메모는 최근 것 하나로 정리
   assert.equal(summary.id, 2, "가장 최근 날짜의 메모 id 유지");
   assert.match(summary.content, /김민준 의뢰인 미팅/);
 });
+
+test("같은 기일이 일정 ID만 다르게 한 번 더 들어와도 기일은 늘지 않는다", () => {
+  const caseObj = { id: "c1", title: "고무순 가압류이의", caseNumber: "2026카단1234", hearings: [], memos: [], timeline: [] };
+  const summary = "고무순, 심문, 서울남부지방법원 2026카단1234 본관 제311호 법정 14:40";
+
+  const first = mergeCalendarEventIntoCase(caseObj, {
+    id: "evA", summary, start: { dateTime: "2026-09-30T14:40:00+09:00" },
+  }, { today: "2026-09-22" });
+  assert.equal(first.added, true);
+  assert.equal(first.caseObj.hearings.length, 1);
+
+  // 다른 캘린더에 복사돼 일정 ID가 다른 같은 기일
+  const second = mergeCalendarEventIntoCase(first.caseObj, {
+    id: "evB", summary, start: { dateTime: "2026-09-30T14:40:00+09:00" },
+  }, { today: "2026-09-22" });
+  assert.equal(second.added, false);
+  assert.equal(second.caseObj.hearings.length, 1);
+  assert.equal(second.caseObj.memos.length, 1, "기일메모도 한 번만 남는다");
+
+  // 시각 없이 종일 일정으로 들어온 같은 기일도 마찬가지 — 이미 아는 시각을 지우지 않는다
+  const third = mergeCalendarEventIntoCase(second.caseObj, {
+    id: "evC", summary: "고무순, 심문, 서울남부지방법원 2026카단1234 본관 제311호 법정", start: { date: "2026-09-30" },
+  }, { today: "2026-09-22" });
+  assert.equal(third.added, false);
+  assert.equal(third.caseObj.hearings.length, 1);
+  assert.equal(third.caseObj.hearings[0].time, "14:40");
+});

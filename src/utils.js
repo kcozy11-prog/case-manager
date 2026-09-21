@@ -15,10 +15,15 @@ export const addDays = (d, n) => {
 
 export const todayStr = localDateStr(today);
 
+// 오늘 기준 남은 일수. 날짜가 없거나 형식이 틀리면 null.
+// 기준 날짜는 호출할 때마다 계산한다 — 앱을 켜 둔 채 자정을 넘겨도
+// 어제 기준 D-day가 그대로 남지 않도록 한다.
 export const dday = (dateStr) => {
   if (!dateStr) return null;
   const d = new Date(dateStr); d.setHours(0, 0, 0, 0);
-  return Math.ceil((d - today) / 86400000);
+  const base = new Date(); base.setHours(0, 0, 0, 0);
+  const n = Math.round((d - base) / 86400000);
+  return Number.isFinite(n) ? n : null;
 };
 
 export const fmtDate = (s) => s ? s.replace(/-/g, ".") : "—";
