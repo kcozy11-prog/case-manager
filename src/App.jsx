@@ -336,7 +336,14 @@ export default function App() {
       }
       if (!data?.items) { setCalResult({ error: "캘린더 데이터를 가져올 수 없습니다." }); return; }
 
-      const { updates, newTodoCount, newHearingCount, newCaseCount, skippedCount, unmatchedEvents } = syncEventsWithCases(data.items, cases);
+      // '다시 보지 않기'로 무시한 일정 목록 (기기 간 공유)
+      let ignoredEventIds = new Set();
+      try {
+        const snap = await getDoc(doc(db, "users", user.uid, "meta", "calendarSync"));
+        if (snap.exists()) ignoredEventIds = new Set(snap.data().ignoredEventIds || []);
+      } catch (e) { console.warn("캘린더 무시 목록 로드 실패", e); }
+
+      const { updates, newHearingCount, newCaseCount, skippedCount, unmatchedEvents } = syncEventsWithCases(data.items, cases, { ignoredEventIds });
       for (const [, uc] of updates) await saveCase(uc);
 
       // 회사업무 캘린더 → 공식결과메모
@@ -354,7 +361,16 @@ export default function App() {
     } catch (e) {
       setCalResult({ error: e.message });
     } finally { setCalSyncing(false); }
-  }, [googleToken, cases, saveCase, refreshGoogleToken]);
+  }, [googleToken, cases, user, saveCase, refreshGoogleToken]);
+
+  // 수동 확인 LBOX 일정 영구 무시 (다음 동기화부터 숨김, 기기 간 공유)
+  const ignoreUnmatchedCalendarEvent = useCallback(async (eventId) => {
+    if (!user || !eventId) return;
+    try {
+      await setDoc(doc(db, "users", user.uid, "meta", "calendarSync"),
+        { ignoredEventIds: arrayUnion(eventId) }, { merge: true });
+    } catch (e) { console.warn("캘린더 일정 무시 저장 실패", e); }
+  }, [user]);
 
   // 수동 확인 LBOX 일정을 선택한 사건에 기일로 추가
   const addUnmatchedCalendarEventToCase = useCallback(async (calendarItem, caseObj) => {
@@ -879,6 +895,7 @@ export default function App() {
           events={unmatchedCalendarEvents}
           cases={cases}
           onAddToCase={addUnmatchedCalendarEventToCase}
+          onIgnore={ignoreUnmatchedCalendarEvent}
           onClose={() => setUnmatchedCalendarEvents(null)}
         />
       )}

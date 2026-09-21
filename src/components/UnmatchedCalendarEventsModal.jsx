@@ -10,7 +10,8 @@ function caseLabel(c) {
   return bits.join(" · ");
 }
 
-export default function UnmatchedCalendarEventsModal({ events, cases, onAddToCase, onClose }) {
+// onIgnore(eventId): '다시 보지 않기' — 무시 목록에 영구 저장되어 다음 동기화부터 수동 확인 목록에 오르지 않는다.
+export default function UnmatchedCalendarEventsModal({ events, cases, onAddToCase, onIgnore = null, onClose }) {
   const initialSelections = Object.fromEntries(events.map((item, idx) => [eventKey(item, idx), ""]));
   const [selections, setSelections] = useState(initialSelections);
   const [dismissed, setDismissed] = useState(new Set());
@@ -41,6 +42,12 @@ export default function UnmatchedCalendarEventsModal({ events, cases, onAddToCas
     setDismissed(prev => new Set([...prev, eventKey(item, index)]));
   };
 
+  const handleIgnore = (item, index) => {
+    const eventId = item.event?.id || item.id;
+    if (onIgnore && eventId) onIgnore(eventId);
+    setDismissed(prev => new Set([...prev, eventKey(item, index)]));
+  };
+
   const skipAll = () => {
     setDismissed(prev => new Set([
       ...prev,
@@ -54,7 +61,7 @@ export default function UnmatchedCalendarEventsModal({ events, cases, onAddToCas
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between" style={{ background: "#1E293B" }}>
           <div>
             <div className="text-white font-semibold">⚖️ 수동 확인 필요한 LBOX 일정</div>
-            <div className="text-slate-400 text-xs">사건번호가 일치하는 사건이 없거나 일정에서 사건번호를 찾을 수 없을 때만 수동 확인합니다.</div>
+            <div className="text-slate-400 text-xs">사건번호가 일치하는 사건이 없거나 일정에서 사건번호를 찾을 수 없을 때만 수동 확인합니다. 오늘 이후 일정만 가져옵니다.</div>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>
@@ -105,10 +112,20 @@ export default function UnmatchedCalendarEventsModal({ events, cases, onAddToCas
                     </button>
                     <button
                       onClick={() => handleSkip(item, idx)}
-                      className="text-xs text-slate-400 hover:text-rose-600 border border-slate-200 hover:border-rose-300 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
+                      className="text-xs text-slate-400 hover:text-slate-700 border border-slate-200 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
+                      title="이번 동기화에서만 숨깁니다 (다음에 다시 표시)"
                     >
                       이번엔 건너뛰기
                     </button>
+                    {onIgnore && (
+                      <button
+                        onClick={() => handleIgnore(item, idx)}
+                        className="text-xs text-slate-400 hover:text-rose-600 border border-slate-200 hover:border-rose-300 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
+                        title="이 일정을 영구히 숨깁니다 (다음 동기화에도 안 나옴)"
+                      >
+                        다시 보지 않기
+                      </button>
+                    )}
                   </div>
                 </div>
               );

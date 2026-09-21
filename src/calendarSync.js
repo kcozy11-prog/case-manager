@@ -1,16 +1,37 @@
 // ── Google Calendar API ──────────────────────────────────────────────────────
 
+import { localDateStr } from "./utils.js";
+
 const LBOX_CAL_ID = "5dd32843ebd4cd2e01b418ad5add2f9dade2e80a033bc6d74742580fdc98d022@group.calendar.google.com";
 
-export async function fetchCalendarEvents(token) {
-  const past = new Date(); past.setDate(past.getDate() - 7);
-  const future = new Date(); future.setDate(future.getDate() + 60);
+// LBOX 기일 조회 구간: 앱을 연 날(한국시간) 0시부터 60일 뒤까지.
+// 지난 날짜의 일정은 다시 가져오지 않는다 — 이미 처리했거나 건너뛴 과거 일정이
+// 열 때마다 '수동 확인' 목록에 되살아나던 문제를 막는다.
+export const CALENDAR_SYNC_DAYS_AHEAD = 60;
 
-  const params = new URLSearchParams({
-    timeMin: past.toISOString(),
-    timeMax: future.toISOString(),
+export function calendarSyncTimeMin(now = new Date()) {
+  const dayKey = now.toLocaleDateString("sv-SE", { timeZone: "Asia/Seoul" });
+  return new Date(`${dayKey}T00:00:00+09:00`).toISOString();
+}
+
+export function calendarSyncTimeMax(now = new Date(), daysAhead = CALENDAR_SYNC_DAYS_AHEAD) {
+  const future = new Date(now);
+  future.setDate(future.getDate() + daysAhead);
+  return future.toISOString();
+}
+
+function calendarSyncWindowParams(now = new Date()) {
+  return {
+    timeMin: calendarSyncTimeMin(now),
+    timeMax: calendarSyncTimeMax(now),
     singleEvents: "true",
     orderBy: "startTime",
+  };
+}
+
+export async function fetchCalendarEvents(token) {
+  const params = new URLSearchParams({
+    ...calendarSyncWindowParams(),
     maxResults: "200",
   });
 
@@ -38,12 +59,7 @@ export async function fetchLboxKeywordEvents(token) {
   const calendars = await fetchCalendarList(token);
   if (!calendars.length) return [];
 
-  const past = new Date(); past.setDate(past.getDate() - 7);
-  const future = new Date(); future.setDate(future.getDate() + 60);
-  const baseParams = {
-    timeMin: past.toISOString(), timeMax: future.toISOString(),
-    singleEvents: "true", orderBy: "startTime", maxResults: "100",
-  };
+  const baseParams = { ...calendarSyncWindowParams(), maxResults: "100" };
   const headers = { Authorization: `Bearer ${token}` };
   const out = [];
   const seen = new Set();
@@ -319,7 +335,7 @@ function buildManualCalendarEvent(ev, lbox, reason) {
   const summary = ev.summary || "";
   const date = ev.start?.date || (ev.start?.dateTime?.split("T")[0]) || "";
   const time = lbox?.time || (ev.start?.dateTime
-    ? new Date(ev.start.dateTime).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })
+    ? new Date(ev.start.dateTime).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Seoul" })
     : "");
   return {
     id: ev.id || `${summary}-${date}-${time}`,
@@ -338,14 +354,14 @@ export function mergeCalendarEventIntoCase(caseObj, ev, { today, makeId = () => 
   const summary = ev.summary || "";
   const eventDate = ev.start?.date || (ev.start?.dateTime?.split("T")[0]) || "";
   const eventTime = ev.start?.dateTime
-    ? new Date(ev.start.dateTime).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })
+    ? new Date(ev.start.dateTime).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Seoul" })
     : "";
   const lbox = parseLboxEvent(summary);
   const hType = lbox ? lbox.hearingType : extractHearingType(summary);
   const hearingType = hType ? hType + "기일" : "기일";
   const locationInfo = lbox ? (lbox.location ? `${lbox.court} ${lbox.location}` : lbox.court) : "";
   const hearingTime = lbox?.time || eventTime;
-  const dateForLog = today || new Date().toISOString().split("T")[0];
+  const dateForLog = today || localDateStr(new Date());
 
   const ref = { ...caseObj };
   const hearings = Array.isArray(ref.hearings) ? ref.hearings : [];
@@ -399,7 +415,7 @@ export function mergeCalendarEventIntoCase(caseObj, ev, { today, makeId = () => 
         id: makeId(),
         date: dateForLog,
         content: `${hearingType} ${eventDate}${hearingTime ? ` ${hearingTime}` : ""} 지정${lbox?.court ? ` (${lbox.court})` : ""}`,
-        activityType: "other",
+        activityType: "hearing",
       },
     ],
   };
@@ -407,14 +423,24 @@ export function mergeCalendarEventIntoCase(caseObj, ev, { today, makeId = () => 
   return { caseObj: nextCase, added: true, updated: false };
 }
 
-export function syncEventsWithCases(events, cases) {
+// 이미 어떤 사건의 기일로 연결된(수동 추가 포함) 캘린더 일정이면 그 사건을 돌려준다.
+// 사건번호가 없거나 다른 일정을 사용자가 '선택 사건에 기일 추가'로 넣은 뒤,
+// 다음 동기화에서 같은 일정이 또 수동 확인 목록에 오르지 않게 한다.
+export function findCaseLinkedToEvent(eventId, cases = []) {
+  if (!eventId) return null;
+  return cases.find((c) => (c?.hearings || []).some((h) => h && h.calendarEventId === eventId)) || null;
+}
+
+export function syncEventsWithCases(events, cases, { ignoredEventIds, today } = {}) {
   const updates = new Map();
   let newHearingCount = 0;
   let newCaseCount = 0;
   const skippedEvents = [];
   const unmatchedEvents = [];
+  let ignoredCount = 0;
+  const ignored = ignoredEventIds instanceof Set ? ignoredEventIds : new Set(ignoredEventIds || []);
 
-  const todayStr = new Date().toISOString().split("T")[0];
+  const todayStr = today || localDateStr(new Date());
 
   console.log(`[캘린더 동기화] LBOX 이벤트 ${events.length}건 처리 시작`);
 
@@ -433,11 +459,20 @@ export function syncEventsWithCases(events, cases) {
     }
 
     const currentCases = cases.map((c) => updates.get(c.id) || c);
-    const match = findStrictLboxCaseMatch(lbox, summary, currentCases);
-    const matched = match.caseObj;
+    let matched = findCaseLinkedToEvent(ev.id, currentCases);
+    let reason = "";
+    if (!matched) {
+      const match = findStrictLboxCaseMatch(lbox, summary, currentCases);
+      matched = match.caseObj;
+      reason = match.reason;
+    }
 
     if (!matched) {
-      unmatchedEvents.push(buildManualCalendarEvent(ev, lbox, match.reason));
+      if (ev.id && ignored.has(ev.id)) {
+        ignoredCount++;
+        continue;
+      }
+      unmatchedEvents.push(buildManualCalendarEvent(ev, lbox, reason));
       skippedEvents.push(summary);
       continue;
     }
@@ -459,9 +494,9 @@ export function syncEventsWithCases(events, cases) {
   if (skippedEvents.length > 0) {
     console.warn(`[캘린더 동기화] 수동 확인/매칭 실패 ${skippedEvents.length}건:`, skippedEvents);
   }
-  console.log(`[캘린더 동기화] 완료: 신규 기일 ${newHearingCount}건 추가, 수동 확인 ${unmatchedEvents.length}건`);
+  console.log(`[캘린더 동기화] 완료: 신규 기일 ${newHearingCount}건 추가, 수동 확인 ${unmatchedEvents.length}건, 무시 ${ignoredCount}건`);
 
-  return { updates, newTodoCount: 0, newHearingCount, newCaseCount, skippedCount: skippedEvents.length, unmatchedEvents };
+  return { updates, newTodoCount: 0, newHearingCount, newCaseCount, skippedCount: skippedEvents.length, unmatchedEvents, ignoredCount };
 }
 
 // ── Google Tasks API ──────────────────────────────────────────────────────────
@@ -614,10 +649,22 @@ export async function fetchWorkCalendarEvents(token) {
 
 // ── 회사업무 이벤트 → 공식결과메모 변환 ──────────────────────────────────────
 
-export function syncWorkEventsWithCases(events, cases) {
+export const WORK_SUMMARY_MEMO_TITLE = "캘린더 업무 요약";
+const WORK_SUMMARY_MEMO_CATEGORY = "공식결과메모";
+
+function isWorkSummaryMemo(memo) {
+  return !!memo && memo.category === WORK_SUMMARY_MEMO_CATEGORY && memo.title === WORK_SUMMARY_MEMO_TITLE;
+}
+
+// 회사업무 캘린더 → 사건당 '캘린더 업무 요약' 메모 1개를 갱신(upsert)한다.
+// 예전에는 날짜마다 새 메모를 쌓아 사건 문서가 계속 커졌으므로, 이제는
+//  - 요약 메모가 없으면 1개 생성
+//  - 있으면 내용이 달라졌을 때만 내용·날짜 갱신(id 유지)
+//  - 예전에 쌓인 중복 요약 메모는 가장 최근 것 하나만 남기고 정리
+export function syncWorkEventsWithCases(events, cases, { today, makeId = () => Date.now() + Math.floor(Math.random() * 10000) } = {}) {
   const updates = new Map();
   let newMemoCount = 0;
-  const todayStr = new Date().toISOString().split("T")[0];
+  const todayStr = today || localDateStr(new Date());
 
   const caseEvents = new Map();
 
@@ -646,29 +693,29 @@ export function syncWorkEventsWithCases(events, cases) {
 
   for (const [caseId, { caseObj, events: evts }] of caseEvents) {
     const ref = updates.get(caseId) || { ...caseObj };
-    const memos = ref.memos || [];
-
-    // 동일 날짜에 이미 캘린더 업무 요약 메모가 있으면 스킵
-    if (memos.some(m => m.category === "공식결과메모" && m.title === "캘린더 업무 요약" && m.date === todayStr)) {
-      continue;
-    }
+    const memos = Array.isArray(ref.memos) ? ref.memos : [];
 
     const content = evts
       .sort((a, b) => a.date.localeCompare(b.date))
       .map(e => `• ${e.date} ${e.summary}${e.description ? `\n  └ ${e.description.slice(0, 100)}` : ""}`)
       .join("\n");
 
-    ref.memos = [
-      ...memos,
-      {
-        id: Date.now() + Math.floor(Math.random() * 10000),
-        category: "공식결과메모",
-        title: "캘린더 업무 요약",
-        content,
-        date: todayStr,
-      },
-    ];
+    const summaries = memos.filter(isWorkSummaryMemo);
+    const others = memos.filter(m => !isWorkSummaryMemo(m));
+    // 여러 개 쌓여 있으면 날짜가 가장 최근인 것을 대표로 삼는다
+    const keep = summaries.length
+      ? summaries.reduce((best, m) => (String(m.date || "") > String(best.date || "") ? m : best))
+      : null;
 
+    const contentChanged = !keep || (keep.content || "") !== content;
+    const duplicatesRemoved = summaries.length > 1;
+    if (!contentChanged && !duplicatesRemoved) continue;
+
+    const nextMemo = keep
+      ? (contentChanged ? { ...keep, content, date: todayStr } : keep)
+      : { id: makeId(), category: WORK_SUMMARY_MEMO_CATEGORY, title: WORK_SUMMARY_MEMO_TITLE, content, date: todayStr };
+
+    ref.memos = [...others, nextMemo];
     updates.set(caseId, ref);
     newMemoCount++;
   }
