@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseLboxEvent, syncEventsWithCases, isLboxEvent, scoreLboxCaseMatch, mergeCalendarEventIntoCase, findCaseLinkedToEvent, calendarSyncTimeMin, calendarSyncTimeMax } from "./calendarSync.js";
+import { parseLboxEvent, syncEventsWithCases, isLboxEvent, scoreLboxCaseMatch, mergeCalendarEventIntoCase, findCaseLinkedToEvent, calendarSyncTimeMin, calendarSyncTimeMax, syncWorkEventsWithCases, WORK_SUMMARY_MEMO_TITLE } from "./calendarSync.js";
 
 test("isLboxEvent — 키워드/출처로 식별", () => {
   assert.equal(isLboxEvent({ _src: "LBOX", summary: "아무거나" }), true);
@@ -349,4 +349,64 @@ test("'다시 보지 않기'로 무시한 일정은 수동 확인 목록에서 �
   const r = syncEventsWithCases(matched, cases, { ignoredEventIds: ["ev-ignored"], today: "2026-09-21" });
   assert.equal(r.newHearingCount, 1);
   assert.equal(r.updates.get("c1").timeline[0].date, "2026-09-21");
+});
+
+// ── 회사업무 캘린더 → 업무 요약 메모(갱신 방식) ──────────────────────────────
+const workCase = () => ({
+  id: "w1", title: "김민준 분양대금", client: "김민준", opponent: "한강건설",
+  caseNumber: "2026가합12345", hearings: [], timeline: [],
+  memos: [{ id: 9, category: "일반메모", title: "기존 메모", content: "유지", date: "2026-01-01" }],
+});
+const workEvents = () => [
+  { id: "e1", summary: "김민준 의뢰인 미팅", start: { dateTime: "2026-09-22T14:00:00+09:00" }, description: "계약서 검토" },
+  { id: "e2", summary: "팀 점심", start: { date: "2026-09-23" } },
+];
+
+test("업무 요약 메모는 사건당 1개만 생성", () => {
+  const { updates, newMemoCount } = syncWorkEventsWithCases(workEvents(), [workCase()], { today: "2026-09-21", makeId: () => 100 });
+  assert.equal(newMemoCount, 1);
+  const memos = updates.get("w1").memos;
+  assert.equal(memos.length, 2, "기존 메모 유지 + 요약 1개");
+  const summary = memos.find((m) => m.title === WORK_SUMMARY_MEMO_TITLE);
+  assert.equal(summary.id, 100);
+  assert.equal(summary.date, "2026-09-21");
+  assert.match(summary.content, /2026-09-22 김민준 의뢰인 미팅/);
+  assert.doesNotMatch(summary.content, /팀 점심/);
+});
+
+test("내용이 같으면 다음 날 동기화해도 새 메모를 쌓지 않음", () => {
+  const first = syncWorkEventsWithCases(workEvents(), [workCase()], { today: "2026-09-21", makeId: () => 100 }).updates.get("w1");
+  const second = syncWorkEventsWithCases(workEvents(), [first], { today: "2026-09-22", makeId: () => 200 });
+  assert.equal(second.newMemoCount, 0);
+  assert.equal(second.updates.size, 0);
+});
+
+test("일정이 바뀌면 같은 메모(id 유지)의 내용·날짜만 갱신", () => {
+  const first = syncWorkEventsWithCases(workEvents(), [workCase()], { today: "2026-09-21", makeId: () => 100 }).updates.get("w1");
+  const changed = [...workEvents(), { id: "e3", summary: "김민준 전화 상담", start: { date: "2026-09-25" } }];
+  const second = syncWorkEventsWithCases(changed, [first], { today: "2026-09-24", makeId: () => 200 });
+  assert.equal(second.newMemoCount, 1);
+  const memos = second.updates.get("w1").memos;
+  const summaries = memos.filter((m) => m.title === WORK_SUMMARY_MEMO_TITLE);
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].id, 100);
+  assert.equal(summaries[0].date, "2026-09-24");
+  assert.match(summaries[0].content, /김민준 전화 상담/);
+});
+
+test("예전에 날짜별로 쌓인 요약 메모는 최근 것 하나로 정리", () => {
+  const c = workCase();
+  c.memos.push(
+    { id: 1, category: "공식결과메모", title: WORK_SUMMARY_MEMO_TITLE, content: "옛 내용 1", date: "2026-09-01" },
+    { id: 2, category: "공식결과메모", title: WORK_SUMMARY_MEMO_TITLE, content: "옛 내용 2", date: "2026-09-10" },
+    { id: 3, category: "공식결과메모", title: WORK_SUMMARY_MEMO_TITLE, content: "옛 내용 3", date: "2026-09-05" },
+  );
+  const { updates, newMemoCount } = syncWorkEventsWithCases(workEvents(), [c], { today: "2026-09-21", makeId: () => 100 });
+  assert.equal(newMemoCount, 1);
+  const memos = updates.get("w1").memos;
+  assert.equal(memos.length, 2);
+  assert.ok(memos.some((m) => m.id === 9), "다른 메모는 그대로");
+  const summary = memos.find((m) => m.title === WORK_SUMMARY_MEMO_TITLE);
+  assert.equal(summary.id, 2, "가장 최근 날짜의 메모 id 유지");
+  assert.match(summary.content, /김민준 의뢰인 미팅/);
 });

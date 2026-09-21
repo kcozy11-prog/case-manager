@@ -649,10 +649,22 @@ export async function fetchWorkCalendarEvents(token) {
 
 // ── 회사업무 이벤트 → 공식결과메모 변환 ──────────────────────────────────────
 
-export function syncWorkEventsWithCases(events, cases) {
+export const WORK_SUMMARY_MEMO_TITLE = "캘린더 업무 요약";
+const WORK_SUMMARY_MEMO_CATEGORY = "공식결과메모";
+
+function isWorkSummaryMemo(memo) {
+  return !!memo && memo.category === WORK_SUMMARY_MEMO_CATEGORY && memo.title === WORK_SUMMARY_MEMO_TITLE;
+}
+
+// 회사업무 캘린더 → 사건당 '캘린더 업무 요약' 메모 1개를 갱신(upsert)한다.
+// 예전에는 날짜마다 새 메모를 쌓아 사건 문서가 계속 커졌으므로, 이제는
+//  - 요약 메모가 없으면 1개 생성
+//  - 있으면 내용이 달라졌을 때만 내용·날짜 갱신(id 유지)
+//  - 예전에 쌓인 중복 요약 메모는 가장 최근 것 하나만 남기고 정리
+export function syncWorkEventsWithCases(events, cases, { today, makeId = () => Date.now() + Math.floor(Math.random() * 10000) } = {}) {
   const updates = new Map();
   let newMemoCount = 0;
-  const todayStr = localDateStr(new Date());
+  const todayStr = today || localDateStr(new Date());
 
   const caseEvents = new Map();
 
@@ -681,29 +693,29 @@ export function syncWorkEventsWithCases(events, cases) {
 
   for (const [caseId, { caseObj, events: evts }] of caseEvents) {
     const ref = updates.get(caseId) || { ...caseObj };
-    const memos = ref.memos || [];
-
-    // 동일 날짜에 이미 캘린더 업무 요약 메모가 있으면 스킵
-    if (memos.some(m => m.category === "공식결과메모" && m.title === "캘린더 업무 요약" && m.date === todayStr)) {
-      continue;
-    }
+    const memos = Array.isArray(ref.memos) ? ref.memos : [];
 
     const content = evts
       .sort((a, b) => a.date.localeCompare(b.date))
       .map(e => `• ${e.date} ${e.summary}${e.description ? `\n  └ ${e.description.slice(0, 100)}` : ""}`)
       .join("\n");
 
-    ref.memos = [
-      ...memos,
-      {
-        id: Date.now() + Math.floor(Math.random() * 10000),
-        category: "공식결과메모",
-        title: "캘린더 업무 요약",
-        content,
-        date: todayStr,
-      },
-    ];
+    const summaries = memos.filter(isWorkSummaryMemo);
+    const others = memos.filter(m => !isWorkSummaryMemo(m));
+    // 여러 개 쌓여 있으면 날짜가 가장 최근인 것을 대표로 삼는다
+    const keep = summaries.length
+      ? summaries.reduce((best, m) => (String(m.date || "") > String(best.date || "") ? m : best))
+      : null;
 
+    const contentChanged = !keep || (keep.content || "") !== content;
+    const duplicatesRemoved = summaries.length > 1;
+    if (!contentChanged && !duplicatesRemoved) continue;
+
+    const nextMemo = keep
+      ? (contentChanged ? { ...keep, content, date: todayStr } : keep)
+      : { id: makeId(), category: WORK_SUMMARY_MEMO_CATEGORY, title: WORK_SUMMARY_MEMO_TITLE, content, date: todayStr };
+
+    ref.memos = [...others, nextMemo];
     updates.set(caseId, ref);
     newMemoCount++;
   }
