@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { dday, fmtDate, fmtMoney, todayStr, addDays, MEMO_CATEGORIES, MEMO_CAT_STYLE } from "../utils";
-import { getTimelineActivity, DEFAULT_TIMELINE_ACTIVITY_TYPE, TIMELINE_ACTIVITY_TYPES } from "../timelineActivity";
+import { getTimelineActivity, DEFAULT_TIMELINE_ACTIVITY_TYPE, TIMELINE_ACTIVITY_TYPES, setTimelineActivityType, collectTimelineActivityTypes } from "../timelineActivity";
 import { DdayBadge } from "./Badges";
 import { hearingMemoText, setHearingMemo } from "../hearingUtils";
 
@@ -105,6 +105,8 @@ export default function OverviewTab({ c, onUpdate }) {
   const [editingTimelineContent, setEditingTimelineContent] = useState("");
   const [editingTimelineDetailId, setEditingTimelineDetailId] = useState(null);
   const [editingTimelineDetail, setEditingTimelineDetail] = useState("");
+  const [editingTimelineTypeId, setEditingTimelineTypeId] = useState(null);
+  const [timelineFilter, setTimelineFilter] = useState("all"); // all | untyped | <activityType>
   const [editingMemoDate, setEditingMemoDate] = useState("");
   const [editingMemoId, setEditingMemoId] = useState(null);
   const [editingMemoFullId, setEditingMemoFullId] = useState(null);
@@ -202,6 +204,12 @@ export default function OverviewTab({ c, onUpdate }) {
     onUpdate({ ...c, timeline: (c.timeline || []).filter(t => t.id !== id) });
   };
 
+  // 진행경과 유형 직접 지정·변경 (자동 생성된 기록, 유형 없는 기존 기록 포함)
+  const updateTimelineActivityType = (id, activityType) => {
+    onUpdate({ ...c, timeline: setTimelineActivityType(c.timeline || [], id, activityType) });
+    setEditingTimelineTypeId(null);
+  };
+
   const startEditMemo = (m) => {
     setEditingMemoFullId(m.id);
     setEditingMemoData({ category: m.category, title: m.title, content: m.content || "" });
@@ -220,6 +228,16 @@ export default function OverviewTab({ c, onUpdate }) {
   const memos = c.memos || [];
   const hearings = c.hearings || [];
   const timeline = c.timeline || [];
+  const usedTimelineTypes = collectTimelineActivityTypes(timeline);
+  const filterActive = timelineFilter !== "all"
+    && (timelineFilter === "untyped" ? usedTimelineTypes.hasUntyped : usedTimelineTypes.types.some((t) => t.value === timelineFilter));
+  const visibleTimeline = [...timeline]
+    .filter((t) => {
+      if (!filterActive) return true;
+      if (timelineFilter === "untyped") return !getTimelineActivity(t.activityType);
+      return t.activityType === timelineFilter;
+    })
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
   const filteredMemos = memoTab === "전체" ? memos : memos.filter(m => m.category === memoTab);
   const sortedMemos = [...filteredMemos].sort((a, b) => new Date(b.date) - new Date(a.date));
   // 하단 기존 메모 섹션은 상세 진행경과로 역할을 넘기고 화면에서는 숨긴다.
@@ -431,13 +449,63 @@ export default function OverviewTab({ c, onUpdate }) {
           <textarea className="input-sm w-full min-h-[58px] text-xs" placeholder="상세 메모 (상담 내용, 다음 액션, 증거/서류 확인사항 등)"
             value={newTimelineDetail} onChange={e => setNewTimelineDetail(e.target.value)} />
         </div>
+        {/* 유형 필터 — 기록된 유형만 칩으로 표시 (유형은 배지를 눌러 언제든 변경 가능) */}
+        {(usedTimelineTypes.types.length > 0 || usedTimelineTypes.hasUntyped) && (
+          <div className="flex gap-1 mb-2 flex-wrap items-center">
+            <button onClick={() => setTimelineFilter("all")}
+              className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
+                !filterActive ? "bg-slate-800 text-white border-slate-800" : "text-slate-500 border-slate-200 hover:border-slate-400"
+              }`}>전체 {timeline.length}</button>
+            {usedTimelineTypes.types.map((type) => {
+              const count = timeline.filter((t) => t.activityType === type.value).length;
+              return (
+                <button key={type.value} onClick={() => setTimelineFilter(timelineFilter === type.value ? "all" : type.value)}
+                  className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
+                    timelineFilter === type.value ? "bg-slate-800 text-white border-slate-800" : `${type.className} hover:opacity-80`
+                  }`}>{type.label} {count}</button>
+              );
+            })}
+            {usedTimelineTypes.hasUntyped && (
+              <button onClick={() => setTimelineFilter(timelineFilter === "untyped" ? "all" : "untyped")}
+                className={`text-[11px] px-2 py-0.5 rounded-full border border-dashed transition-colors ${
+                  timelineFilter === "untyped" ? "bg-slate-800 text-white border-slate-800" : "text-slate-400 border-slate-300 hover:border-slate-400"
+                }`}>미분류 {timeline.filter((t) => !getTimelineActivity(t.activityType)).length}</button>
+            )}
+          </div>
+        )}
         {timeline.length === 0 ? (
           <div className="text-sm text-slate-400 italic">등록된 경과가 없습니다.</div>
+        ) : visibleTimeline.length === 0 ? (
+          <div className="text-sm text-slate-400 italic">해당 유형의 경과가 없습니다.</div>
         ) : (
           <div className="relative pl-4">
             <div className="absolute left-1.5 top-0 bottom-0 w-px bg-slate-200" />
-            {[...timeline].sort((a, b) => new Date(b.date) - new Date(a.date)).map((t) => {
+            {visibleTimeline.map((t) => {
               const activity = getTimelineActivity(t.activityType);
+              const typeBadge = editingTimelineTypeId === t.id ? (
+                <select
+                  className="input-sm"
+                  style={{ width: "auto", fontSize: "11px", padding: "1px 6px" }}
+                  value={activity ? t.activityType : ""}
+                  onChange={(e) => updateTimelineActivityType(t.id, e.target.value)}
+                  onBlur={() => setEditingTimelineTypeId(null)}
+                  onKeyDown={(e) => { if (e.key === "Escape") setEditingTimelineTypeId(null); }}
+                  aria-label="진행경과 유형 변경"
+                  autoFocus>
+                  <option value="">미분류</option>
+                  {TIMELINE_ACTIVITY_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
+                </select>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setEditingTimelineTypeId(t.id)}
+                  className={`text-[10px] px-1.5 py-0.5 rounded-full border font-medium transition-opacity hover:opacity-70 ${
+                    activity ? activity.className : "border-dashed text-slate-400 border-slate-300"
+                  }`}
+                  title="유형 변경">
+                  {activity ? activity.label : "유형 지정"}
+                </button>
+              );
               return (
               <div key={t.id} className="relative mb-3 last:mb-0">
                 <div className="absolute -left-2.5 top-1.5 w-2 h-2 rounded-full bg-indigo-400 border-2 border-white" />
@@ -478,11 +546,7 @@ export default function OverviewTab({ c, onUpdate }) {
                   </div>
                 ) : (
                   <div className="text-sm text-slate-700 flex items-center gap-1.5 flex-wrap">
-                    {activity && (
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${activity.className}`}>
-                        {activity.label}
-                      </span>
-                    )}
+                    {typeBadge}
                     <span>{t.content}</span>
                   </div>
                 )}
