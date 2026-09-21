@@ -106,7 +106,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           npx gh-pages -d dist --nojekyll \
-            -u "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>" \
+            -u "github-actions <github-actions@users.noreply.github.com>" \
             -r "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             -m "자동 배포: ${GITHUB_SHA}"
 
