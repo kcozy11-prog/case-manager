@@ -3,6 +3,7 @@ import { sortPendingTodos } from "../todoSort";
 import { getDueDateLabel, getTodoCardTone, isOverdueTodo } from "../todoUi";
 import { todayStr } from "../utils";
 import { markTodoDone, markTodoPending } from "../caseLink";
+import { isBriefDraftingTodo, moveTodoToBrief } from "../todoBrief";
 import { DdayBadge } from "./Badges";
 
 const EMPTY_TODO = { text: "", details: "", priority: "보통", dueDate: "" };
@@ -53,13 +54,16 @@ function TodoForm({ initial, onSave, onCancel, saveLabel = "저장" }) {
   );
 }
 
-function TodoRow({ t, onToggleDone, onDelete, onStartEdit, onPush, pushing, pushError, canPush }) {
+function TodoRow({ t, onToggleDone, onDelete, onStartEdit, onPush, pushing, pushError, canPush, canMoveToBrief, onMoveToBrief }) {
   const p = PRIO[t.priority] || PRIO["보통"];
   const overdue = isOverdueTodo(t);
+  // 서면 작성 할 일: 완료 체크 시 그 사건의 제출대기 서면으로 자동 이동
+  const autoBrief = canMoveToBrief && isBriefDraftingTodo(t.text);
 
   return (
     <div className={`flex items-start gap-3 rounded-lg px-3 py-2.5 border transition-all ${getTodoCardTone(t)}`}>
       <button onClick={() => onToggleDone(t.id)}
+        title={autoBrief ? "완료 처리하고 제출대기 서면으로 이동" : "완료"}
         className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-colors ${
           t.done ? "bg-emerald-400 border-emerald-400 text-white" : "border-slate-300 hover:border-indigo-400"
         }`}>
@@ -88,6 +92,12 @@ function TodoRow({ t, onToggleDone, onDelete, onStartEdit, onPush, pushing, push
               {!t.done && <DdayBadge dateStr={t.dueDate} small />}
             </span>
           )}
+          {autoBrief && !t.done && (
+            <span className="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700 border border-amber-200"
+              title="완료 체크 시 이 사건의 제출대기 서면으로 이동합니다">
+              완료 시 서면으로
+            </span>
+          )}
         </div>
       </div>
       {canPush && t.dueDate && (
@@ -101,6 +111,11 @@ function TodoRow({ t, onToggleDone, onDelete, onStartEdit, onPush, pushing, push
           {pushing ? "…" : t.googleEventId ? "📅✓" : "📅"}
         </button>
       )}
+      {canMoveToBrief && !t.done && (
+        <button onClick={() => onMoveToBrief(t)}
+          className="text-slate-300 hover:text-amber-600 flex-shrink-0 text-xs px-1"
+          title="완료 처리하고 제출대기 서면으로 이동">📄</button>
+      )}
       <button onClick={() => onStartEdit(t)} className="text-slate-300 hover:text-indigo-400 flex-shrink-0 text-xs px-1" title="수정">✎</button>
       <button onClick={() => onDelete(t.id)} className="text-slate-200 hover:text-red-400 flex-shrink-0 text-xs px-1">✕</button>
       {pushError && (
@@ -110,11 +125,13 @@ function TodoRow({ t, onToggleDone, onDelete, onStartEdit, onPush, pushing, push
   );
 }
 
-export default function TodosTab({ c, onUpdate, onPushTodo }) {
+// briefsEnabled: 사건 할 일에서만 참. 일반 할 일(사건 없음)에서는 서면 이동 기능을 끈다.
+export default function TodosTab({ c, onUpdate, onPushTodo, briefsEnabled = true, onOpenBriefs = null }) {
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [pushingId, setPushingId] = useState(null);
   const [pushError, setPushError] = useState(null);
+  const [movedNotice, setMovedNotice] = useState(null); // { title }
 
   const todos = c.todos || [];
   const pending = todos.filter(t => !t.done);
@@ -138,10 +155,19 @@ export default function TodosTab({ c, onUpdate, onPushTodo }) {
     }
   };
 
+  // 완료 처리하면서 제출대기 서면으로 이동 (서면 탭에서 '제출함' 처리 시 진행경과에 제출 기록이 남는다)
+  const moveToBrief = (t) => {
+    const result = moveTodoToBrief(c, t.id, todayStr);
+    onUpdate(result.caseObj);
+    setMovedNotice({ title: result.brief?.title || t.text });
+  };
+
   const toggleDone = (id) => {
     const target = todos.find(t => t.id === id);
     if (!target) return;
-    onUpdate(target.done ? markTodoPending(c, id) : markTodoDone(c, id, todayStr));
+    if (target.done) { onUpdate(markTodoPending(c, id)); return; }
+    if (briefsEnabled && isBriefDraftingTodo(target.text)) { moveToBrief(target); return; }
+    onUpdate(markTodoDone(c, id, todayStr));
   };
 
   const delTodo = (id) => {
@@ -166,6 +192,16 @@ export default function TodosTab({ c, onUpdate, onPushTodo }) {
 
   return (
     <div className="space-y-3">
+      {movedNotice && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <span className="flex-1 min-w-0 break-words">"{movedNotice.title}"을(를) 제출대기 서면으로 옮겼습니다. 제출하면 서면 탭에서 '제출함'을 누르세요.</span>
+          {onOpenBriefs && (
+            <button onClick={() => { setMovedNotice(null); onOpenBriefs(); }}
+              className="flex-shrink-0 text-xs px-2 py-1 rounded border border-amber-300 text-amber-800 hover:bg-amber-100">서면 탭 열기</button>
+          )}
+          <button onClick={() => setMovedNotice(null)} className="flex-shrink-0 text-amber-500 hover:text-amber-800 px-1" title="닫기">✕</button>
+        </div>
+      )}
       {pending.length === 0 && !adding && (
         <div className="text-sm text-slate-400 italic py-4 text-center">등록된 미완료 할 일이 없습니다.</div>
       )}
@@ -189,6 +225,8 @@ export default function TodosTab({ c, onUpdate, onPushTodo }) {
               pushing={pushingId === t.id}
               pushError={pushError && pushError.id === t.id ? pushError.msg : null}
               canPush={Boolean(onPushTodo)}
+              canMoveToBrief={briefsEnabled}
+              onMoveToBrief={moveToBrief}
             />
           )
         ))}

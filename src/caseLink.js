@@ -124,17 +124,24 @@ export function markTodoDone(caseObj, todoId, today = '', makeId = () => Date.no
 }
 
 // 완료 체크를 되돌릴 때는 연결된 진행경과도 제거한다. 현재 UI는 완료 항목을 숨기지만 데이터 정합성을 위해 둔다.
+// 완료하면서 제출대기 서면으로 옮겨진 할 일(briefId)이면, 아직 제출 전인 그 서면도 함께 거둔다.
+// 이미 제출된 서면은 제출 기록이므로 남긴다.
 export function markTodoPending(caseObj, todoId) {
   const todos = Array.isArray(caseObj?.todos) ? caseObj.todos : [];
   const target = todos.find((t) => t && t.id === todoId);
   if (!target) return caseObj;
+  const briefs = Array.isArray(caseObj?.briefs) ? caseObj.briefs : [];
+  const linkedBrief = target.briefId ? briefs.find((b) => b && b.id === target.briefId) : null;
+  const removeBrief = !!linkedBrief && linkedBrief.status !== 'submitted';
   const nextTodos = todos.map((t) =>
     t && t.id === todoId
-      ? { ...t, done: false, completedDate: '', completedTimelineId: '' }
+      ? { ...t, done: false, completedDate: '', completedTimelineId: '', briefId: removeBrief ? '' : (t.briefId || '') }
       : t);
   const timeline = Array.isArray(caseObj?.timeline) ? caseObj.timeline : [];
   const nextTimeline = target.completedTimelineId
     ? timeline.filter((entry) => entry && entry.id !== target.completedTimelineId)
     : timeline;
-  return { ...caseObj, todos: nextTodos, timeline: nextTimeline };
+  const next = { ...caseObj, todos: nextTodos, timeline: nextTimeline };
+  if (removeBrief) next.briefs = briefs.filter((b) => !(b && b.id === linkedBrief.id));
+  return next;
 }

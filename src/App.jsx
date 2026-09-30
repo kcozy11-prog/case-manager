@@ -841,7 +841,7 @@ export default function App() {
                 </div>
                 <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5">
                   {activeTab === "overview" && <OverviewTab c={selected} onUpdate={saveCase} />}
-                  {activeTab === "todos" && <TodosTab c={selected} onUpdate={saveCase} onPushTodo={pushTaskToCalendar} />}
+                  {activeTab === "todos" && <TodosTab c={selected} onUpdate={saveCase} onPushTodo={pushTaskToCalendar} onOpenBriefs={() => setActiveTab("briefs")} />}
                   {activeTab === "briefs" && <BriefsTab c={selected} onUpdate={saveCase} />}
                 </div>
               </>

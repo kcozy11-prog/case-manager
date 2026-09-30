@@ -80,7 +80,10 @@ export default function BriefsTab({ c, onUpdate }) {
                     title="제출 완료로 표시" />
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium text-slate-700 truncate">{b.title}</div>
-                    {b.preparedDate && <div className="text-xs text-slate-400">작성 {fmtDate(b.preparedDate)}</div>}
+                    <div className="text-xs text-slate-400 flex items-center gap-1.5 flex-wrap">
+                      {b.preparedDate && <span>작성 {fmtDate(b.preparedDate)}</span>}
+                      {b.fromTodoId && <span className="px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-[10px]" title="할 일 완료 시 자동으로 옮겨진 서면">할 일에서 이동</span>}
+                    </div>
                   </div>
                   <button onClick={() => markSubmitted(b.id)} className="text-xs text-amber-600 hover:text-amber-800 font-medium flex-shrink-0">제출함</button>
                   <button onClick={() => del(b.id)} className="text-slate-300 hover:text-red-400 flex-shrink-0 text-xs px-1">✕</button>
