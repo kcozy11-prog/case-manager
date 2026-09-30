@@ -15,7 +15,7 @@ export default function StandaloneTodosModal({ todos, onUpdate, onPushTodo, onCl
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>
         <div className="p-5 max-h-[75vh] overflow-y-auto">
-          <TodosTab c={standaloneCase} onUpdate={onUpdate} onPushTodo={onPushTodo} />
+          <TodosTab c={standaloneCase} onUpdate={onUpdate} onPushTodo={onPushTodo} briefsEnabled={false} />
         </div>
       </div>
     </div>
