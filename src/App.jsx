@@ -5,6 +5,7 @@ import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, get
 import { TYPES, STATUSES, todayStr, dday, fmtDate, emptyCase, SAMPLE_CASES } from "./utils";
 import { TypeBadge } from "./components/Badges";
 import LoginScreen from "./components/LoginScreen";
+import AppLogo from "./components/AppLogo";
 import StatsBar from "./components/StatsBar";
 import CaseItem from "./components/CaseItem";
 import OverviewTab from "./components/OverviewTab";
@@ -617,15 +618,7 @@ export default function App() {
         {/* 헤더 */}
         <div style={{ background: "#0F172A" }} className="flex items-center justify-between px-4 sm:px-6 py-3">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "linear-gradient(135deg, #6366F1 0%, #4F46E5 100%)", boxShadow: "0 2px 8px rgba(99,102,241,0.4)" }}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M12 2L3 7V9H21V7L12 2Z" fill="white" opacity="0.9"/>
-                <rect x="5" y="10" width="2.5" height="8" rx="0.5" fill="white" opacity="0.8"/>
-                <rect x="10.75" y="10" width="2.5" height="8" rx="0.5" fill="white" opacity="0.8"/>
-                <rect x="16.5" y="10" width="2.5" height="8" rx="0.5" fill="white" opacity="0.8"/>
-                <rect x="3" y="18.5" width="18" height="2.5" rx="0.5" fill="white" opacity="0.9"/>
-              </svg>
-            </div>
+            <AppLogo size={32} />
             <span className="text-white font-bold text-base tracking-tight hidden sm:inline">법률 업무 통합</span>
             <div className="flex items-center bg-slate-800 rounded-lg p-0.5 ml-1">
               {[["cases", "사건"], ["journal", "업무일지"]].map(([key, label]) => (

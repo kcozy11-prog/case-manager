@@ -1,5 +1,6 @@
 import { auth, provider } from "../firebase";
 import { signInWithPopup, GoogleAuthProvider } from "firebase/auth";
+import AppLogo from "./AppLogo";
 
 export default function LoginScreen({ onToken }) {
   const handleSignIn = async () => {
@@ -15,15 +16,7 @@ export default function LoginScreen({ onToken }) {
   return (
     <div className="flex items-center justify-center h-screen bg-slate-900">
       <div className="bg-white rounded-2xl shadow-2xl p-10 flex flex-col items-center gap-6 w-80">
-        <div className="w-12 h-12 rounded-xl flex items-center justify-center" style={{ background: "linear-gradient(135deg, #6366F1 0%, #4F46E5 100%)", boxShadow: "0 2px 8px rgba(99,102,241,0.4)" }}>
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 2L3 7V9H21V7L12 2Z" fill="white" opacity="0.9"/>
-            <rect x="5" y="10" width="2.5" height="8" rx="0.5" fill="white" opacity="0.8"/>
-            <rect x="10.75" y="10" width="2.5" height="8" rx="0.5" fill="white" opacity="0.8"/>
-            <rect x="16.5" y="10" width="2.5" height="8" rx="0.5" fill="white" opacity="0.8"/>
-            <rect x="3" y="18.5" width="18" height="2.5" rx="0.5" fill="white" opacity="0.9"/>
-          </svg>
-        </div>
+        <AppLogo size={48} />
         <div className="text-center">
           <div className="text-xl font-bold text-slate-900 mb-1">사건 관리</div>
           <div className="text-sm text-slate-400">Google 계정으로 로그인하세요</div>
