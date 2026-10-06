@@ -32,24 +32,28 @@ function journalCol(uid) {
   return collection(db, "users", uid, "journal");
 }
 
-// 실시간 구독 → 콜백에 { [dateKey]: entry } 맵 전달
+// 실시간 구독 → 콜백에 ({ [dateKey]: entry } 맵, { fromCache }) 전달
+// fromCache: 기기 캐시(오래된 사본일 수 있음)만 본 상태인지. 서버 판본을 받으면 false 가 된다.
+// (includeMetadataChanges 를 켜야 캐시 → 서버 판본으로 넘어가는 순간도 알려 준다)
 export function subscribeJournal(uid, cb, onError) {
   if (!uid) return () => {};
   return onSnapshot(
     journalCol(uid),
+    { includeMetadataChanges: true },
     (snap) => {
       const map = {};
       snap.docs.forEach((d) => { map[d.id] = d.data(); });
-      cb(map);
+      cb(map, { fromCache: !!snap.metadata?.fromCache });
     },
     (err) => { console.error("[journal] 구독 오류:", err); onError && onError(err); }
   );
 }
 
 // 단일 일지 저장 (dateKey 를 문서 ID 로 사용, _savedAt 갱신)
-export async function saveJournalEntry(uid, dateKey, data) {
+// savedAt: 저장 시각을 호출 쪽에서 정해 두면, 자기 저장인지 다른 기기 저장인지 구별할 수 있다.
+export async function saveJournalEntry(uid, dateKey, data, savedAt = new Date().toISOString()) {
   if (!uid || !dateKey) return;
-  const entry = { ...data, entryDate: dateKey, _savedAt: new Date().toISOString() };
+  const entry = { ...data, entryDate: dateKey, _savedAt: savedAt };
   await setDoc(doc(journalCol(uid), dateKey), entry);
   return entry;
 }

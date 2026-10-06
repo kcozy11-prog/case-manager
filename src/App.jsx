@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { auth, provider, db } from "./firebase";
 import { onAuthStateChanged, signOut, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
-import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, getDocFromServer, waitForPendingWrites, arrayUnion } from "firebase/firestore";
+import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, getDocFromServer, runTransaction, arrayUnion } from "firebase/firestore";
 import { TYPES, todayStr, dday, fmtDate, emptyCase, SAMPLE_CASES } from "./utils";
 import { LIST_STATUSES, filterCaseList, countCasesByListStatus, firstActiveCaseId } from "./caseList";
 import { TypeBadge } from "./components/Badges";
@@ -20,18 +20,64 @@ import StandaloneTodosModal from "./components/StandaloneTodosModal";
 import { migrateLegacyData, exportToGoogleSheet } from "./migrateLegacy";
 import { openSpreadsheetUrl } from "./exportOpen";
 import JournalApp from "./components/journal/JournalApp";
-import { fetchAllJournalEntries } from "./journalStore";
+import { collectAllUserData } from "./backupStore";
+import RestoreModal from "./components/RestoreModal";
+import { readRestoreSource, spreadsheetIdFromInput } from "./restoreSource";
+import { buildRestorePlan, applyPlanSelection, revertRestoreForCase, RESTORE_FIELDS } from "./restorePlan";
 import { computeRetainerPayups } from "./caseLink";
 import BriefsTab from "./components/BriefsTab";
 import GlobalSearch from "./components/GlobalSearch";
 import { ensureTaskCalendar, upsertTaskEvent, CalendarAuthError } from "./calendarPush";
-import { mergeGoogleTaskIntoStandaloneTodos, readStandaloneTodos } from "./standaloneTodos";
+import { mergeGoogleTaskIntoStandaloneTodos, readStandaloneTodos, STANDALONE_TODOS_CASE_ID } from "./standaloneTodos";
+import { diffCase, applyCaseDiff, normalizeCaseDoc, stableStringify } from "./caseMerge";
+import { createCaseWriter } from "./caseWriter";
+
+// 화면 전용 표시는 문서에 저장하지 않는다
+function stripTransient(c) {
+  const { _isNew, ...rest } = c || {};
+  return rest;
+}
+
+// 서버의 최신 사건 문서를 읽어 이번 수정분(diff)만 얹는다.
+// 트랜잭션이므로 읽은 뒤 다른 기기가 고치면 다시 읽어 얹는다 → 옛 판본으로 문서 전체를 덮어쓰지 않는다.
+async function commitCaseDiff(uid, caseId, diff, newCase) {
+  if (caseId === STANDALONE_TODOS_CASE_ID) {
+    const ref = doc(db, "users", uid, "meta", "standaloneTodos");
+    return runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      const latest = { todos: readStandaloneTodos(snap.exists() ? snap.data() : null) };
+      const merged = applyCaseDiff(latest, diff);
+      if (stableStringify(merged.todos) === stableStringify(latest.todos)) return "unchanged";
+      tx.set(ref, { todos: merged.todos, updatedAt: new Date().toISOString() }, { merge: true });
+      return "saved";
+    });
+  }
+  const ref = doc(db, "users", uid, "cases", caseId);
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists()) {
+      if (!newCase) return "missing"; // 다른 기기에서 지운 사건은 되살리지 않는다
+      tx.set(ref, newCase);
+      return "created";
+    }
+    const latest = normalizeCaseDoc(snap.data(), todayStr);
+    const merged = applyCaseDiff(latest, diff);
+    if (stableStringify(merged) === stableStringify(latest)) return "unchanged";
+    tx.set(ref, merged);
+    return "saved";
+  });
+}
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [cases, setCases] = useState([]);
-  const [standaloneTodos, setStandaloneTodos] = useState([]);
+  const [serverCases, setServerCases] = useState([]);
+  // 서버 판본을 받았는지. 기기 캐시(옛 판본일 수 있음)만 본 상태에서는 자동 동기화·일괄 정리를 하지 않는다.
+  const [casesSynced, setCasesSynced] = useState(false);
+  const [serverStandaloneTodos, setServerStandaloneTodos] = useState([]);
+  const [writerState, setWriterState] = useState({ pending: 0, waiting: false, error: null });
+  const [writerTick, setWriterTick] = useState(0);
+  const writerRef = useRef(null);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("진행중"); // 진행중 | 종결 (종결 사건은 검색·종결 목록에서만)
@@ -44,6 +90,7 @@ export default function App() {
   const [showStandaloneTodos, setShowStandaloneTodos] = useState(false);
   const [editCase, setEditCase] = useState(null);
   const [showAI, setShowAI] = useState(false);
+  const [showRestore, setShowRestore] = useState(false);
   const [mobileView, setMobileView] = useState("list");
   const [googleToken, setGoogleToken] = useState(() => sessionStorage.getItem("googleToken"));
   const [calSyncing, setCalSyncing] = useState(false);
@@ -65,31 +112,60 @@ export default function App() {
     return unsub;
   }, []);
 
-  // Firestore 실시간 동기화
+  // 사건 저장 대기열 (사건별 순서 보장 · 서버 연결 대기 · 화면 즉시 반영)
   useEffect(() => {
-    if (!user) { setCases([]); setSelectedId(null); return; }
+    if (!user) return undefined;
+    const writer = createCaseWriter({
+      commit: (caseId, diff, newCase) => commitCaseDiff(user.uid, caseId, diff, newCase),
+      onChange: (s) => { setWriterState(s); setWriterTick((t) => t + 1); },
+      isOnline: () => typeof navigator === "undefined" || navigator.onLine !== false,
+    });
+    writerRef.current = writer;
+    const onOnline = () => writer.retryNow();
+    // 서버에 아직 못 보낸 저장이 있으면 창을 닫기 전에 묻는다
+    const onBeforeUnload = (e) => {
+      if (writer.state().pending > 0) { e.preventDefault(); e.returnValue = ""; }
+    };
+    window.addEventListener("online", onOnline);
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      writer.dispose();
+      if (writerRef.current === writer) writerRef.current = null;
+      setWriterState({ pending: 0, waiting: false, error: null });
+    };
+  }, [user]);
+
+  // Firestore 실시간 동기화
+  // includeMetadataChanges: 캐시 판본(fromCache)에서 서버 판본으로 넘어가는 순간을 알기 위해 켠다.
+  useEffect(() => {
+    setCasesSynced(false);
+    if (!user) { setServerCases([]); setSelectedId(null); return; }
     const colRef = collection(db, "users", user.uid, "cases");
-    const unsub = onSnapshot(colRef, async (snapshot) => {
+    let seeded = false;
+    const unsub = onSnapshot(colRef, { includeMetadataChanges: true }, async (snapshot) => {
+      const fromServer = !snapshot.metadata.fromCache;
       if (snapshot.empty) {
-        const batch = writeBatch(db);
-        SAMPLE_CASES.forEach(c => batch.set(doc(colRef, c.id), c));
-        await batch.commit();
+        // 서버가 '비어 있음'을 확인했을 때만 예시 사건을 넣는다 (캐시가 잠깐 비어 보이는 순간에는 넣지 않음)
+        if (fromServer && !seeded) {
+          seeded = true;
+          const batch = writeBatch(db);
+          SAMPLE_CASES.forEach(c => batch.set(doc(colRef, c.id), c));
+          await batch.commit();
+        }
         return;
       }
-      const data = snapshot.docs.map(d => {
-        const c = d.data();
-        // 기존 memo(string) → memos(array) 마이그레이션
-        if (!Array.isArray(c.memos)) {
-          c.memos = c.memo
-            ? [{ id: 1, category: "일반메모", title: "메모", content: c.memo, date: todayStr }]
-            : [];
-        }
-        return c;
-      });
-      setCases(data);
+      // 기존 memo(string) → memos(array) 마이그레이션은 normalizeCaseDoc 이 맡는다
+      const data = snapshot.docs.map(d => normalizeCaseDoc(d.data(), todayStr));
+      const writer = writerRef.current;
+      if (writer) writer.reconcile(data);
+      setServerCases(data);
+      if (fromServer) setCasesSynced(true);
+      const visible = writer ? writer.overlay(data) : data;
       setSelectedId(prev => {
-        if (prev && data.find(c => c.id === prev)) return prev;
-        return firstActiveCaseId(data);
+        if (prev && visible.find(c => c.id === prev)) return prev;
+        return firstActiveCaseId(visible);
       });
     }, (error) => {
       console.error("Firestore 동기화 오류:", error);
@@ -99,52 +175,84 @@ export default function App() {
 
   // 사건과 연결하지 않는 일반 할 일 실시간 동기화
   useEffect(() => {
-    if (!user) { setStandaloneTodos([]); return; }
+    if (!user) { setServerStandaloneTodos([]); return; }
     const ref = doc(db, "users", user.uid, "meta", "standaloneTodos");
     const unsub = onSnapshot(ref, (snapshot) => {
-      setStandaloneTodos(readStandaloneTodos(snapshot.data()));
+      const todos = readStandaloneTodos(snapshot.data());
+      if (writerRef.current) writerRef.current.reconcile([{ id: STANDALONE_TODOS_CASE_ID, todos }]);
+      setServerStandaloneTodos(todos);
     }, (error) => {
       console.error("일반 할 일 동기화 오류:", error);
     });
     return unsub;
   }, [user]);
 
+  // 화면에 보이는 사건 = 서버 판본 + 아직 서버에 반영 중인 저장분
+  const cases = useMemo(
+    () => (writerRef.current ? writerRef.current.overlay(serverCases) : serverCases),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [serverCases, writerTick],
+  );
+  const standaloneTodos = useMemo(() => {
+    if (!writerRef.current) return serverStandaloneTodos;
+    const [pseudo] = writerRef.current.overlay([{ id: STANDALONE_TODOS_CASE_ID, todos: serverStandaloneTodos }]);
+    return Array.isArray(pseudo?.todos) ? pseudo.todos : serverStandaloneTodos;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverStandaloneTodos, writerTick]);
+  const casesRef = useRef(cases);
+  casesRef.current = cases;
+  const standaloneTodosRef = useRef(standaloneTodos);
+  standaloneTodosRef.current = standaloneTodos;
+
   const selected = cases.find(c => c.id === selectedId);
 
-  // 캘린더에서 가져온 할일 일괄 삭제 (1회 마이그레이션)
+  // 사건 저장: next 는 저장할 사건, base 는 그 수정의 출발점(화면이 보던 판본, 새 사건이면 null).
+  // 바뀐 부분만 서버 최신 문서에 얹으므로, 그 사이 다른 기기·자동 동기화가 저장한 내용이 지워지지 않는다.
+  // select=false: 캘린더·할 일 자동 동기화처럼 백그라운드 저장일 때는 보고 있던 사건을 바꾸지 않는다.
+  const saveCase = useCallback((next, { base, select = true } = {}) => {
+    const writer = writerRef.current;
+    if (!user || !writer || !next?.id) return Promise.resolve("skipped");
+    const clean = stripTransient(next);
+    if (select) setSelectedId(clean.id);
+    const from = base === undefined ? (casesRef.current.find(x => x.id === clean.id) || null) : base;
+    const work = from
+      ? writer.submit(clean.id, diffCase(from, clean))
+      : writer.submit(clean.id, diffCase({ id: clean.id }, clean), { newCase: clean });
+    work.catch(() => {}); // 실패는 상단 배너(writerState.error)로 알린다
+    return work;
+  }, [user]);
+
+  // 캘린더에서 가져온 할일 일괄 삭제 (1회 마이그레이션) — 서버 판본을 받은 뒤에만
   const calTodoMigrated = useRef(false);
   useEffect(() => {
-    if (!user || cases.length === 0 || calTodoMigrated.current) return;
+    if (!user || !casesSynced || cases.length === 0 || calTodoMigrated.current) return;
     calTodoMigrated.current = true;
     const dirty = cases.filter(c => (c.todos || []).some(t => t.fromCalendar));
     dirty.forEach(c => {
-      const cleaned = { ...c, todos: (c.todos || []).filter(t => !t.fromCalendar) };
-      setDoc(doc(db, "users", user.uid, "cases", c.id), cleaned);
+      saveCase({ ...c, todos: (c.todos || []).filter(t => !t.fromCalendar) }, { base: c, select: false });
     });
-  }, [user, cases]);
+  }, [user, casesSynced, cases, saveCase]);
 
-  // 사건분류 자동 재분류 (1회 마이그레이션)
+  // 사건분류 자동 재분류 (1회 마이그레이션) — 서버 판본을 받은 뒤에만
   const typeReclassified = useRef(false);
   useEffect(() => {
-    if (!user || cases.length === 0 || typeReclassified.current) return;
+    if (!user || !casesSynced || cases.length === 0 || typeReclassified.current) return;
     if (localStorage.getItem("typeReclassified_v1")) { typeReclassified.current = true; return; }
     typeReclassified.current = true;
     localStorage.setItem("typeReclassified_v1", "1");
 
-    const dirty = [];
+    let count = 0;
     for (const c of cases) {
       const newType = inferCaseType(c.caseNumber, c.court, c.title);
       // 민사로 분류된 것 중 새 카테고리에 해당하는 건만 변경
       if (c.type === "민사" && newType !== "민사") {
-        dirty.push({ ...c, type: newType });
+        saveCase({ ...c, type: newType }, { base: c, select: false });
+        console.log(`[사건분류] "${c.title}" 민사 → ${newType}`);
+        count++;
       }
     }
-    dirty.forEach(c => {
-      setDoc(doc(db, "users", user.uid, "cases", c.id), c);
-      console.log(`[사건분류] "${c.title}" 민사 → ${c.type}`);
-    });
-    if (dirty.length > 0) console.log(`[사건분류] ${dirty.length}건 재분류 완료`);
-  }, [user, cases]);
+    if (count > 0) console.log(`[사건분류] ${count}건 재분류 완료`);
+  }, [user, casesSynced, cases, saveCase]);
 
   // 로그인/토큰 상태가 바뀌면 자동 동기화 플래그 초기화
   useEffect(() => {
@@ -183,74 +291,46 @@ export default function App() {
     return best;
   }, [cases]);
 
-  // select=false: 캘린더·할 일 자동 동기화처럼 백그라운드 저장일 때는 보고 있던 사건을 바꾸지 않는다.
-  const saveCase = useCallback(async (c, { select = true } = {}) => {
-    if (!user) return;
-    // 낙관적 즉시 반영 — onSnapshot 지연/누락(멀티탭 등)에도 화면이 바로 갱신되도록
-    setCases(prev => prev.some(x => x.id === c.id) ? prev.map(x => x.id === c.id ? c : x) : [...prev, c]);
-    if (select) setSelectedId(c.id);
-    await setDoc(doc(db, "users", user.uid, "cases", c.id), c);
+  // 일반 할 일 저장: base 는 그 수정의 출발점(화면이 보던 목록). 바뀐 할 일만 서버 최신 목록에 얹는다.
+  const saveStandaloneTodos = useCallback((standaloneCase, base) => {
+    const writer = writerRef.current;
+    if (!user || !writer) return Promise.resolve("skipped");
+    const before = { id: STANDALONE_TODOS_CASE_ID, todos: Array.isArray(base?.todos) ? base.todos : standaloneTodosRef.current };
+    const after = { id: STANDALONE_TODOS_CASE_ID, todos: Array.isArray(standaloneCase?.todos) ? standaloneCase.todos : [] };
+    const work = writer.submit(STANDALONE_TODOS_CASE_ID, diffCase(before, after));
+    work.catch(() => {});
+    return work;
   }, [user]);
 
-  const saveStandaloneTodos = useCallback(async (standaloneCase) => {
-    if (!user) return;
-    const todos = Array.isArray(standaloneCase?.todos) ? standaloneCase.todos : [];
-    setStandaloneTodos(todos);
-    await setDoc(doc(db, "users", user.uid, "meta", "standaloneTodos"), {
-      todos,
-      updatedAt: new Date().toISOString(),
-    }, { merge: true });
-  }, [user]);
-
-  // 업무일지 → 사건 기록 전용 저장:
-  //  ① 화면 즉시 반영(낙관적) — onSnapshot 누락/지연에도 사건탭이 바로 갱신
-  //  ② 서버 반영 '확인' — 오프라인 캐시는 로컬 커밋만으로 resolve 되므로, 서버 거부가
-  //     조용히 묻히지 않도록 보류 쓰기 완료를 기다린 뒤 서버에서 재확인. 실패 시 오류 표면화.
-  //  (네트워크 지연으로 확인이 늦어지면 false 오류 대신 낙관적으로 통과 — 화면엔 이미 반영됨)
-  const saveCaseFromJournal = useCallback(async (c) => {
+  // 업무일지 → 사건 기록 전용 저장: 서버 반영(트랜잭션 완료)을 확인해 결과를 배너로 알린다.
+  //  - 서버에 닿지 않으면 저장 대기열이 연결될 때까지 들고 있다가 자동으로 보낸다(10초 넘으면 대기 안내).
+  //  - base: 일지에서 기록을 만들 때 출발한 사건 판본 (없으면 현재 화면 판본)
+  const saveCaseFromJournal = useCallback(async (c, base) => {
     if (!user) { setCaseSaveMsg({ type: "err", text: "로그인이 필요합니다. 로그아웃 후 다시 로그인하세요." }); throw new Error("로그인 필요"); }
-    const stamp = new Date().toISOString();
-    const payload = { ...c, _savedAt: stamp };
-    const ref = doc(db, "users", user.uid, "cases", c.id);
-    setCases(prev => prev.some(x => x.id === c.id) ? prev.map(x => x.id === c.id ? payload : x) : [...prev, payload]);
-    setSelectedId(c.id);
     setCaseSaveMsg({ type: "pending", text: `사건 "${c.title || c.id}" 저장 확인 중…` });
-
-    try {
-      await setDoc(ref, payload);
-    } catch (e) {
-      setCaseSaveMsg({ type: "err", text: `저장 실패(클라이언트): ${e.code || e.message}` });
-      throw e;
-    }
-
-    // 보류 쓰기가 서버에 반영(또는 거부)될 때까지 대기 — 10초 내 미완료면 지연 안내
-    const settled = await Promise.race([
-      waitForPendingWrites(db).then(() => "settled", () => "settled"),
-      new Promise((res) => setTimeout(() => res("timeout"), 10000)),
+    const work = saveCase(c, { base, select: true });
+    const outcome = await Promise.race([
+      work.then((result) => ({ result }), (error) => ({ error })),
+      new Promise((res) => setTimeout(() => res({ timeout: true }), 10000)),
     ]);
-    if (settled === "timeout") {
-      setCaseSaveMsg({ type: "warn", text: "⏱ 서버 응답 지연(10초 초과). 네트워크/방화벽/확장프로그램이 Firestore를 막는지 확인하세요." });
+    if (outcome.error) {
+      setCaseSaveMsg({ type: "err", text: `✗ 서버 저장 실패: ${outcome.error.code || outcome.error.message}. 권한·문서 크기(1MB)를 확인하세요.` });
+      throw outcome.error;
+    }
+    if (outcome.timeout) {
+      setCaseSaveMsg({ type: "warn", text: "⏱ 서버 연결 대기 중(10초 초과). 연결되면 자동으로 저장합니다. 이 창을 닫지 마세요." });
       return;
     }
-
-    let snap;
-    try {
-      snap = await getDocFromServer(ref);
-    } catch (e) {
-      setCaseSaveMsg({ type: "err", text: `✗ 서버 저장 실패: ${e.code || e.message}` });
-      return;
+    if (outcome.result === "missing") {
+      setCaseSaveMsg({ type: "err", text: "✗ 서버에 사건 문서가 없습니다(다른 기기에서 삭제되었을 수 있음)." });
+      throw new Error("사건 문서 없음");
     }
-    if (!snap.exists()) {
-      setCaseSaveMsg({ type: "err", text: "✗ 서버에 사건 문서가 없습니다(생성 실패)." });
-    } else if (snap.data()?._savedAt !== stamp) {
-      setCaseSaveMsg({ type: "err", text: "✗ 서버에 반영 안 됨(거부/롤백). 보안 규칙·권한·문서 크기(1MB)를 확인하세요." });
-    } else {
-      setCaseSaveMsg({ type: "ok", text: `✓ 사건 "${c.title || c.id}"에 저장 완료 (서버 확인됨)` });
-    }
-  }, [user]);
+    setCaseSaveMsg({ type: "ok", text: `✓ 사건 "${c.title || c.id}"에 저장 완료 (서버 확인됨)` });
+  }, [user, saveCase]);
 
   const deleteCase = useCallback(async (caseId) => {
     if (!user) return;
+    if (writerRef.current) writerRef.current.dropCase(caseId);
     await deleteDoc(doc(db, "users", user.uid, "cases", caseId));
     setMobileView("list");
   }, [user]);
@@ -261,11 +341,16 @@ export default function App() {
     const changed = computeRetainerPayups(cases);
     if (changed.length === 0) { alert("완납처리할 미입금 사건이 없습니다."); return; }
     if (!window.confirm(`착수금 미입금·부분입금 ${changed.length}건을 약정 착수금만큼 '입금 완료'로 일괄 처리할까요?`)) return;
-    const batch = writeBatch(db);
-    changed.forEach((c) => batch.set(doc(db, "users", user.uid, "cases", c.id), c));
-    await batch.commit();
-    alert(`${changed.length}건 착수금 완납처리 완료.`);
-  }, [user, cases]);
+    const byId = new Map(cases.map((c) => [c.id, c]));
+    const works = changed.map((c) => saveCase(c, { base: byId.get(c.id) || null, select: false }));
+    const outcome = await Promise.race([
+      Promise.allSettled(works).then((rs) => rs.filter((r) => r.status === "rejected").length),
+      new Promise((res) => setTimeout(() => res(-1), 15000)),
+    ]);
+    if (outcome === -1) alert(`${changed.length}건 완납처리를 저장 중입니다. 서버 연결이 확인되면 자동으로 반영됩니다.`);
+    else if (outcome > 0) alert(`${changed.length}건 중 ${outcome}건 저장 실패. 상단 안내를 확인하세요.`);
+    else alert(`${changed.length}건 착수금 완납처리 완료.`);
+  }, [user, cases, saveCase]);
 
   const applyAI = useCallback((result, matchedCase) => {
     if (matchedCase) {
@@ -295,7 +380,7 @@ export default function App() {
         }];
       }
 
-      saveCase(updated);
+      saveCase(updated, { base: matchedCase });
       setSelectedId(matchedCase.id);
       setActiveTab("overview");
       setMobileView("detail");
@@ -345,14 +430,18 @@ export default function App() {
         if (snap.exists()) ignoredEventIds = new Set(snap.data().ignoredEventIds || []);
       } catch (e) { console.warn("캘린더 무시 목록 로드 실패", e); }
 
+      // 동기화가 계산에 쓴 판본(base)을 함께 넘겨, 동기화로 바뀐 부분만 서버 최신 문서에 얹는다.
+      // (저장은 대기열이 사건별로 순서대로 보내므로 여기서 기다리지 않는다)
       const { updates, newHearingCount, newCaseCount, skippedCount, unmatchedEvents } = syncEventsWithCases(data.items, cases, { ignoredEventIds });
-      for (const [, uc] of updates) await saveCase(uc, { select: false });
+      const baseById = new Map(cases.map(c => [c.id, c]));
+      for (const [id, uc] of updates) saveCase(uc, { base: baseById.get(id) || null, select: false });
 
       // 회사업무 캘린더 → 공식결과메모
       const mergedCases = cases.map(c => updates.has(c.id) ? updates.get(c.id) : c);
+      const mergedById = new Map(mergedCases.map(c => [c.id, c]));
       const workEvents = await fetchWorkCalendarEvents(token);
       const workResult = syncWorkEventsWithCases(workEvents, mergedCases);
-      for (const [, uc] of workResult.updates) await saveCase(uc, { select: false });
+      for (const [id, uc] of workResult.updates) saveCase(uc, { base: mergedById.get(id) || null, select: false });
 
       if (unmatchedEvents?.length > 0) {
         setUnmatchedCalendarEvents(unmatchedEvents);
@@ -379,7 +468,7 @@ export default function App() {
     const ev = calendarItem?.event || calendarItem;
     if (!ev || !caseObj) return;
     const merged = mergeCalendarEventIntoCase({ ...caseObj, hearings: [...(caseObj.hearings || [])], memos: [...(caseObj.memos || [])], timeline: [...(caseObj.timeline || [])] }, ev);
-    await saveCase(merged.caseObj);
+    saveCase(merged.caseObj, { base: caseObj });
   }, [saveCase]);
 
   // ── Google Tasks 동기화 ────────────────────────────────────────────────────
@@ -409,7 +498,7 @@ export default function App() {
           if (merged.updated) standaloneUpdatedCount++;
         }
         if (standaloneAddedCount || standaloneUpdatedCount) {
-          await saveStandaloneTodos({ todos: nextStandaloneTodos });
+          saveStandaloneTodos({ todos: nextStandaloneTodos }, { todos: standaloneTodos });
         }
         tasksForCaseMatching = tasks.filter(task => !standaloneTaskIds.has(task.id));
       }
@@ -439,7 +528,8 @@ export default function App() {
         // 바뀐 것이 없으면 저장하지 않는다 (매번 연결된 사건 전체를 다시 저장하던 문제)
         if (merged.added || merged.updated) updatedCases.set(caseObj.id, merged.caseObj);
       }
-      for (const [, uc] of updatedCases) await saveCase(uc, { select: false });
+      const taskBaseById = new Map(cases.map(c => [c.id, c]));
+      for (const [id, uc] of updatedCases) saveCase(uc, { base: taskBaseById.get(id) || null, select: false });
 
       // 미매칭 태스크 모달 표시 (완료·무시 제외분만)
       if (visibleUnmatched.length > 0) {
@@ -470,14 +560,14 @@ export default function App() {
   // 미매칭 태스크를 특정 사건에 수동 추가 (추가 후엔 다시 안 뜨도록 무시 목록에도 등록)
   const addUnmatchedTaskToCase = useCallback(async (task, caseObj) => {
     const merged = mergeTaskIntoCaseTodos({ ...caseObj, todos: [...(caseObj.todos || [])] }, task);
-    await saveCase(merged.caseObj);
+    saveCase(merged.caseObj, { base: caseObj });
     await ignoreUnmatchedTask(task.id);
   }, [saveCase, ignoreUnmatchedTask]);
 
   // 미매칭 태스크를 사건과 연결하지 않는 일반 할 일로 추가
   const addUnmatchedTaskToStandalone = useCallback(async (task) => {
     const merged = mergeGoogleTaskIntoStandaloneTodos(standaloneTodos, task);
-    await saveStandaloneTodos({ todos: merged.todos });
+    saveStandaloneTodos({ todos: merged.todos }, { todos: standaloneTodos });
     await ignoreUnmatchedTask(task.id);
   }, [standaloneTodos, saveStandaloneTodos, ignoreUnmatchedTask]);
 
@@ -507,16 +597,17 @@ export default function App() {
   }, [googleToken, refreshGoogleToken]);
 
   useEffect(() => {
-    if (!user || !googleToken || cases.length === 0 || calSyncing || autoCalendarSyncStarted.current) return;
+    // 자동 동기화는 서버 판본을 받은 뒤에만 시작한다 (오래된 기기 캐시로 계산해 저장하지 않도록)
+    if (!user || !googleToken || !casesSynced || cases.length === 0 || calSyncing || autoCalendarSyncStarted.current) return;
     autoCalendarSyncStarted.current = true;
     syncCalendar();
-  }, [user, googleToken, cases.length, calSyncing, syncCalendar]);
+  }, [user, googleToken, casesSynced, cases.length, calSyncing, syncCalendar]);
 
   useEffect(() => {
-    if (!user || !googleToken || cases.length === 0 || taskSyncing || autoTaskSyncStarted.current) return;
+    if (!user || !googleToken || !casesSynced || cases.length === 0 || taskSyncing || autoTaskSyncStarted.current) return;
     autoTaskSyncStarted.current = true;
     syncTasks();
-  }, [user, googleToken, cases.length, taskSyncing, syncTasks]);
+  }, [user, googleToken, casesSynced, cases.length, taskSyncing, syncTasks]);
 
   const runMigration = useCallback(async () => {
     if (!user) return;
@@ -525,16 +616,15 @@ export default function App() {
       token = await refreshGoogleToken();
       if (!token) { alert("Google 인증이 필요합니다."); return; }
     }
-    if (!window.confirm("구글 시트 '사건진행부'에서 민사/형사 사건을 가져옵니다. 진행하시겠습니까?")) return;
+    if (!window.confirm("구글 시트 '사건진행부'에서 민사/형사 사건을 가져옵니다.\n이미 앱에 있는 사건은 건드리지 않고, 없는 사건만 새로 추가합니다. 진행하시겠습니까?")) return;
+    const report = (result) => alert(`시트의 민사 ${result.civil}건, 형사 ${result.criminal}건 중 새 사건 ${result.added}건을 추가했습니다. (이미 있는 사건 ${result.skipped}건은 그대로 둠)`);
     try {
-      const result = await migrateLegacyData(user.uid, token);
-      alert(`민사 ${result.civil}건, 형사 ${result.criminal}건 — 총 ${result.total}건 가져오기 완료!`);
+      report(await migrateLegacyData(user.uid, token));
     } catch (e) {
       if (e.message.includes("인증") || e.message.includes("401")) {
         const newToken = await refreshGoogleToken();
         if (newToken) {
-          const result = await migrateLegacyData(user.uid, newToken);
-          alert(`민사 ${result.civil}건, 형사 ${result.criminal}건 — 총 ${result.total}건 가져오기 완료!`);
+          report(await migrateLegacyData(user.uid, newToken));
         } else { alert("Google 인증 실패. 로그아웃 후 다시 로그인하세요."); }
       } else {
         alert("가져오기 오류: " + e.message);
@@ -550,22 +640,176 @@ export default function App() {
       if (!token) { alert("Google 인증이 필요합니다."); return; }
     }
     try {
-      const journalEntries = await fetchAllJournalEntries(user.uid);
-      let url = await exportToGoogleSheet(token, cases, journalEntries);
+      // 서버 판본 전체를 읽어, 사람이 읽는 시트와 '복원용 원본'(숨김 시트)을 함께 만든다
+      const all = await collectAllUserData(user.uid);
+      const exportCases = all.cases.map(c => normalizeCaseDoc(c, todayStr));
+      const options = { raw: { data: all, info: { fromServer: all.fromServer, appBuild: __BUILD_TIME__ } } };
+      let url = await exportToGoogleSheet(token, exportCases, all.journal, options);
       if (!url) {
         // 기존 토큰에 쓰기 권한 없음 → 새 권한으로 재인증
         provider.setCustomParameters({ prompt: "consent" });
         token = await refreshGoogleToken();
         provider.setCustomParameters({});
         if (!token) { alert("Google 인증 실패."); return; }
-        url = await exportToGoogleSheet(token, cases, journalEntries);
+        url = await exportToGoogleSheet(token, exportCases, all.journal, options);
       }
+      if (url && !all.fromServer) alert("서버에 연결되지 않아 이 기기에 저장된 사본으로 내보냈습니다. 연결된 뒤 한 번 더 내보내기를 권합니다.");
       if (url) openSpreadsheetUrl(url);
       else alert("내보내기 실패. 로그아웃 후 다시 로그인해주세요.");
     } catch (e) {
       alert("내보내기 오류: " + e.message);
     }
   }, [user, cases, googleToken, refreshGoogleToken]);
+
+  // ── 데이터 복원 ────────────────────────────────────────────────────────────
+  // Google 토큰이 필요한 작업: 없거나 만료되면 한 번 다시 로그인해 이어서 한다
+  const withGoogleToken = useCallback(async (fn) => {
+    let token = googleToken || await refreshGoogleToken();
+    if (!token) throw new Error("Google 인증이 필요합니다.");
+    try {
+      return await fn(token);
+    } catch (e) {
+      if (!e?.authError) throw e;
+      token = await refreshGoogleToken();
+      if (!token) throw new Error("Google 인증이 필요합니다.");
+      return fn(token);
+    }
+  }, [googleToken, refreshGoogleToken]);
+
+  const readServerSnapshot = useCallback(async () => {
+    try {
+      const all = await collectAllUserData(user.uid, { requireServer: true });
+      return { ...all, cases: all.cases.map((c) => normalizeCaseDoc(c, todayStr)) };
+    } catch (e) {
+      throw new Error(`서버에서 지금 데이터를 읽지 못했습니다(${e?.code || e?.message || e}). 서버에 연결되어 있어야 복원할 수 있습니다.`);
+    }
+  }, [user]);
+
+  // 내보내기 파일(주소)과 지금 서버 데이터를 비교해 복원 후보를 만든다. 주소가 없으면 업무일지 기록만 대조.
+  const analyzeRestore = useCallback(async (input, { includeCrossCheck = true } = {}) => {
+    if (!user) throw new Error("로그인이 필요합니다.");
+    let source = null;
+    if (String(input || "").trim()) {
+      const id = spreadsheetIdFromInput(input);
+      if (!id) throw new Error("구글 시트 주소(https://docs.google.com/spreadsheets/d/…)를 확인해 주세요.");
+      source = await withGoogleToken((token) => readRestoreSource(token, id));
+      try { localStorage.setItem("restoreSourceUrl", String(input).trim()); } catch { /* 저장 못 해도 진행 */ }
+    }
+    const current = await readServerSnapshot();
+    const snapshot = source ? source.snapshot : { source: "none", cases: [], journal: {} };
+    const plan = buildRestorePlan(snapshot, { cases: current.cases, journal: current.journal }, {
+      ignoreTitles: SAMPLE_CASES.map((c) => c.title),
+      includeCrossCheck: !source || includeCrossCheck,
+    });
+    return { plan, label: source ? source.fileTitle : "업무일지 기록", kind: source ? source.kind : "journal" };
+  }, [user, withGoogleToken, readServerSnapshot]);
+
+  // 고른 후보를 적용: ① 지금 데이터 전체를 백업 파일로 저장(실패하면 중단) ② 사건마다 고른 항목만 서버 최신 문서에 얹음
+  // ③ 없어진 날짜의 업무일지만 새로 씀 ④ 되돌리기용 기록을 남김
+  const applyRestore = useCallback(async (bundle, selectedIds, targetFor = {}) => {
+    if (!user) throw new Error("로그인이 필요합니다.");
+    const stamp = new Date();
+    const at = stamp.toISOString();
+    const all = await readServerSnapshot();
+    const backupTitle = `사건관리 복원 전 백업 ${stamp.toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`;
+    let backupUrl = null;
+    try {
+      backupUrl = await withGoogleToken(async (token) => {
+        const url = await exportToGoogleSheet(token, all.cases, all.journal, {
+          raw: { data: all, info: { fromServer: true, appBuild: __BUILD_TIME__ } },
+          title: backupTitle,
+        });
+        if (!url) throw Object.assign(new Error("Google 시트 권한이 필요합니다."), { authError: true });
+        return url;
+      });
+    } catch (e) {
+      throw new Error(`복원 전 백업을 만들지 못해 복원을 멈췄습니다: ${e.message || e}`);
+    }
+
+    let seq = Date.now();
+    const { changes, journal } = applyPlanSelection(bundle.plan, selectedIds, all.cases, {
+      makeId: () => ++seq, now: at, label: bundle.label, emptyCase, targetFor,
+    });
+    // 저장은 대기열이 서버 최신 문서에 얹는다. 연결이 끊겨 오래 걸리면 1분 뒤에는 결과를 먼저 보여 준다(대기열이 이어서 저장).
+    const withTimeout = (work) => Promise.race([work, new Promise((res) => setTimeout(() => res("pending"), 60000))]);
+    const results = await Promise.allSettled(changes.map((ch) => withTimeout(saveCase(ch.next, { base: ch.base, select: false }))));
+    const failed = results.filter((r) => r.status === "rejected" || r.value === "missing").length;
+
+    let journalCount = 0;
+    for (const j of journal) {
+      const ref = doc(db, "users", user.uid, "journal", j.date);
+      const written = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(ref);
+        if (snap.exists()) return false; // 그 사이 생긴 일지는 건드리지 않는다
+        tx.set(ref, { ...j.entry, _savedAt: at });
+        return true;
+      });
+      if (written) journalCount++;
+    }
+
+    const okChanges = changes.filter((_, i) => results[i].status === "fulfilled" && results[i].value !== "missing");
+    await setDoc(doc(db, "users", user.uid, "meta", "restoreLog"), {
+      entries: arrayUnion({ at, source: bundle.label, backupUrl, cases: okChanges.map((c) => c.log), journalDates: journal.map((j) => j.date) }),
+    }, { merge: true });
+
+    const added = okChanges.reduce((n, c) => n + Object.values(c.log.added).reduce((m, ids) => m + ids.length, 0), 0);
+    const status = okChanges.reduce((n, c) => n + c.log.status.length + Object.keys(c.log.info).length, 0);
+    return { backupUrl, cases: okChanges.length, added, status, created: okChanges.filter((c) => c.created).length, journal: journalCount, failed };
+  }, [user, readServerSnapshot, withGoogleToken, saveCase]);
+
+  const readRestoreLog = useCallback(async () => {
+    const snap = await getDocFromServer(doc(db, "users", user.uid, "meta", "restoreLog"));
+    const data = snap.exists() ? snap.data() : {};
+    const undone = new Set(data.undone || []);
+    const entries = (data.entries || []).filter((e) => e && !undone.has(e.at));
+    return entries.sort((a, b) => String(a.at).localeCompare(String(b.at))).pop() || null;
+  }, [user]);
+
+  const loadLastRestore = useCallback(async () => {
+    if (!user) return null;
+    const last = await readRestoreLog();
+    return last ? { at: last.at, source: last.source, caseCount: (last.cases || []).length, journalCount: (last.journalDates || []).length } : null;
+  }, [user, readRestoreLog]);
+
+  // 마지막 복원 되돌리기: 복원으로 더한 항목만 빼고, 바꾼 상태는 그 뒤 손대지 않은 것만 되돌린다.
+  const undoLastRestore = useCallback(async () => {
+    if (!user) throw new Error("로그인이 필요합니다.");
+    const last = await readRestoreLog();
+    if (!last) return null;
+    const all = await readServerSnapshot();
+    const byId = new Map(all.cases.map((c) => [c.id, c]));
+    let cases = 0;
+    let skipped = 0;
+    for (const log of last.cases || []) {
+      const cur = byId.get(log.caseId);
+      if (!cur) continue;
+      if (log.created) {
+        // 복원으로 만든 사건: 그 뒤 새 항목을 더하지 않았을 때만 지운다
+        const untouched = RESTORE_FIELDS.every((f) => (cur[f] || []).every((it) => (log.added?.[f] || []).map(String).includes(String(it?.id))));
+        if (!untouched) { skipped++; continue; }
+        if (writerRef.current) writerRef.current.dropCase(cur.id);
+        await deleteDoc(doc(db, "users", user.uid, "cases", cur.id));
+        cases++;
+        continue;
+      }
+      saveCase(revertRestoreForCase(cur, log), { base: cur, select: false });
+      cases++;
+    }
+    let journal = 0;
+    for (const date of last.journalDates || []) {
+      const ref = doc(db, "users", user.uid, "journal", date);
+      const removed = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(ref);
+        // 복원한 뒤 다시 저장한 일지는 지우지 않는다
+        if (!snap.exists() || snap.data()?._savedAt !== last.at) return false;
+        tx.delete(ref);
+        return true;
+      });
+      if (removed) journal++; else skipped++;
+    }
+    await setDoc(doc(db, "users", user.uid, "meta", "restoreLog"), { undone: arrayUnion(last.at) }, { merge: true });
+    return { cases, journal, skipped };
+  }, [user, readRestoreLog, readServerSnapshot, saveCase]);
 
   const handleToken = useCallback((t) => {
     sessionStorage.setItem("googleToken", t); setGoogleToken(t);
@@ -617,6 +861,20 @@ export default function App() {
             <button onClick={() => setCaseSaveMsg(null)} className="flex-shrink-0 text-white/80 hover:text-white text-base leading-none px-1">✕</button>
           </div>
         )}
+        {/* 사건 저장 대기·실패 안내 */}
+        {writerState.waiting && (
+          <div className="px-4 py-2 text-sm flex items-center justify-between gap-3 bg-amber-500 text-white">
+            <span className="font-medium break-all">⏱ 서버 연결 대기 중 — 저장 대기 {writerState.pending}건. 연결되면 자동으로 저장합니다. 이 창을 닫지 마세요.</span>
+            <button onClick={() => writerRef.current?.retryNow()}
+              className="flex-shrink-0 text-xs border border-white/60 rounded px-2 py-1 hover:bg-white/10">지금 다시 시도</button>
+          </div>
+        )}
+        {writerState.error && (
+          <div className="px-4 py-2 text-sm flex items-center justify-between gap-3 bg-red-600 text-white">
+            <span className="font-medium break-all">✗ 사건 저장 실패({writerState.error.code || writerState.error.message}). 새로고침해 서버에 저장된 내용을 확인해 주세요.</span>
+            <button onClick={() => writerRef.current?.clearError()} className="flex-shrink-0 text-white/80 hover:text-white text-base leading-none px-1">✕</button>
+          </div>
+        )}
         {/* 헤더 */}
         <div style={{ background: "#0F172A" }} className="flex items-center justify-between px-4 sm:px-6 py-3">
           <div className="flex items-center gap-3">
@@ -641,11 +899,13 @@ export default function App() {
               className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors">
               <span>📝</span> <span className="hidden sm:inline">일반 할 일</span>
             </button>
-            <button onClick={syncCalendar} disabled={calSyncing}
+            <button onClick={syncCalendar} disabled={calSyncing || !casesSynced}
+              title={casesSynced ? "LBOX·업무 캘린더 동기화" : "서버 데이터 확인 중…"}
               className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50">
               <span>📅</span> <span className="hidden sm:inline">{calSyncing ? "동기화 중…" : "캘린더"}</span>
             </button>
-            <button onClick={syncTasks} disabled={taskSyncing}
+            <button onClick={syncTasks} disabled={taskSyncing || !casesSynced}
+              title={casesSynced ? "Google Tasks 동기화" : "서버 데이터 확인 중…"}
               className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50">
               <span>📋</span> <span className="hidden sm:inline">{taskSyncing ? "동기화 중…" : "할 일"}</span>
             </button>
@@ -667,9 +927,13 @@ export default function App() {
                   <div className="absolute right-0 mt-1 w-44 bg-white rounded-lg shadow-xl border border-slate-200 py-1 z-50">
                     <div className="px-3 py-1 text-[10px] text-slate-400 uppercase tracking-wider">구글시트 (1회성)</div>
                     <button onClick={() => { setShowAdv(false); runMigration(); }}
-                      className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"><span>📥</span> 가져오기</button>
+                      className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"
+                      title="옛 '사건진행부' 시트에서 앱에 없는 사건만 추가합니다 (내보내기 파일 복원은 '데이터 복원')"><span>📥</span> 사건진행부 가져오기</button>
                     <button onClick={() => { setShowAdv(false); runExport(); }}
                       className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"><span>📤</span> 내보내기 (사건+업무일지)</button>
+                    <button onClick={() => { setShowAdv(false); setShowRestore(true); }}
+                      className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"
+                      title="예전 내보내기 파일과 비교해 없어진 기록·되돌아간 상태를 되살립니다"><span>🛟</span> 데이터 복원</button>
                     <div className="px-3 py-1 mt-1 border-t border-slate-100 text-[10px] text-slate-400 uppercase tracking-wider">일괄 작업</div>
                     <button onClick={() => { setShowAdv(false); bulkMarkRetainersPaid(); }}
                       className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"><span>💰</span> 착수금 일괄 완납처리</button>
@@ -679,6 +943,7 @@ export default function App() {
             </div>
             </>)}
             <div className="flex items-center gap-2 ml-2 pl-2 border-l border-slate-600">
+              {!casesSynced && <span className="text-amber-300 text-[10px]" title="기기에 저장된 사본을 보여 주는 중입니다. 서버 데이터를 받으면 자동 동기화가 시작됩니다.">서버 확인 중…</span>}
               <span className="text-slate-500 text-[10px] hidden sm:inline" title={`빌드: ${__BUILD_TIME__}`}>v{__BUILD_TIME__}</span>
               <span className="text-slate-300 text-xs hidden sm:inline">{user.displayName}</span>
               <button onClick={() => { sessionStorage.removeItem("googleToken"); setGoogleToken(null); signOut(auth); }}
@@ -836,9 +1101,10 @@ export default function App() {
                   ))}
                 </div>
                 <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5">
-                  {activeTab === "overview" && <OverviewTab c={selected} onUpdate={saveCase} />}
-                  {activeTab === "todos" && <TodosTab c={selected} onUpdate={saveCase} onPushTodo={pushTaskToCalendar} onOpenBriefs={() => setActiveTab("briefs")} />}
-                  {activeTab === "briefs" && <BriefsTab c={selected} onUpdate={saveCase} />}
+                  {/* base: 이 화면이 보고 있던 판본 — 바뀐 부분만 서버 최신 문서에 얹는다 */}
+                  {activeTab === "overview" && <OverviewTab c={selected} onUpdate={(next) => saveCase(next, { base: selected })} />}
+                  {activeTab === "todos" && <TodosTab c={selected} onUpdate={(next) => saveCase(next, { base: selected })} onPushTodo={pushTaskToCalendar} onOpenBriefs={() => setActiveTab("briefs")} />}
+                  {activeTab === "briefs" && <BriefsTab c={selected} onUpdate={(next) => saveCase(next, { base: selected })} />}
                 </div>
               </>
             ) : (
@@ -895,10 +1161,20 @@ export default function App() {
           onClose={() => setUnmatchedCalendarEvents(null)}
         />
       )}
+      {showRestore && (
+        <RestoreModal
+          defaultInput={(() => { try { return localStorage.getItem("restoreSourceUrl") || ""; } catch { return ""; } })()}
+          onAnalyze={analyzeRestore}
+          onApply={applyRestore}
+          loadLastRestore={loadLastRestore}
+          onUndo={undoLastRestore}
+          onClose={() => setShowRestore(false)}
+        />
+      )}
       {showForm && (
         <CaseFormModal
           initial={editCase}
-          onSave={saveCase}
+          onSave={(form) => saveCase(form, { base: editCase && editCase.id && !editCase._isNew ? editCase : null })}
           onClose={() => { setShowForm(false); setEditCase(null); }}
         />
       )}

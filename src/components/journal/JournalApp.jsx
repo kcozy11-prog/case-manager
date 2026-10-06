@@ -8,6 +8,8 @@ import {
   buildLearnedTopicOptions,
   diffResolvedItems, createTaskCompletion, createPendingDocCompletion, mergeCompletions, pruneCompletionsForActive,
   carryForwardDelegatedTasks, createDelegatedCompletion, rescheduleDelegatedTask,
+  dropResurrectedPendingDocs, dropResurrectedTodayTasks, dropResurrectedDelegatedTasks,
+  findStaleCarriedPendingDocs, findStaleCarriedTodayTasks, latestEntryDateBefore,
 } from "../../journalLogic";
 import ChecklistEditor from "./ChecklistEditor";
 import CaseNoteEditor from "./CaseNoteEditor";
@@ -134,26 +136,53 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
   const loadedDateRef = useRef(null);
   // 마지막으로 폼에 반영한 서버 판본(_savedAt). 이 값이 그대로면 스냅샷이 와도 폼을 다시 만들지 않는다.
   const loadedSavedAtRef = useRef(null);
+  // 지금 폼이 서버 판본으로 만들어졌는지 (false = 기기 캐시로 만든 폼)
+  const formFromServerRef = useRef(false);
+  // 이 기기에서 저장한 판본(_savedAt) — 다른 기기 저장과 구별용
+  const ownSavedAtRef = useRef(new Set());
   const formRef = useRef(form);
   useEffect(() => { formRef.current = form; }, [form]);
   const casesRef = useRef(cases);
   useEffect(() => { casesRef.current = cases; }, [cases]);
+  // 서버 판본을 받았는지 / 서버 응답이 없어 기기 사본으로 진행하는지
+  const [entriesFromServer, setEntriesFromServer] = useState(false);
+  const [offlineFallback, setOfflineFallback] = useState(false);
+  const entriesReady = entriesFromServer || offlineFallback;
+  const [cleanedNotice, setCleanedNotice] = useState(null); // { date, count }
+  // 저장된 일지에 섞여 든 옛 항목(직전 일지에 없던 것) — 자동으로 지우지 않고 보여 준다
+  const [staleSuggestion, setStaleSuggestion] = useState(null); // { date, prevDate, docs, tasks }
+  const [staleFormNotice, setStaleFormNotice] = useState(false);
+  const [reloadTick, setReloadTick] = useState(0);
 
   // 실시간 구독
+  // 기기 캐시(오래된 사본일 수 있음)만 받은 상태에서는 작성 폼을 만들지 않는다. 캐시로 이월을 계산하면
+  // 이미 처리한 항목이 되살아나기 때문이다. 8초 안에 서버 응답이 없으면 오프라인으로 보고 사본으로 진행한다.
   useEffect(() => {
-    if (!user) { setEntries({}); return; }
-    return subscribeJournal(user.uid, setEntries);
+    setEntriesFromServer(false);
+    setOfflineFallback(false);
+    if (!user) { setEntries({}); return undefined; }
+    const timer = setTimeout(() => setOfflineFallback(true), 8000);
+    const unsub = subscribeJournal(user.uid, (map, meta) => {
+      setEntries(map);
+      if (!meta?.fromCache) { setEntriesFromServer(true); clearTimeout(timer); }
+    });
+    return () => { clearTimeout(timer); unsub(); };
   }, [user]);
 
   // 현재 날짜의 일지 로드 (구독으로 entries 갱신될 때 + 날짜 변경 시)
   useEffect(() => {
-    // 편집 중(dirty)이면 덮어쓰지 않음
-    if (dirty && loadedDateRef.current === currentDate) return;
+    if (!entriesReady) return;
+    // 편집 중(dirty)이면 덮어쓰지 않음 — 다만 기기 사본으로 만든 폼이면 서버 판본이 왔음을 알린다
+    if (dirty && loadedDateRef.current === currentDate) {
+      if (entriesFromServer && !formFromServerRef.current) setStaleFormNotice(true);
+      return;
+    }
     const base = entries[currentDate] || null;
     // 같은 날짜가 이미 로드되어 있고 서버 판본(_savedAt)도 그대로면 폼을 다시 만들지 않는다.
     // 저장 반향이나 다른 날짜 문서의 스냅샷마다 폼이 리셋되어, 입력 중 한글 조합이 끊기고
-    // (초성만 남음) 값이 롤백되던 문제를 막는다.
-    if (loadedDateRef.current === currentDate && ((base && base._savedAt) || null) === loadedSavedAtRef.current) return;
+    // (초성만 남음) 값이 롤백되던 문제를 막는다. 단, 기기 사본으로 만든 폼은 서버 판본이 오면 다시 만든다.
+    const sameVersion = loadedDateRef.current === currentDate && ((base && base._savedAt) || null) === loadedSavedAtRef.current;
+    if (sameVersion && (formFromServerRef.current || !entriesFromServer)) return;
     const f = entryToForm(base, currentDate);
     // 저장 이력이 없는 새 날짜에만 어제 '내일 할 일'/제출 예정 서면을 자동 이월
     // (저장된(빈) 일지에는 이월하지 않아, 사용자가 지운 항목이 되살아나지 않음)
@@ -165,12 +194,37 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
       if (carriedTasks.length) f.todayTasks = carriedTasks;
       if (carriedDocs.length) f.pendingDocItems = carriedDocs;
     }
+    // 이미 처리한(앞선 날짜에 완료 기록이 있는) 항목이 되살아나 저장돼 있으면 목록에서 거둔다
+    const docs = dropResurrectedPendingDocs(entries, currentDate, f.pendingDocItems);
+    const tasks = dropResurrectedTodayTasks(entries, currentDate, f.todayTasks);
+    const delegated = dropResurrectedDelegatedTasks(entries, currentDate, f.delegatedItems);
+    f.pendingDocItems = docs.items;
+    f.todayTasks = tasks.items;
+    f.delegatedItems = delegated.items;
+    const cleanedCount = docs.dropped.length + tasks.dropped.length + delegated.dropped.length;
+    setCleanedNotice(cleanedCount ? { date: currentDate, count: cleanedCount } : null);
+    const staleDocs = base ? findStaleCarriedPendingDocs(entries, currentDate, f.pendingDocItems) : [];
+    const staleTasks = base ? findStaleCarriedTodayTasks(entries, currentDate, f.todayTasks) : [];
+    setStaleSuggestion(staleDocs.length || staleTasks.length
+      ? { date: currentDate, prevDate: latestEntryDateBefore(entries, currentDate), docs: staleDocs, tasks: staleTasks }
+      : null);
     setForm(f);
     loadedDateRef.current = currentDate;
     loadedSavedAtRef.current = (base && base._savedAt) || null;
+    formFromServerRef.current = entriesFromServer;
+    setStaleFormNotice(false);
     setDirty(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentDate, entries, user]);
+  }, [currentDate, entries, user, entriesReady, entriesFromServer, reloadTick]);
+
+  // 기기 사본으로 만든 폼을 버리고 서버 판본으로 다시 만든다 (입력 중이던 내용은 버려진다)
+  const reloadFromServer = useCallback(() => {
+    loadedSavedAtRef.current = Symbol("reload");
+    formFromServerRef.current = false;
+    setStaleFormNotice(false);
+    setDirty(false);
+    setReloadTick((t) => t + 1);
+  }, []);
 
   const update = useCallback((patch) => {
     setForm((prev) => ({ ...prev, ...patch }));
@@ -229,6 +283,18 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     setDirty(true);
   }, [currentDate]);
 
+  // 섞여 든 옛 항목을 목록에서 뺀다 — 완료 기록을 남겨 다른 기기·다음 날에도 다시 나오지 않게 한다
+  const removeStaleItems = useCallback(() => {
+    const sug = staleSuggestion;
+    if (!sug) return;
+    const cur = formRef.current;
+    const docIds = new Set(sug.docs.map((i) => i.id));
+    const taskIds = new Set(sug.tasks.map((i) => i.id));
+    if (docIds.size) handlePendingDocsChange((cur.pendingDocItems || []).filter((i) => !docIds.has(i.id)));
+    if (taskIds.size) handleTodayTasksChange((cur.todayTasks || []).filter((i) => !taskIds.has(i.id)));
+    setStaleSuggestion(null);
+  }, [staleSuggestion, handlePendingDocsChange, handleTodayTasksChange]);
+
   const markDelegatedDone = useCallback((id) => {
     const cur = formRef.current;
     handleDelegatedChange((cur.delegatedItems || []).map((item) =>
@@ -240,15 +306,33 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     handleDelegatedChange((cur.delegatedItems || []).filter((item) => item.id !== id));
   }, [handleDelegatedChange]);
 
+  // 이 기기에서 저장할 때 쓸 판본 표시(_savedAt)를 만들어 기억해 둔다
+  const nextOwnStamp = useCallback(() => {
+    const stamp = new Date().toISOString();
+    ownSavedAtRef.current.add(stamp);
+    return stamp;
+  }, []);
+
   const save = useCallback(async () => {
-    if (!user) return;
+    if (!user || !entriesReady) return;
+    // 이 화면을 연 뒤 다른 기기(또는 다른 창)가 같은 날짜 일지를 저장했다면 덮어쓰기 전에 묻는다
+    const serverSavedAt = entries[currentDate]?._savedAt || null;
+    if (serverSavedAt && serverSavedAt !== loadedSavedAtRef.current && !ownSavedAtRef.current.has(serverSavedAt)) {
+      const ok = window.confirm(
+        "이 날짜 일지가 다른 기기(또는 다른 창)에서 먼저 저장되었습니다.\n"
+        + "지금 저장하면 그 내용을 이 화면 내용으로 덮어씁니다. 계속할까요?\n\n"
+        + "(취소를 누르면 저장하지 않습니다. 입력한 내용을 따로 옮겨 둔 뒤 새로고침하면 최신 판본을 볼 수 있습니다.)"
+      );
+      if (!ok) return;
+    }
     const entry = formToEntry({ ...form, entryDate: currentDate });
-    const saved = await saveJournalEntry(user.uid, currentDate, entry);
+    const saved = await saveJournalEntry(user.uid, currentDate, entry, nextOwnStamp());
     if (saved && saved._savedAt) loadedSavedAtRef.current = saved._savedAt;
     setDirty(false);
+    setCleanedNotice(null);
     setSavedFlash(true);
     setTimeout(() => setSavedFlash(false), 1800);
-  }, [user, form, currentDate]);
+  }, [user, form, currentDate, entries, entriesReady, nextOwnStamp]);
 
   const openDate = useCallback((k) => {
     setCurrentDate(k);
@@ -268,27 +352,28 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     const next = { ...cur, [fieldName]: arr };
     setForm(next);
     if (user) {
-      saveJournalEntry(user.uid, currentDate, formToEntry({ ...next, entryDate: currentDate }))
+      saveJournalEntry(user.uid, currentDate, formToEntry({ ...next, entryDate: currentDate }), nextOwnStamp())
         .then((saved) => { if (saved && saved._savedAt) loadedSavedAtRef.current = saved._savedAt; })
         .catch((e) => console.warn("[journal] 캘린더 후 저장 실패", e));
     }
     return eventId;
-  }, [onPushTask, user, currentDate]);
+  }, [onPushTask, user, currentDate, nextOwnStamp]);
 
   // ── 일지 → 사건 기록 (공통: 사건 갱신 후 일지 항목에 연동 식별자 기록 + 즉시 저장) ──
-  const applyCaseRecord = useCallback(async (fieldName, itemId, patch, updatedCase) => {
+  // baseCase: 기록을 만들 때 출발한 사건 판본 — 바뀐 부분만 서버 최신 사건 문서에 얹는다
+  const applyCaseRecord = useCallback(async (fieldName, itemId, patch, updatedCase, baseCase) => {
     if (!onUpdateCase) throw new Error("사건 연동을 사용할 수 없습니다.");
-    await onUpdateCase(updatedCase);
+    await onUpdateCase(updatedCase, baseCase);
     const cur = formRef.current;
     const arr = (cur[fieldName] || []).map((it) => (it.id === itemId ? { ...it, ...patch } : it));
     const next = { ...cur, [fieldName]: arr };
     setForm(next);
     if (user) {
-      saveJournalEntry(user.uid, currentDate, formToEntry({ ...next, entryDate: currentDate }))
+      saveJournalEntry(user.uid, currentDate, formToEntry({ ...next, entryDate: currentDate }), nextOwnStamp())
         .then((saved) => { if (saved && saved._savedAt) loadedSavedAtRef.current = saved._savedAt; })
         .catch((e) => console.warn("[journal] 사건 기록 후 저장 실패", e));
     }
-  }, [onUpdateCase, user, currentDate]);
+  }, [onUpdateCase, user, currentDate, nextOwnStamp]);
 
   // ① 사건 진행 기록 → 진행경과(timeline)
   const handleRecordProgress = useCallback(async (item, fieldName) => {
@@ -302,7 +387,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
       detail: item.detail || "",
       activityType: item.activityType || DEFAULT_TIMELINE_ACTIVITY_TYPE,
     });
-    await applyCaseRecord(fieldName, item.id, { timelineId, recordedAt: new Date().toISOString() }, updated);
+    await applyCaseRecord(fieldName, item.id, { timelineId, recordedAt: new Date().toISOString() }, updated, c);
   }, [applyCaseRecord, currentDate]);
 
   // ② 통화 상담 기록 → 진행경과(+ 체크 시 의뢰인요청 메모)
@@ -326,7 +411,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
       });
       patch.memoId = memoId;
     }
-    await applyCaseRecord(fieldName, item.id, patch, updated);
+    await applyCaseRecord(fieldName, item.id, patch, updated, c);
   }, [applyCaseRecord, currentDate]);
 
   // ⑤ 제출 예정 서면 → 사건 제출대기서면(briefs)
@@ -340,12 +425,12 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
       preparedDate: item.dueDate || item.sourceDate || currentDate,
       details: item.details || "",
     });
-    await applyCaseRecord(fieldName, item.id, { cmBriefId: briefId, cmBriefSyncedAt: new Date().toISOString() }, updated);
+    await applyCaseRecord(fieldName, item.id, { cmBriefId: briefId, cmBriefSyncedAt: new Date().toISOString() }, updated, c);
   }, [applyCaseRecord, currentDate]);
 
   const removeEntry = useCallback(async (k) => {
     if (!user) return;
-    if (!window.confirm(`${k} 일지를 삭제하시겠습니까?`)) return;
+    if (!window.confirm(`${k} 일지를 삭제하시겠습니까?\n\n이 날짜에 남긴 완료 처리 기록도 함께 지워져, 이미 처리한 할 일·서면이 다음 날 다시 이월될 수 있습니다.`)) return;
     await deleteJournalEntry(user.uid, k);
     if (k === currentDate) { setCurrentDate(todayKey()); setView("write"); }
   }, [user, currentDate]);
@@ -447,8 +532,48 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
 
       {/* 본문 */}
       <div className="flex-1 overflow-y-auto bg-slate-50">
-        {view === "write" && (
+        {view === "write" && !entriesReady && (
+          <div className="max-w-3xl mx-auto px-4 sm:px-8 py-16 text-center text-sm text-slate-400">
+            업무일지를 서버에서 불러오는 중입니다…
+            <div className="text-xs text-slate-300 mt-1">기기에 남은 옛 사본으로 이월 목록을 만들지 않도록, 서버 판본을 받은 뒤 작성 화면을 엽니다.</div>
+          </div>
+        )}
+        {view === "write" && entriesReady && (
           <div className="max-w-3xl mx-auto px-4 sm:px-8 py-6">
+            {offlineFallback && !entriesFromServer && (
+              <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                서버에 연결되지 않아 이 기기에 저장된 사본으로 보여 줍니다. 다른 기기에서 처리한 내용이 빠져 있을 수 있으니, 연결된 뒤 확인하고 저장하세요.
+              </div>
+            )}
+            {staleFormNotice && (
+              <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 flex items-center gap-2 flex-wrap">
+                <span className="flex-1 min-w-0">서버 판본이 도착했습니다. 지금 화면은 기기 사본으로 만든 것이라 이월 항목이 다를 수 있습니다.</span>
+                <button onClick={reloadFromServer}
+                  className="flex-shrink-0 px-2 py-1 rounded border border-amber-300 hover:bg-amber-100">서버 기준으로 다시 불러오기(입력 내용 버림)</button>
+              </div>
+            )}
+            {staleSuggestion && staleSuggestion.date === currentDate && (
+              <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
+                <div className="font-medium mb-1">
+                  직전 일지({staleSuggestion.prevDate})에 없던 옛 항목 {staleSuggestion.docs.length + staleSuggestion.tasks.length}건이 이 날짜 목록에 들어 있습니다.
+                </div>
+                <div className="text-amber-800 mb-1.5">이미 처리한 항목이 예전 이월 방식 때문에 되살아난 것일 수 있습니다. 확인 후 빼면 완료한 것으로 기록되어 다시 나오지 않습니다.</div>
+                <ul className="list-disc pl-5 space-y-0.5 mb-2">
+                  {staleSuggestion.docs.map((i) => <li key={`d-${i.id}`}>제출 예정 서면: {i.text}{i.dueDate ? ` (~${i.dueDate})` : ""} <span className="text-amber-600">· {i.sourceDate} 기록</span></li>)}
+                  {staleSuggestion.tasks.map((i) => <li key={`t-${i.id}`}>오늘 할 일: {i.text} <span className="text-amber-600">· {i.sourceDate} 기록</span></li>)}
+                </ul>
+                <div className="flex gap-2 flex-wrap">
+                  <button onClick={removeStaleItems} className="px-2 py-1 rounded border border-amber-300 bg-white hover:bg-amber-100">이 {staleSuggestion.docs.length + staleSuggestion.tasks.length}건 목록에서 빼기(처리한 것으로 기록)</button>
+                  <button onClick={() => setStaleSuggestion(null)} className="px-2 py-1 rounded border border-amber-200 hover:bg-amber-100">그대로 두기</button>
+                </div>
+              </div>
+            )}
+            {cleanedNotice && cleanedNotice.date === currentDate && (
+              <div className="mb-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 flex items-start gap-2">
+                <span className="flex-1 min-w-0">이미 처리한 항목 {cleanedNotice.count}건이 다시 나타나 있어 목록에서 정리했습니다(앞선 날짜의 완료 기록 기준). 저장하면 정리된 목록이 보관됩니다.</span>
+                <button onClick={() => setCleanedNotice(null)} className="flex-shrink-0 text-slate-400 hover:text-slate-600">✕</button>
+              </div>
+            )}
             {/* 헤더 */}
             <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
               <div className="flex items-center gap-3">
