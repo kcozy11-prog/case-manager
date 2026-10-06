@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseLboxEvent, syncEventsWithCases, isLboxEvent, scoreLboxCaseMatch, mergeCalendarEventIntoCase, findCaseLinkedToEvent, calendarSyncTimeMin, calendarSyncTimeMax, syncWorkEventsWithCases, WORK_SUMMARY_MEMO_TITLE } from "./calendarSync.js";
+import { parseLboxEvent, syncEventsWithCases, isLboxEvent, scoreLboxCaseMatch, mergeCalendarEventIntoCase, findCaseLinkedToEvent, calendarSyncTimeMin, calendarSyncTimeMax, syncWorkEventsWithCases, WORK_SUMMARY_MEMO_TITLE, matchTasksToCases, mergeTaskIntoCaseTodos } from "./calendarSync.js";
 
 test("isLboxEvent — 키워드/출처로 식별", () => {
   assert.equal(isLboxEvent({ _src: "LBOX", summary: "아무거나" }), true);
@@ -409,4 +409,67 @@ test("예전에 날짜별로 쌓인 요약 메모는 최근 것 하나로 정리
   const summary = memos.find((m) => m.title === WORK_SUMMARY_MEMO_TITLE);
   assert.equal(summary.id, 2, "가장 최근 날짜의 메모 id 유지");
   assert.match(summary.content, /김민준 의뢰인 미팅/);
+});
+
+// ── 종결 사건과 자동 분류 ───────────────────────────────────────────────────
+const gTask = (over = {}) => ({
+  id: "t1", title: "2026가합12345 준비서면 작성", notes: "쟁점 정리", status: "needsAction",
+  due: "2026-10-20T00:00:00.000Z", updated: "2026-10-01T00:00:00.000Z", _listName: "회사 업무", ...over,
+});
+
+test("mergeTaskIntoCaseTodos: 바뀐 것이 없으면 저장 대상이 아니다(같은 사건 객체 반환)", () => {
+  const first = mergeTaskIntoCaseTodos({ id: "c1", todos: [] }, gTask());
+  assert.equal(first.added, true);
+  const again = mergeTaskIntoCaseTodos(first.caseObj, gTask());
+  assert.equal(again.added, false);
+  assert.equal(again.updated, false);
+  assert.equal(again.caseObj, first.caseObj);
+});
+
+test("mergeTaskIntoCaseTodos: 제목·완료 등이 바뀌면 갱신하되 앱에서 정한 우선순위는 지킨다", () => {
+  const base = mergeTaskIntoCaseTodos({ id: "c1", todos: [] }, gTask()).caseObj;
+  const highPriority = { ...base, todos: base.todos.map((t) => ({ ...t, priority: "높음" })) };
+  const r = mergeTaskIntoCaseTodos(highPriority, gTask({ title: "2026가합12345 준비서면 작성(수정)", status: "completed", updated: "2026-10-02T00:00:00.000Z" }));
+  assert.equal(r.updated, true);
+  assert.equal(r.caseObj.todos[0].text, "2026가합12345 준비서면 작성(수정)");
+  assert.equal(r.caseObj.todos[0].done, true);
+  assert.equal(r.caseObj.todos[0].priority, "높음");
+  assert.equal(r.caseObj.todos[0].id, base.todos[0].id);
+  assert.equal(highPriority.todos[0].text, "2026가합12345 준비서면 작성", "원본 불변");
+});
+
+test("matchTasksToCases: 이미 연결된 할 일은 종결 사건이어도 그 사건을 따르고, 새 할 일은 진행 중 사건에만 연결", () => {
+  const cases = [
+    { id: "closed", title: "김민준 대여금", client: "김민준", opponent: "", caseNumber: "2026가합12345", status: "종결",
+      todos: [{ id: 1, text: "옛 할 일", calendarTaskId: "linked-1" }] },
+    { id: "active", title: "이서연 이혼", client: "이서연", opponent: "", caseNumber: "2026드단777", status: "진행중", todos: [] },
+  ];
+  const tasks = [
+    gTask({ id: "linked-1", title: "아무 제목" }),
+    gTask({ id: "new-closed", title: "2026가합12345 판결문 확인" }),
+    gTask({ id: "new-active", title: "2026드단777 조정기일 준비" }),
+    gTask({ id: "new-name", title: "이서연 자료 요청" }),
+    gTask({ id: "new-closed-name", title: "김민준 연락" }),
+  ];
+  const { matched, unmatched } = matchTasksToCases(tasks, cases);
+  const where = Object.fromEntries(matched.map(({ task, caseObj }) => [task.id, caseObj.id]));
+  assert.deepEqual(where, { "linked-1": "closed", "new-active": "active", "new-name": "active" });
+  assert.deepEqual(unmatched.map(({ task }) => task.id), ["new-closed", "new-closed-name"]);
+});
+
+test("syncWorkEventsWithCases: 종결 사건에는 업무 요약 메모를 만들지 않는다", () => {
+  const closed = { ...workCase(), id: "w-closed", status: "종결" };
+  const { updates, newMemoCount } = syncWorkEventsWithCases(workEvents(), [closed], { today: "2026-09-21", makeId: () => 1 });
+  assert.equal(newMemoCount, 0);
+  assert.equal(updates.size, 0);
+  const active = { ...workCase(), id: "w-active", status: "진행중" };
+  const r = syncWorkEventsWithCases(workEvents(), [closed, active], { today: "2026-09-21", makeId: () => 1 });
+  assert.deepEqual([...r.updates.keys()], ["w-active"]);
+});
+
+test("LBOX 기일은 사건번호가 같은 사건 중 목록상 첫 사건에 반영 (색인 방식에서도 동일)", () => {
+  const mk = (id, status) => ({ id, title: id, client: "", opponent: "", caseNumber: "2026가단100906", court: "", status, hearings: [], memos: [], timeline: [] });
+  const events = [{ id: "evX", summary: "박제군, 변론, 수원지방법원 안양지원-2026가단100906 제406호 법정 11:20", start: { date: "2026-11-01" } }];
+  const { updates } = syncEventsWithCases(events, [mk("first", "종결"), mk("second", "진행중")], { today: "2026-10-06" });
+  assert.deepEqual([...updates.keys()], ["first"]);
 });

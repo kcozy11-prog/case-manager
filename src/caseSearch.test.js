@@ -8,9 +8,20 @@ const CASES = [
   { id: 'c3', title: '횡령 형사', caseNumber: '2026고단99', client: '최영호' },
 ];
 
-test('빈 쿼리는 전체를 반환', () => {
+test('빈 쿼리는 진행 중 사건 전체를 반환', () => {
   assert.deepEqual(filterCasesByQuery(CASES, '').map(c => c.id), ['c1', 'c2', 'c3']);
   assert.deepEqual(filterCasesByQuery(CASES, '   ').map(c => c.id), ['c1', 'c2', 'c3']);
+});
+
+test('종결 사건은 검색어가 없을 때 숨기고, 검색하면 진행 중 사건 다음에 보인다', () => {
+  const cases = [
+    { id: 'old', title: '김민준 대여금', caseNumber: '2024가단1', client: '김민준', status: '종결' },
+    { id: 'now', title: '김민준 손해배상', caseNumber: '2026가합2', client: '김민준', status: '진행중' },
+    { id: 'etc', title: '이서연 이혼', caseNumber: '2026드단3', client: '이서연' },
+  ];
+  assert.deepEqual(filterCasesByQuery(cases, '').map(c => c.id), ['now', 'etc']);
+  assert.deepEqual(filterCasesByQuery(cases, '김민준').map(c => c.id), ['now', 'old']);
+  assert.deepEqual(filterCasesByQuery(cases, '2024가단').map(c => c.id), ['old']);
 });
 
 test('사건명 부분 일치', () => {
