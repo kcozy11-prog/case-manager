@@ -73,3 +73,11 @@ test("mergeGoogleTaskIntoStandaloneTodos updates an existing Google task and pre
   assert.equal(result.todos[0].done, true);
   assert.equal(result.todos[0].dueDate, "2026-04-20");
 });
+
+test("mergeGoogleTaskIntoStandaloneTodos keeps an app-side completion while the Google task is unchanged", () => {
+  const existing = [{ id: 1, text: "공통 업무", done: true, calendarTaskId: "task-9", sourceUpdatedAt: "2026-10-01T00:00:00.000Z" }];
+  const task = { id: "task-9", title: "공통 업무", status: "needsAction", updated: "2026-10-01T00:00:00.000Z" };
+  assert.equal(mergeGoogleTaskIntoStandaloneTodos(existing, task).todos[0].done, true);
+  const changed = { ...task, updated: "2026-10-03T00:00:00.000Z" };
+  assert.equal(mergeGoogleTaskIntoStandaloneTodos(existing, changed).todos[0].done, false);
+});

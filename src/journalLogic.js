@@ -175,14 +175,23 @@ function collectTaskCompletionKeys(entries = {}, targetDate) {
   return completed;
 }
 
+// 대상 날짜보다 앞선 날짜 중 가장 최근에 저장된 일지 날짜
+export function latestEntryDateBefore(entries = {}, targetDate) {
+  return Object.keys(entries || {})
+    .filter((dateKey) => dateKey < targetDate && entries[dateKey])
+    .sort((a, b) => b.localeCompare(a))[0] || null;
+}
+
+// 이월은 '가장 최근에 저장한 일지'에서만 받는다.
+// 예전에는 지난 모든 날짜를 훑어, 그날 목록에서 빠졌지만 완료 기록이 없는 항목(9. 4. 이후 새 날짜에
+// 이월이 안 되던 동안 처리한 서면 등)이 날짜를 옮길 때마다 한꺼번에 되살아났다.
 export function carryForwardTomorrowTasks(entries = {}, targetDate) {
   const completedKeys = collectTaskCompletionKeys(entries, targetDate);
   const current = parseJsonArray(entries[targetDate]?.todayTasks).map((item) => normalizeTaskItem(item, 'today')).filter(Boolean);
   const existingTexts = new Set(current.map((item) => item.text));
 
-  const previousDates = Object.keys(entries)
-    .filter((dateKey) => dateKey < targetDate)
-    .sort((a, b) => b.localeCompare(a));
+  const latest = latestEntryDateBefore(entries, targetDate);
+  const previousDates = latest ? [latest] : [];
 
   previousDates.forEach((dateKey) => {
     const tomorrowTasks = parseJsonArray(entries[dateKey]?.tomorrowTasks)
@@ -424,9 +433,8 @@ export function carryForwardPendingDocs(entries = {}, targetDate) {
   const existingKeys = new Set();
   current.forEach((item) => addPendingDocIdentityKeys(existingKeys, item, item.sourceDate || targetDate));
 
-  const previousDates = Object.keys(entries)
-    .filter((dateKey) => dateKey < targetDate)
-    .sort((a, b) => b.localeCompare(a));
+  const latest = latestEntryDateBefore(entries, targetDate);
+  const previousDates = latest ? [latest] : [];
 
   previousDates.forEach((dateKey) => {
     const pendingDocs = parseJsonArray(entries[dateKey]?.pendingDocItems)
@@ -495,6 +503,86 @@ function addDelegatedIdentityKeys(keySet, item, fallbackSourceDate = '') {
 
 function hasDelegatedIdentity(keySet, item, fallbackSourceDate = '') {
   return delegatedCompletionKeys(item, fallbackSourceDate).some((key) => keySet.has(key));
+}
+
+// ── 이미 처리한 항목이 되살아난 경우 정리 ───────────────────────────────────────
+// 오래된 기기 캐시로 이월을 계산하면, 이미 체크·삭제해 완료 기록이 남은 항목이 그날 목록에
+// 다시 들어가 저장될 수 있다(몇 달 전 처리한 서면이 '제출 예정'으로 다시 보이는 현상).
+// 그날보다 앞선 날짜에 같은 항목(같은 id·출처일, 또는 같은 내용·기한·출처일)의 완료 기록이 있으면
+// 되살아난 항목으로 보고 목록에서 거둔다. 그날 새로 만든 항목(출처일 = 그날)은 건드리지 않는다.
+function collectEarlierCompletionKeys(entries, targetDate, field, normalize, keysOf) {
+  const keys = new Set();
+  Object.keys(entries || {})
+    .filter((dateKey) => dateKey < targetDate)
+    .forEach((dateKey) => {
+      parseJsonArray(entries[dateKey]?.[field])
+        .map((record) => normalize(record, dateKey))
+        .filter(Boolean)
+        .forEach((record) => keysOf(record, record.sourceDate || dateKey).forEach((key) => keys.add(key)));
+    });
+  return keys;
+}
+
+function splitResurrected(items, isResurrected) {
+  const kept = [];
+  const dropped = [];
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    if (item && !item.done && isResurrected(item)) dropped.push(item);
+    else kept.push(item);
+  });
+  return { items: kept, dropped };
+}
+
+export function dropResurrectedPendingDocs(entries = {}, targetDate, items = []) {
+  const earlier = collectEarlierCompletionKeys(entries, targetDate, 'pendingDocCompletions', normalizePendingDocCompletion, pendingDocCompletionKeys);
+  if (!earlier.size) return { items: Array.isArray(items) ? items : [], dropped: [] };
+  return splitResurrected(items, (item) => hasPendingDocCompletion(earlier, item, item.sourceDate || targetDate));
+}
+
+// 위임 업무: 출처일까지 같은 기록만 본다(출처일 없는 넓은 키는 쓰지 않음)
+function delegatedSourceKeys(item, fallbackSourceDate = '') {
+  return delegatedCompletionKeys(item, fallbackSourceDate).filter((key) => key.includes('|source:'));
+}
+
+export function dropResurrectedDelegatedTasks(entries = {}, targetDate, items = []) {
+  const earlier = collectEarlierCompletionKeys(entries, targetDate, 'delegatedCompletions', normalizeDelegatedCompletion, delegatedSourceKeys);
+  if (!earlier.size) return { items: Array.isArray(items) ? items : [], dropped: [] };
+  return splitResurrected(items, (item) => delegatedSourceKeys(item, item.sourceDate || targetDate).some((key) => earlier.has(key)));
+}
+
+// 오늘 할 일: 같은 일을 반복해서 적는 경우가 많으므로 내용만 같은 것은 두고, id 와 내용이 모두 같은 것만 거둔다.
+export function dropResurrectedTodayTasks(entries = {}, targetDate, items = []) {
+  const earlier = new Set();
+  Object.keys(entries || {})
+    .filter((dateKey) => dateKey < targetDate)
+    .forEach((dateKey) => {
+      parseJsonArray(entries[dateKey]?.todayTaskCompletions).forEach((record) => {
+        if (record && record.id && record.text) earlier.add(`${record.id}|${String(record.text).trim()}`);
+      });
+    });
+  if (!earlier.size) return { items: Array.isArray(items) ? items : [], dropped: [] };
+  return splitResurrected(items, (item) => !!item.id && earlier.has(`${item.id}|${String(item.text || '').trim()}`));
+}
+
+// 저장된 일지에 섞여 든 '건너뛴 옛 항목' 찾기 (자동으로 지우지 않고 사용자에게 보여 준다)
+// 이월은 직전 일지에서만 받으므로, 출처일이 직전 일지보다 앞서는데 직전 일지에 없던 미완료 항목은
+// 예전 방식(모든 날짜 훑기)이나 오래된 캐시로 되살아난 것일 가능성이 크다.
+export function findStaleCarriedPendingDocs(entries = {}, targetDate, items = []) {
+  const prev = latestEntryDateBefore(entries, targetDate);
+  if (!prev) return [];
+  const prevKeys = new Set();
+  parseJsonArray(entries[prev]?.pendingDocItems)
+    .map((item) => normalizeTaskItem(item, 'pending-doc'))
+    .filter(Boolean)
+    .forEach((item) => addPendingDocIdentityKeys(prevKeys, item, item.sourceDate || prev));
+  return (Array.isArray(items) ? items : []).filter((item) => item && !item.done && item.sourceDate
+    && item.sourceDate < prev && !hasPendingDocIdentity(prevKeys, item, item.sourceDate));
+}
+
+export function findStaleCarriedTodayTasks(entries = {}, targetDate, items = []) {
+  const prev = latestEntryDateBefore(entries, targetDate);
+  if (!prev) return [];
+  return (Array.isArray(items) ? items : []).filter((item) => item && !item.done && item.sourceDate && item.sourceDate < prev);
 }
 
 export function createDelegatedCompletion(item, completedAt = new Date().toISOString(), fallbackSourceDate = '') {

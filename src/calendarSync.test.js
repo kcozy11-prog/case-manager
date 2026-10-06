@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseLboxEvent, syncEventsWithCases, isLboxEvent, scoreLboxCaseMatch, mergeCalendarEventIntoCase, findCaseLinkedToEvent, calendarSyncTimeMin, calendarSyncTimeMax, syncWorkEventsWithCases, WORK_SUMMARY_MEMO_TITLE, matchTasksToCases, mergeTaskIntoCaseTodos } from "./calendarSync.js";
+import { parseLboxEvent, syncEventsWithCases, isLboxEvent, scoreLboxCaseMatch, mergeCalendarEventIntoCase, findCaseLinkedToEvent, calendarSyncTimeMin, calendarSyncTimeMax, syncWorkEventsWithCases, WORK_SUMMARY_MEMO_TITLE, matchTasksToCases, mergeTaskIntoCaseTodos, resolveTaskDone } from "./calendarSync.js";
 
 test("isLboxEvent — 키워드/출처로 식별", () => {
   assert.equal(isLboxEvent({ _src: "LBOX", summary: "아무거나" }), true);
@@ -472,4 +472,24 @@ test("LBOX 기일은 사건번호가 같은 사건 중 목록상 첫 사건에 �
   const events = [{ id: "evX", summary: "박제군, 변론, 수원지방법원 안양지원-2026가단100906 제406호 법정 11:20", start: { date: "2026-11-01" } }];
   const { updates } = syncEventsWithCases(events, [mk("first", "종결"), mk("second", "진행중")], { today: "2026-10-06" });
   assert.deepEqual([...updates.keys()], ["first"]);
+});
+
+test("mergeTaskIntoCaseTodos: 앱에서 완료한 할 일은 Google 쪽이 그대로면 다시 미완료로 돌리지 않는다", () => {
+  const base = mergeTaskIntoCaseTodos({ id: "c1", todos: [] }, gTask()).caseObj;
+  // 앱에서 완료 처리 (Google 할 일은 그대로 열려 있음)
+  const doneInApp = { ...base, todos: base.todos.map((t) => ({ ...t, done: true, doneDate: "2026-10-05" })) };
+  const r = mergeTaskIntoCaseTodos(doneInApp, gTask());
+  assert.equal(r.updated, false, "바뀐 것이 없으니 저장하지 않음");
+  assert.equal(r.caseObj.todos[0].done, true);
+  // Google 쪽에서 할 일이 바뀌면(updated 변경) 그때는 Google 상태를 따른다
+  const reopened = mergeTaskIntoCaseTodos(doneInApp, gTask({ title: "2026가합12345 준비서면 재작성", updated: "2026-10-07T00:00:00.000Z" }));
+  assert.equal(reopened.updated, true);
+  assert.equal(reopened.caseObj.todos[0].done, false);
+  assert.equal(reopened.caseObj.todos[0].doneDate, "2026-10-05", "앱에서 남긴 다른 값은 보존");
+});
+
+test("resolveTaskDone: 지난 동기화 기록이 없으면 Google 상태를 따른다", () => {
+  assert.equal(resolveTaskDone({ done: true }, { done: false, sourceUpdatedAt: "x" }), false);
+  assert.equal(resolveTaskDone({ done: true, sourceUpdatedAt: "x" }, { done: false, sourceUpdatedAt: "x" }), true);
+  assert.equal(resolveTaskDone({ done: false, sourceUpdatedAt: "x" }, { done: true, sourceUpdatedAt: "y" }), true);
 });

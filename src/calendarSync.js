@@ -625,6 +625,20 @@ export function buildTodoFromGoogleTask(task) {
 // Google Tasks가 원본인 항목. 이 값들이 그대로면 저장하지 않는다(우선순위 등 앱에서 정한 값은 보존).
 const TASK_SYNC_FIELDS = ["text", "details", "dueDate", "done", "calendarTaskId", "fromTasks", "sourceTaskList", "sourceUpdatedAt"];
 
+// 완료 상태는 Google 할 일이 지난 동기화 뒤에 바뀌었을 때만 Google 쪽을 따른다.
+// (Google 할 일의 updated 가 지난번과 같으면 Google 쪽은 그대로이므로, 앱에서 체크·해제한 값을 지킨다.
+//  예전에는 앱에서 완료한 할 일이 Google 쪽에 열려 있으면 동기화 때마다 '미완료'로 되돌아갔다.)
+export function resolveTaskDone(current, nextTodo) {
+  const googleUnchanged = !!current?.sourceUpdatedAt && !!nextTodo?.sourceUpdatedAt
+    && current.sourceUpdatedAt === nextTodo.sourceUpdatedAt;
+  return googleUnchanged ? !!current.done : !!nextTodo?.done;
+}
+
+function taskFieldChanged(current, next, key) {
+  if (key === "done") return !!current.done !== !!next.done;
+  return (current[key] ?? "") !== (next[key] ?? "");
+}
+
 export function mergeTaskIntoCaseTodos(caseObj, task) {
   const nextTodo = buildTodoFromGoogleTask(task);
   const todos = [...(caseObj.todos || [])];
@@ -632,16 +646,15 @@ export function mergeTaskIntoCaseTodos(caseObj, task) {
 
   if (index >= 0) {
     const current = todos[index];
-    const changed = TASK_SYNC_FIELDS.some((key) => (current[key] ?? "") !== (nextTodo[key] ?? ""));
+    const synced = { ...nextTodo, done: resolveTaskDone(current, nextTodo) };
+    const changed = TASK_SYNC_FIELDS.some((key) => taskFieldChanged(current, synced, key));
     if (!changed) return { caseObj, added: false, updated: false };
-    const { priority: _defaultPriority, ...syncFields } = nextTodo;
+    const { priority: _defaultPriority, ...syncFields } = synced;
     todos[index] = {
       ...current,
       ...syncFields,
       id: current.id,
       priority: current.priority || nextTodo.priority,
-      // Google Tasks를 원본으로 보고 완료 상태도 동기화
-      done: nextTodo.done,
     };
     return { caseObj: { ...caseObj, todos }, added: false, updated: true };
   }

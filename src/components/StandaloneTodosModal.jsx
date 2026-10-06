@@ -15,7 +15,8 @@ export default function StandaloneTodosModal({ todos, onUpdate, onPushTodo, onCl
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>
         <div className="p-5 max-h-[75vh] overflow-y-auto">
-          <TodosTab c={standaloneCase} onUpdate={onUpdate} onPushTodo={onPushTodo} briefsEnabled={false} />
+          {/* 두 번째 인자: 이 화면이 보던 목록 — 바뀐 할 일만 서버 최신 목록에 얹는다 */}
+          <TodosTab c={standaloneCase} onUpdate={(next) => onUpdate(next, standaloneCase)} onPushTodo={onPushTodo} briefsEnabled={false} />
         </div>
       </div>
     </div>
