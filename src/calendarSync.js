@@ -431,6 +431,31 @@ export function findCaseLinkedToEvent(eventId, cases = []) {
   return cases.find((c) => (c?.hearings || []).some((h) => h && h.calendarEventId === eventId)) || null;
 }
 
+// 동기화 1회마다 한 번만 만드는 색인. 일정마다 전체 사건을 훑던 방식과 결과는 같다.
+//  - 사건번호 색인: 정규화한 사건번호 → 사건 id 목록(원래 순서). 6자 미만은 매칭에 쓰지 않는다.
+//  - 연결 일정 색인: 캘린더 일정 id → 그 일정을 기일로 가진 첫 사건 id.
+function buildCaseNumberIndex(cases = []) {
+  const index = new Map();
+  for (const c of cases) {
+    if (!c || !c.caseNumber || c.caseNumber === "—") continue;
+    const key = normalizeCaseNumberForMatch(c.caseNumber);
+    if (!key || key.length < 6) continue;
+    if (!index.has(key)) index.set(key, []);
+    index.get(key).push(c.id);
+  }
+  return index;
+}
+
+function buildLinkedEventIndex(cases = []) {
+  const index = new Map();
+  for (const c of cases) {
+    for (const h of (c?.hearings || [])) {
+      if (h && h.calendarEventId && !index.has(h.calendarEventId)) index.set(h.calendarEventId, c.id);
+    }
+  }
+  return index;
+}
+
 export function syncEventsWithCases(events, cases, { ignoredEventIds, today } = {}) {
   const updates = new Map();
   let newHearingCount = 0;
@@ -443,6 +468,11 @@ export function syncEventsWithCases(events, cases, { ignoredEventIds, today } = 
   const todayStr = today || localDateStr(new Date());
 
   console.log(`[캘린더 동기화] LBOX 이벤트 ${events.length}건 처리 시작`);
+
+  const caseById = new Map((cases || []).filter(Boolean).map((c) => [c.id, c]));
+  const currentCase = (id) => updates.get(id) || caseById.get(id) || null;
+  const caseNumberIndex = buildCaseNumberIndex(cases || []);
+  const linkedEventIndex = buildLinkedEventIndex(cases || []);
 
   for (const ev of events) {
     const summary = ev.summary || "";
@@ -458,13 +488,18 @@ export function syncEventsWithCases(events, cases, { ignoredEventIds, today } = 
       continue;
     }
 
-    const currentCases = cases.map((c) => updates.get(c.id) || c);
-    let matched = findCaseLinkedToEvent(ev.id, currentCases);
+    // ① 이미 이 일정을 기일로 가진 사건(수동 추가 포함) → ② 사건번호가 같은 사건(원래 순서상 첫 사건)
+    let matched = ev.id && linkedEventIndex.has(ev.id) ? currentCase(linkedEventIndex.get(ev.id)) : null;
     let reason = "";
     if (!matched) {
-      const match = findStrictLboxCaseMatch(lbox, summary, currentCases);
-      matched = match.caseObj;
-      reason = match.reason;
+      if (!caseNum) {
+        reason = "일정에서 사건번호를 찾을 수 없음";
+      } else {
+        const key = normalizeCaseNumberForMatch(caseNum);
+        const ids = key && key.length >= 6 ? caseNumberIndex.get(key) : null;
+        if (ids && ids.length) matched = currentCase(ids[0]);
+        else reason = "사건번호가 일치하는 사건 없음";
+      }
     }
 
     if (!matched) {
@@ -483,6 +518,7 @@ export function syncEventsWithCases(events, cases, { ignoredEventIds, today } = 
     if (merged.added || merged.updated) {
       updates.set(matched.id, merged.caseObj);
       if (merged.added) {
+        if (ev.id && !linkedEventIndex.has(ev.id)) linkedEventIndex.set(ev.id, matched.id);
         newHearingCount++;
         console.log(`[캘린더 동기화] ✓ 기일 추가: "${summary}" → ${matched.title}`);
       } else {
@@ -527,24 +563,39 @@ export async function fetchWorkTasks(token) {
 }
 
 // 태스크를 사건과 매칭 (자동 매칭 + 미매칭 분류)
+//  - 이미 어떤 사건의 할 일로 연결된 태스크(calendarTaskId)는 진행 중·종결과 관계없이 그 사건을 따른다.
+//    (다시 매칭하다 다른 사건에 같은 할 일이 중복 생기는 것도 막는다)
+//  - 새 태스크는 진행 중 사건에만 자동 연결한다. 종결 사건은 자동 분류 대상에서 뺀다.
 export function matchTasksToCases(tasks, cases) {
   const matched = [];   // { task, caseObj }
   const unmatched = []; // { task }
 
+  const linked = new Map();
+  for (const c of cases || []) {
+    for (const t of (c?.todos || [])) {
+      if (t && t.calendarTaskId && !linked.has(t.calendarTaskId)) linked.set(t.calendarTaskId, c);
+    }
+  }
+  const activeCases = (cases || []).filter((c) => c && c.status !== "종결");
+
   for (const task of tasks) {
     if (!task.title?.trim()) continue;
+    if (task.id && linked.has(task.id)) {
+      matched.push({ task, caseObj: linked.get(task.id) });
+      continue;
+    }
     const text = (task.title + ' ' + (task.notes || '')).toLowerCase();
 
     // 사건번호로 먼저 매칭
     const caseNumMatch = text.match(/(\d{4}[가-힣]{1,4}\d+)/);
     let found = null;
     if (caseNumMatch) {
-      found = cases.find(c => c.caseNumber && normalize(c.caseNumber).includes(normalize(caseNumMatch[1])));
+      found = activeCases.find(c => c.caseNumber && normalize(c.caseNumber).includes(normalize(caseNumMatch[1])));
     }
 
     // 사건번호 매칭 실패 시 당사자명/사건명으로 매칭
     if (!found) {
-      found = cases.find(c => matchEventToCase(task.title + ' ' + (task.notes || ''), c));
+      found = activeCases.find(c => matchEventToCase(task.title + ' ' + (task.notes || ''), c));
     }
 
     if (found) {
@@ -571,16 +622,24 @@ export function buildTodoFromGoogleTask(task) {
   };
 }
 
+// Google Tasks가 원본인 항목. 이 값들이 그대로면 저장하지 않는다(우선순위 등 앱에서 정한 값은 보존).
+const TASK_SYNC_FIELDS = ["text", "details", "dueDate", "done", "calendarTaskId", "fromTasks", "sourceTaskList", "sourceUpdatedAt"];
+
 export function mergeTaskIntoCaseTodos(caseObj, task) {
   const nextTodo = buildTodoFromGoogleTask(task);
   const todos = [...(caseObj.todos || [])];
   const index = todos.findIndex(t => t.calendarTaskId === task.id);
 
   if (index >= 0) {
+    const current = todos[index];
+    const changed = TASK_SYNC_FIELDS.some((key) => (current[key] ?? "") !== (nextTodo[key] ?? ""));
+    if (!changed) return { caseObj, added: false, updated: false };
+    const { priority: _defaultPriority, ...syncFields } = nextTodo;
     todos[index] = {
-      ...todos[index],
-      ...nextTodo,
-      id: todos[index].id,
+      ...current,
+      ...syncFields,
+      id: current.id,
+      priority: current.priority || nextTodo.priority,
       // Google Tasks를 원본으로 보고 완료 상태도 동기화
       done: nextTodo.done,
     };
@@ -665,6 +724,7 @@ export function syncWorkEventsWithCases(events, cases, { today, makeId = () => D
   const updates = new Map();
   let newMemoCount = 0;
   const todayStr = today || localDateStr(new Date());
+  const activeCases = (cases || []).filter((c) => c && c.status !== "종결");
 
   const caseEvents = new Map();
 
@@ -677,8 +737,8 @@ export function syncWorkEventsWithCases(events, cases, { today, makeId = () => D
 
     const eventDate = ev.start?.date || (ev.start?.dateTime?.split("T")[0]) || "";
 
-    // 사건 매칭 (사건명·의뢰인·상대방 기반)
-    const matched = cases.find(c => matchEventToCase(summary + " " + (ev.description || ""), c));
+    // 사건 매칭 (사건명·의뢰인·상대방 기반) — 종결 사건은 요약 대상에서 뺀다
+    const matched = activeCases.find(c => matchEventToCase(summary + " " + (ev.description || ""), c));
     if (!matched) continue;
 
     if (!caseEvents.has(matched.id)) {

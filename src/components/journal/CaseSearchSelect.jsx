@@ -65,6 +65,7 @@ export default function CaseSearchSelect({ cases = [], value = "", onChange, pla
                   } ${c.id === value ? "font-medium" : ""}`}>
                   {c.title}
                   {c.caseNumber && <span className="text-slate-400 ml-1.5">{c.caseNumber}</span>}
+                  {c.status === "종결" && <span className="text-slate-400 bg-slate-100 rounded px-1 ml-1.5">종결</span>}
                 </button>
               </li>
             ))}

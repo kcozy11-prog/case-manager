@@ -2,7 +2,8 @@ import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { auth, provider, db } from "./firebase";
 import { onAuthStateChanged, signOut, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
 import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, getDocFromServer, waitForPendingWrites, arrayUnion } from "firebase/firestore";
-import { TYPES, STATUSES, todayStr, dday, fmtDate, emptyCase, SAMPLE_CASES } from "./utils";
+import { TYPES, todayStr, dday, fmtDate, emptyCase, SAMPLE_CASES } from "./utils";
+import { LIST_STATUSES, filterCaseList, countCasesByListStatus, firstActiveCaseId } from "./caseList";
 import { TypeBadge } from "./components/Badges";
 import LoginScreen from "./components/LoginScreen";
 import AppLogo from "./components/AppLogo";
@@ -33,7 +34,7 @@ export default function App() {
   const [standaloneTodos, setStandaloneTodos] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("전체");
+  const [statusFilter, setStatusFilter] = useState("진행중"); // 진행중 | 종결 (종결 사건은 검색·종결 목록에서만)
   const [typeFilter, setTypeFilter] = useState("전체");
   const [activeTab, setActiveTab] = useState("overview");
   const [appMode, setAppMode] = useState("cases"); // cases | journal
@@ -88,7 +89,7 @@ export default function App() {
       setCases(data);
       setSelectedId(prev => {
         if (prev && data.find(c => c.id === prev)) return prev;
-        return data[0]?.id || null;
+        return firstActiveCaseId(data);
       });
     }, (error) => {
       console.error("Firestore 동기화 오류:", error);
@@ -158,14 +159,13 @@ export default function App() {
     document.title = selected ? `${selected.title} — 사건 관리` : "사건 관리";
   }, [selected]);
 
-  const filtered = useMemo(() => cases.filter(c => {
-    const q = search.toLowerCase();
-    const matchSearch = !q || c.title.toLowerCase().includes(q) || c.client.toLowerCase().includes(q)
-      || c.opponent?.toLowerCase().includes(q) || c.caseNumber?.toLowerCase().includes(q);
-    const matchStatus = statusFilter === "전체" || c.status === statusFilter;
-    const matchType = typeFilter === "전체" || c.type === typeFilter;
-    return matchSearch && matchStatus && matchType;
-  }), [cases, search, statusFilter, typeFilter]);
+  // 기본은 진행 중 사건만. 종결 사건은 '종결' 목록을 고르거나 검색할 때만 보인다.
+  const filtered = useMemo(
+    () => filterCaseList(cases, { search, status: statusFilter, type: typeFilter }),
+    [cases, search, statusFilter, typeFilter],
+  );
+  const statusCounts = useMemo(() => countCasesByListStatus(cases), [cases]);
+  const searching = search.trim().length > 0;
 
   // 가장 가까운 예정 기일 계산
   const nextHearing = useMemo(() => {
@@ -183,11 +183,12 @@ export default function App() {
     return best;
   }, [cases]);
 
-  const saveCase = useCallback(async (c) => {
+  // select=false: 캘린더·할 일 자동 동기화처럼 백그라운드 저장일 때는 보고 있던 사건을 바꾸지 않는다.
+  const saveCase = useCallback(async (c, { select = true } = {}) => {
     if (!user) return;
     // 낙관적 즉시 반영 — onSnapshot 지연/누락(멀티탭 등)에도 화면이 바로 갱신되도록
     setCases(prev => prev.some(x => x.id === c.id) ? prev.map(x => x.id === c.id ? c : x) : [...prev, c]);
-    setSelectedId(c.id);
+    if (select) setSelectedId(c.id);
     await setDoc(doc(db, "users", user.uid, "cases", c.id), c);
   }, [user]);
 
@@ -345,13 +346,13 @@ export default function App() {
       } catch (e) { console.warn("캘린더 무시 목록 로드 실패", e); }
 
       const { updates, newHearingCount, newCaseCount, skippedCount, unmatchedEvents } = syncEventsWithCases(data.items, cases, { ignoredEventIds });
-      for (const [, uc] of updates) await saveCase(uc);
+      for (const [, uc] of updates) await saveCase(uc, { select: false });
 
       // 회사업무 캘린더 → 공식결과메모
       const mergedCases = cases.map(c => updates.has(c.id) ? updates.get(c.id) : c);
       const workEvents = await fetchWorkCalendarEvents(token);
       const workResult = syncWorkEventsWithCases(workEvents, mergedCases);
-      for (const [, uc] of workResult.updates) await saveCase(uc);
+      for (const [, uc] of workResult.updates) await saveCase(uc, { select: false });
 
       if (unmatchedEvents?.length > 0) {
         setUnmatchedCalendarEvents(unmatchedEvents);
@@ -431,13 +432,14 @@ export default function App() {
       let updatedCount = 0;
       const updatedCases = new Map();
       for (const { task, caseObj } of matched) {
-        const ref = updatedCases.get(caseObj.id) || { ...caseObj, todos: [...(caseObj.todos || [])] };
+        const ref = updatedCases.get(caseObj.id) || caseObj;
         const merged = mergeTaskIntoCaseTodos(ref, task);
-        updatedCases.set(caseObj.id, merged.caseObj);
         if (merged.added) addedCount++;
         if (merged.updated) updatedCount++;
+        // 바뀐 것이 없으면 저장하지 않는다 (매번 연결된 사건 전체를 다시 저장하던 문제)
+        if (merged.added || merged.updated) updatedCases.set(caseObj.id, merged.caseObj);
       }
-      for (const [, uc] of updatedCases) await saveCase(uc);
+      for (const [, uc] of updatedCases) await saveCase(uc, { select: false });
 
       // 미매칭 태스크 모달 표시 (완료·무시 제외분만)
       if (visibleUnmatched.length > 0) {
@@ -747,15 +749,16 @@ export default function App() {
                 value={search} onChange={e => setSearch(e.target.value)} />
             </div>
             <div className="px-3 py-2 border-b border-slate-100 space-y-1.5">
-              <div className="flex gap-1 flex-wrap">
-                {STATUSES.map(s => (
+              <div className="flex gap-1 flex-wrap items-center">
+                {LIST_STATUSES.map(s => (
                   <button key={s} onClick={() => setStatusFilter(s)}
                     className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                      statusFilter === s
+                      statusFilter === s && !searching
                         ? "bg-slate-800 text-white border-slate-800"
                         : "text-slate-500 border-slate-200 hover:border-slate-400"
-                    }`}>{s}</button>
+                    }`}>{s} {statusCounts[s] ?? 0}</button>
                 ))}
+                {searching && <span className="text-[11px] text-slate-400 ml-1">검색 중: 종결 사건 포함</span>}
               </div>
               <div className="flex gap-1 flex-wrap">
                 {TYPES.map(t => (
@@ -770,7 +773,7 @@ export default function App() {
             </div>
             <div className="flex-1 overflow-y-auto">
               {filtered.length === 0 ? (
-                <div className="text-center text-slate-400 text-sm py-10">검색 결과 없음</div>
+                <div className="text-center text-slate-400 text-sm py-10">{searching ? "검색 결과 없음" : statusFilter === "종결" ? "종결 사건이 없습니다" : "진행 중 사건이 없습니다"}</div>
               ) : (
                 filtered.map(c => (
                   <CaseItem key={c.id} c={c} selected={selectedId === c.id}
