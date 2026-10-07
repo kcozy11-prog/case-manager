@@ -17,6 +17,29 @@ export function spreadsheetIdFromInput(input) {
   return null;
 }
 
+export function sheetUrlFromId(id) {
+  return id ? `https://docs.google.com/spreadsheets/d/${id}/edit` : "";
+}
+
+// 주소창의 ?restore=<시트 id 또는 주소> → 시트 주소 (없거나 형식이 틀리면 "")
+export function restoreParamFromSearch(search = "") {
+  let value = "";
+  try { value = new URLSearchParams(search).get("restore") || ""; } catch { value = ""; }
+  return sheetUrlFromId(spreadsheetIdFromInput(value));
+}
+
+// 최근 복원 원본 목록: 주소가 같으면 가장 최근 것 하나만, 최신순으로 limit 개
+export function recentSourceList(items = [], limit = 8) {
+  const byId = new Map();
+  for (const it of Array.isArray(items) ? items : []) {
+    const id = spreadsheetIdFromInput(it?.url);
+    if (!id) continue;
+    const prev = byId.get(id);
+    if (!prev || String(it.at || "") > String(prev.at || "")) byId.set(id, { ...it, url: sheetUrlFromId(id) });
+  }
+  return [...byId.values()].sort((a, b) => String(b.at || "").localeCompare(String(a.at || ""))).slice(0, limit);
+}
+
 class GoogleAuthNeeded extends Error {
   constructor(message) {
     super(message);

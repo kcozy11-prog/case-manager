@@ -1,8 +1,8 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
-import { auth, provider, db } from "./firebase";
+import { auth, provider, db, firebaseProjectId } from "./firebase";
 import { onAuthStateChanged, signOut, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
 import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, getDocFromServer, runTransaction, arrayUnion } from "firebase/firestore";
-import { TYPES, todayStr, dday, fmtDate, emptyCase, SAMPLE_CASES } from "./utils";
+import { TYPES, todayStr, dday, fmtDate, emptyCase, SAMPLE_CASES, localDateStr } from "./utils";
 import { LIST_STATUSES, filterCaseList, countCasesByListStatus, firstActiveCaseId } from "./caseList";
 import { TypeBadge } from "./components/Badges";
 import LoginScreen from "./components/LoginScreen";
@@ -22,7 +22,8 @@ import { openSpreadsheetUrl } from "./exportOpen";
 import JournalApp from "./components/journal/JournalApp";
 import { collectAllUserData } from "./backupStore";
 import RestoreModal from "./components/RestoreModal";
-import { readRestoreSource, spreadsheetIdFromInput } from "./restoreSource";
+import { readRestoreSource, spreadsheetIdFromInput, sheetUrlFromId, restoreParamFromSearch, recentSourceList } from "./restoreSource";
+import { readUserSnapshotAt, kstToReadTime } from "./pitrRead";
 import { buildRestorePlan, applyPlanSelection, revertRestoreForCase, RESTORE_FIELDS } from "./restorePlan";
 import { computeRetainerPayups } from "./caseLink";
 import BriefsTab from "./components/BriefsTab";
@@ -91,6 +92,11 @@ export default function App() {
   const [editCase, setEditCase] = useState(null);
   const [showAI, setShowAI] = useState(false);
   const [showRestore, setShowRestore] = useState(false);
+  const [restoreDefaultInput, setRestoreDefaultInput] = useState("");
+  // 링크(?restore=시트 id)로 열면 복원 창을 그 파일로 채워 연다
+  const [restoreLink, setRestoreLink] = useState(() => (typeof window === "undefined" ? "" : restoreParamFromSearch(window.location.search)));
+  // 앱을 연 날과 오늘이 다르면(자정을 넘김) D-day 를 맞추도록 새로고침을 권한다
+  const [dayChanged, setDayChanged] = useState(false);
   const [mobileView, setMobileView] = useState("list");
   const [googleToken, setGoogleToken] = useState(() => sessionStorage.getItem("googleToken"));
   const [calSyncing, setCalSyncing] = useState(false);
@@ -632,6 +638,22 @@ export default function App() {
     }
   }, [user, googleToken, refreshGoogleToken]);
 
+  // 내보내기·복원 전 백업·복원에 쓴 파일 주소를 기억해 둔다 (복원 창의 '최근 파일' 목록, 기기 간 공유)
+  const recordRestoreSource = useCallback(async ({ url, title, kind }) => {
+    if (!user || !url) return;
+    try {
+      await setDoc(doc(db, "users", user.uid, "meta", "exports"), {
+        items: arrayUnion({ url, title: title || "", kind, at: new Date().toISOString() }),
+      }, { merge: true });
+    } catch (e) { console.warn("[복원] 파일 목록 기록 실패", e); }
+  }, [user]);
+
+  const loadRecentSources = useCallback(async () => {
+    if (!user) return [];
+    const snap = await getDoc(doc(db, "users", user.uid, "meta", "exports"));
+    return recentSourceList(snap.exists() ? snap.data().items : []);
+  }, [user]);
+
   const runExport = useCallback(async () => {
     if (!user || cases.length === 0) return;
     let token = googleToken;
@@ -643,7 +665,8 @@ export default function App() {
       // 서버 판본 전체를 읽어, 사람이 읽는 시트와 '복원용 원본'(숨김 시트)을 함께 만든다
       const all = await collectAllUserData(user.uid);
       const exportCases = all.cases.map(c => normalizeCaseDoc(c, todayStr));
-      const options = { raw: { data: all, info: { fromServer: all.fromServer, appBuild: __BUILD_TIME__ } } };
+      const exportTitle = `사건관리 내보내기 ${new Date().toLocaleDateString("ko-KR")}`;
+      const options = { title: exportTitle, raw: { data: all, info: { fromServer: all.fromServer, appBuild: __BUILD_TIME__ } } };
       let url = await exportToGoogleSheet(token, exportCases, all.journal, options);
       if (!url) {
         // 기존 토큰에 쓰기 권한 없음 → 새 권한으로 재인증
@@ -653,13 +676,14 @@ export default function App() {
         if (!token) { alert("Google 인증 실패."); return; }
         url = await exportToGoogleSheet(token, exportCases, all.journal, options);
       }
+      if (url) recordRestoreSource({ url, title: exportTitle, kind: "export" });
       if (url && !all.fromServer) alert("서버에 연결되지 않아 이 기기에 저장된 사본으로 내보냈습니다. 연결된 뒤 한 번 더 내보내기를 권합니다.");
       if (url) openSpreadsheetUrl(url);
       else alert("내보내기 실패. 로그아웃 후 다시 로그인해주세요.");
     } catch (e) {
       alert("내보내기 오류: " + e.message);
     }
-  }, [user, cases, googleToken, refreshGoogleToken]);
+  }, [user, cases, googleToken, refreshGoogleToken, recordRestoreSource]);
 
   // ── 데이터 복원 ────────────────────────────────────────────────────────────
   // Google 토큰이 필요한 작업: 없거나 만료되면 한 번 다시 로그인해 이어서 한다
@@ -685,6 +709,24 @@ export default function App() {
     }
   }, [user]);
 
+  // 지난 시점(한국시간 날짜·시각)의 서버 데이터와 지금을 비교한다 (Firestore 과거 판본 조회)
+  const analyzeRestoreAt = useCallback(async (dateStr, timeStr, { includeCrossCheck = true } = {}) => {
+    if (!user) throw new Error("로그인이 필요합니다.");
+    const readTime = kstToReadTime(dateStr, timeStr);
+    if (!readTime) throw new Error("날짜와 시각을 확인해 주세요.");
+    if (Date.parse(readTime) >= Date.now() - 60000) throw new Error("지난 시각을 골라 주세요(지금보다 1분 이상 앞선 시각).");
+    const idToken = await user.getIdToken();
+    const snapshot = await readUserSnapshotAt({ projectId: firebaseProjectId, uid: user.uid, idToken, readTime });
+    const current = await readServerSnapshot();
+    const plan = buildRestorePlan(
+      { ...snapshot, cases: snapshot.cases.map((c) => normalizeCaseDoc(c, todayStr)) },
+      { cases: current.cases, journal: current.journal },
+      { ignoreTitles: SAMPLE_CASES.map((c) => c.title), includeCrossCheck },
+    );
+    const [y, m, d] = dateStr.split("-").map(Number);
+    return { plan, label: `${y}. ${m}. ${d}. ${timeStr} 시점`, kind: "pitr" };
+  }, [user, readServerSnapshot]);
+
   // 내보내기 파일(주소)과 지금 서버 데이터를 비교해 복원 후보를 만든다. 주소가 없으면 업무일지 기록만 대조.
   const analyzeRestore = useCallback(async (input, { includeCrossCheck = true } = {}) => {
     if (!user) throw new Error("로그인이 필요합니다.");
@@ -693,7 +735,8 @@ export default function App() {
       const id = spreadsheetIdFromInput(input);
       if (!id) throw new Error("구글 시트 주소(https://docs.google.com/spreadsheets/d/…)를 확인해 주세요.");
       source = await withGoogleToken((token) => readRestoreSource(token, id));
-      try { localStorage.setItem("restoreSourceUrl", String(input).trim()); } catch { /* 저장 못 해도 진행 */ }
+      try { localStorage.setItem("restoreSourceUrl", sheetUrlFromId(id)); } catch { /* 저장 못 해도 진행 */ }
+      recordRestoreSource({ url: sheetUrlFromId(id), title: source.fileTitle, kind: "source" });
     }
     const current = await readServerSnapshot();
     const snapshot = source ? source.snapshot : { source: "none", cases: [], journal: {} };
@@ -702,7 +745,7 @@ export default function App() {
       includeCrossCheck: !source || includeCrossCheck,
     });
     return { plan, label: source ? source.fileTitle : "업무일지 기록", kind: source ? source.kind : "journal" };
-  }, [user, withGoogleToken, readServerSnapshot]);
+  }, [user, withGoogleToken, readServerSnapshot, recordRestoreSource]);
 
   // 고른 후보를 적용: ① 지금 데이터 전체를 백업 파일로 저장(실패하면 중단) ② 사건마다 고른 항목만 서버 최신 문서에 얹음
   // ③ 없어진 날짜의 업무일지만 새로 씀 ④ 되돌리기용 기록을 남김
@@ -725,6 +768,7 @@ export default function App() {
     } catch (e) {
       throw new Error(`복원 전 백업을 만들지 못해 복원을 멈췄습니다: ${e.message || e}`);
     }
+    recordRestoreSource({ url: backupUrl, title: backupTitle, kind: "backup" });
 
     let seq = Date.now();
     const { changes, journal } = applyPlanSelection(bundle.plan, selectedIds, all.cases, {
@@ -755,7 +799,7 @@ export default function App() {
     const added = okChanges.reduce((n, c) => n + Object.values(c.log.added).reduce((m, ids) => m + ids.length, 0), 0);
     const status = okChanges.reduce((n, c) => n + c.log.status.length + Object.keys(c.log.info).length, 0);
     return { backupUrl, cases: okChanges.length, added, status, created: okChanges.filter((c) => c.created).length, journal: journalCount, failed };
-  }, [user, readServerSnapshot, withGoogleToken, saveCase]);
+  }, [user, readServerSnapshot, withGoogleToken, saveCase, recordRestoreSource]);
 
   const readRestoreLog = useCallback(async () => {
     const snap = await getDocFromServer(doc(db, "users", user.uid, "meta", "restoreLog"));
@@ -811,6 +855,36 @@ export default function App() {
     return { cases, journal, skipped };
   }, [user, readRestoreLog, readServerSnapshot, saveCase]);
 
+  const openRestore = useCallback((input = "") => {
+    let fallback = "";
+    try { fallback = localStorage.getItem("restoreSourceUrl") || ""; } catch { fallback = ""; }
+    setRestoreDefaultInput(input || fallback);
+    setShowRestore(true);
+  }, []);
+
+  // ?restore= 링크로 열었으면, 서버 데이터를 받은 뒤 복원 창을 그 파일로 채워 연다 (주소창에서는 바로 지운다)
+  useEffect(() => {
+    if (!restoreLink) return;
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("restore")) {
+        url.searchParams.delete("restore");
+        window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+      }
+    } catch { /* 주소 정리 실패는 무시 */ }
+    if (!user || !casesSynced) return;
+    openRestore(restoreLink);
+    setRestoreLink("");
+  }, [restoreLink, user, casesSynced, openRestore]);
+
+  // 자정을 넘기면 D-day·'오늘' 기준이 앱을 연 날짜에 머물러 있으므로 새로고침을 권한다
+  useEffect(() => {
+    const check = () => { if (localDateStr(new Date()) !== todayStr) setDayChanged(true); };
+    const timer = setInterval(check, 60000);
+    document.addEventListener("visibilitychange", check);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", check); };
+  }, []);
+
   const handleToken = useCallback((t) => {
     sessionStorage.setItem("googleToken", t); setGoogleToken(t);
   }, []);
@@ -859,6 +933,13 @@ export default function App() {
           }`}>
             <span className="font-medium break-all">{caseSaveMsg.text}</span>
             <button onClick={() => setCaseSaveMsg(null)} className="flex-shrink-0 text-white/80 hover:text-white text-base leading-none px-1">✕</button>
+          </div>
+        )}
+        {dayChanged && (
+          <div className="px-4 py-2 text-sm flex items-center justify-between gap-3 bg-sky-600 text-white">
+            <span className="font-medium">날짜가 바뀌었습니다. 새로고침하면 D-day와 '오늘' 기준이 오늘 날짜로 맞춰집니다.</span>
+            <button onClick={() => window.location.reload()}
+              className="flex-shrink-0 text-xs border border-white/60 rounded px-2 py-1 hover:bg-white/10">새로고침</button>
           </div>
         )}
         {/* 사건 저장 대기·실패 안내 */}
@@ -931,7 +1012,7 @@ export default function App() {
                       title="옛 '사건진행부' 시트에서 앱에 없는 사건만 추가합니다 (내보내기 파일 복원은 '데이터 복원')"><span>📥</span> 사건진행부 가져오기</button>
                     <button onClick={() => { setShowAdv(false); runExport(); }}
                       className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"><span>📤</span> 내보내기 (사건+업무일지)</button>
-                    <button onClick={() => { setShowAdv(false); setShowRestore(true); }}
+                    <button onClick={() => { setShowAdv(false); openRestore(); }}
                       className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"
                       title="예전 내보내기 파일과 비교해 없어진 기록·되돌아간 상태를 되살립니다"><span>🛟</span> 데이터 복원</button>
                     <div className="px-3 py-1 mt-1 border-t border-slate-100 text-[10px] text-slate-400 uppercase tracking-wider">일괄 작업</div>
@@ -1163,10 +1244,12 @@ export default function App() {
       )}
       {showRestore && (
         <RestoreModal
-          defaultInput={(() => { try { return localStorage.getItem("restoreSourceUrl") || ""; } catch { return ""; } })()}
+          defaultInput={restoreDefaultInput}
           onAnalyze={analyzeRestore}
+          onAnalyzeAt={analyzeRestoreAt}
           onApply={applyRestore}
           loadLastRestore={loadLastRestore}
+          loadRecentSources={loadRecentSources}
           onUndo={undoLastRestore}
           onClose={() => setShowRestore(false)}
         />

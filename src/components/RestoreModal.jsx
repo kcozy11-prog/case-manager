@@ -45,9 +45,22 @@ function fmtAt(iso) {
   try { return new Date(iso).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" }); } catch { return iso; }
 }
 
-export default function RestoreModal({ onAnalyze, onApply, loadLastRestore, onUndo, onClose, defaultInput = "" }) {
+const KIND_LABEL = { export: "내보내기", backup: "복원 전 백업", source: "복원에 쓴 파일" };
+const DRIVE_SEARCH_URL = `https://drive.google.com/drive/search?q=${encodeURIComponent("사건관리 내보내기")}`;
+
+// 한국시간 기준 날짜(YYYY-MM-DD)·시각(HH:MM)
+function kstParts(ms) {
+  const d = new Date(ms + 9 * 3600 * 1000).toISOString();
+  return { date: d.slice(0, 10), time: d.slice(11, 16) };
+}
+
+export default function RestoreModal({ onAnalyze, onAnalyzeAt, onApply, loadLastRestore, loadRecentSources, onUndo, onClose, defaultInput = "" }) {
   const [step, setStep] = useState("input"); // input | loading | preview | applying | done
+  const [mode, setMode] = useState("file"); // file | time
   const [input, setInput] = useState(defaultInput);
+  const [recent, setRecent] = useState([]);
+  const [pitrDate, setPitrDate] = useState(() => kstParts(Date.now() - 30 * 60000).date);
+  const [pitrTime, setPitrTime] = useState(() => kstParts(Date.now() - 30 * 60000).time);
   const [includeCrossCheck, setIncludeCrossCheck] = useState(true);
   const [bundle, setBundle] = useState(null); // { plan, label, kind }
   const [selected, setSelected] = useState(new Set());
@@ -61,8 +74,14 @@ export default function RestoreModal({ onAnalyze, onApply, loadLastRestore, onUn
   useEffect(() => {
     let alive = true;
     loadLastRestore?.().then((r) => { if (alive) setLastRestore(r); }).catch(() => {});
+    loadRecentSources?.().then((list) => {
+      if (!alive) return;
+      setRecent(list || []);
+      // 주소를 기억하지 않아도 되도록: 비어 있으면 가장 최근 파일을 미리 채운다
+      setInput((cur) => cur || (list && list[0] ? list[0].url : ""));
+    }).catch(() => {});
     return () => { alive = false; };
-  }, [loadLastRestore]);
+  }, [loadLastRestore, loadRecentSources]);
 
   const plan = bundle?.plan;
   const allItems = useMemo(() => [
@@ -72,11 +91,14 @@ export default function RestoreModal({ onAnalyze, onApply, loadLastRestore, onUn
   const selectedCount = allItems.filter((i) => selected.has(i.id)).length;
   const blockedGroups = (plan?.cases || []).filter((p) => p.targetChoices && p.items.some((i) => selected.has(i.id)) && !targetFor[p.key]);
 
-  const analyze = async (withFile) => {
+  // how: "file"(내보내기 파일) | "journal"(업무일지 기록만) | "time"(과거 시점)
+  const analyze = async (how) => {
     setError("");
     setStep("loading");
     try {
-      const b = await onAnalyze(withFile ? input : "", { includeCrossCheck });
+      const b = how === "time"
+        ? await onAnalyzeAt(pitrDate, pitrTime, { includeCrossCheck })
+        : await onAnalyze(how === "file" ? input : "", { includeCrossCheck });
       setBundle(b);
       setSelected(defaultSelection(b.plan));
       setTargetFor({});
@@ -153,20 +175,63 @@ export default function RestoreModal({ onAnalyze, onApply, loadLastRestore, onUn
 
           {(step === "input" || step === "loading") && (
             <>
-              <div className="text-sm text-slate-600 leading-relaxed">
-                예전에 내보내기한 구글 시트 주소를 붙여 넣으면, 그때 있던 기록 중 지금 없어진 것과 그때보다 되돌아간 상태(완료 → 미완료, 제출완료 → 제출대기, 종결 → 진행중)를 찾아 보여 줍니다.
+              <div className="flex gap-1 bg-slate-100 rounded-lg p-1 w-fit">
+                {[["file", "내보내기 파일과 비교"], ["time", "지난 시점과 비교"]].map(([key, label]) => (
+                  <button key={key} onClick={() => setMode(key)} disabled={step === "loading"}
+                    className={`text-xs px-3 py-1.5 rounded-md ${mode === key ? "bg-white shadow text-slate-800 font-medium" : "text-slate-500"}`}>{label}</button>
+                ))}
               </div>
-              <input className="input" placeholder="https://docs.google.com/spreadsheets/d/…" value={input}
-                onChange={(e) => setInput(e.target.value)} disabled={step === "loading"} />
+              {mode === "file" ? (
+                <>
+                  <div className="text-sm text-slate-600 leading-relaxed">
+                    예전에 내보내기한 구글 시트와 지금 데이터를 비교해, 그때 있던 기록 중 지금 없어진 것과 그때보다 되돌아간 상태(완료 → 미완료, 제출완료 → 제출대기, 종결 → 진행중)를 찾아 보여 줍니다.
+                  </div>
+                  {recent.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="text-[11px] text-slate-400">최근 파일 (눌러서 고르기)</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {recent.map((r) => (
+                          <button key={r.url} onClick={() => setInput(r.url)} disabled={step === "loading"}
+                            className={`text-xs px-2.5 py-1 rounded-full border ${input.trim() === r.url ? "border-indigo-400 bg-indigo-50 text-indigo-700" : "border-slate-200 text-slate-600 hover:border-slate-400"}`}
+                            title={r.url}>
+                            {r.title || "이름 없는 파일"}{r.kind && KIND_LABEL[r.kind] && !String(r.title || "").includes(KIND_LABEL[r.kind]) ? ` · ${KIND_LABEL[r.kind]}` : ""}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <input className="input" placeholder="https://docs.google.com/spreadsheets/d/…" value={input}
+                    onChange={(e) => setInput(e.target.value)} disabled={step === "loading"} />
+                  <div className="text-[11px] text-slate-500">
+                    주소가 기억나지 않으면 <a className="text-indigo-600 underline" href={DRIVE_SEARCH_URL} target="_blank" rel="noopener noreferrer">Google Drive에서 '사건관리 내보내기' 찾기</a> → 파일을 열고 주소창의 주소를 복사해 붙여 넣으세요. 한 번 쓴 파일은 다음부터 위 목록에 나옵니다.
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="text-sm text-slate-600 leading-relaxed">
+                    지정한 시각(한국시간, 분 단위)의 서버 데이터와 지금을 비교합니다. 시점 복구(PITR)를 켜 두었다면 최근 7일, 켜지 않았다면 최근 1시간 안의 시각만 조회됩니다.
+                  </div>
+                  <div className="flex gap-2 flex-wrap items-center">
+                    <input type="date" className="input-sm w-auto" value={pitrDate} onChange={(e) => setPitrDate(e.target.value)} disabled={step === "loading"} />
+                    <input type="time" className="input-sm w-auto" value={pitrTime} onChange={(e) => setPitrTime(e.target.value)} disabled={step === "loading"} />
+                  </div>
+                </>
+              )}
               <label className="flex items-start gap-2 text-xs text-slate-600">
                 <input type="checkbox" className="mt-0.5" checked={includeCrossCheck} onChange={(e) => setIncludeCrossCheck(e.target.checked)} />
                 <span>업무일지에서 '사건에 기록'한 진행·통화 기록 중 사건에서 사라진 것도 함께 찾기 (내보내기 이후 기록도 되살릴 수 있습니다)</span>
               </label>
               <div className="flex gap-2 flex-wrap">
-                <button className="btn-primary text-sm" disabled={step === "loading" || !input.trim()} onClick={() => analyze(true)}>
-                  {step === "loading" ? "비교하는 중…" : "비교하기"}
-                </button>
-                <button className="btn-ghost text-sm" disabled={step === "loading"} onClick={() => analyze(false)}>업무일지 기록만 대조</button>
+                {mode === "file" ? (
+                  <button className="btn-primary text-sm" disabled={step === "loading" || !input.trim()} onClick={() => analyze("file")}>
+                    {step === "loading" ? "비교하는 중…" : "비교하기"}
+                  </button>
+                ) : (
+                  <button className="btn-primary text-sm" disabled={step === "loading" || !pitrDate || !pitrTime} onClick={() => analyze("time")}>
+                    {step === "loading" ? "그 시점 데이터를 읽는 중…" : "그 시점과 비교하기"}
+                  </button>
+                )}
+                <button className="btn-ghost text-sm" disabled={step === "loading"} onClick={() => analyze("journal")}>업무일지 기록만 대조</button>
               </div>
               {lastRestore && (
                 <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-600 flex items-center gap-2 flex-wrap">
@@ -181,7 +246,7 @@ export default function RestoreModal({ onAnalyze, onApply, loadLastRestore, onUn
             <>
               <div className="text-sm text-slate-700">
                 <b>{bundle.label}</b>
-                <span className="ml-2 text-[11px] px-1.5 py-0.5 rounded border border-slate-200 text-slate-500">{bundle.kind === "raw" ? "원본 백업(항목 id 포함)" : bundle.kind === "journal" ? "업무일지 대조" : "내보내기 시트(사건명·날짜·내용으로 비교)"}</span>
+                <span className="ml-2 text-[11px] px-1.5 py-0.5 rounded border border-slate-200 text-slate-500">{bundle.kind === "raw" ? "원본 백업(항목 id 포함)" : bundle.kind === "pitr" ? "서버의 지난 시점(항목 id 포함)" : bundle.kind === "journal" ? "업무일지 대조" : "내보내기 시트(사건명·날짜·내용으로 비교)"}</span>
               </div>
               <div className="text-xs text-slate-500">
                 복원 후보: 사건 {plan.stats.cases}건 · 추가 {plan.stats.add}건 · 상태 되돌림 {plan.stats.status}건{plan.stats.createCase ? ` · 없는 사건 ${plan.stats.createCase}건` : ""}{plan.stats.journal ? ` · 업무일지 ${plan.stats.journal}일` : ""}
@@ -268,7 +333,7 @@ export default function RestoreModal({ onAnalyze, onApply, loadLastRestore, onUn
             {(step === "preview" || step === "applying") && "복원 전에 지금 데이터를 '사건관리 복원 전 백업' 파일로 먼저 저장합니다."}
           </div>
           <div className="flex gap-2">
-            {step === "preview" && <button className="btn-ghost text-sm" onClick={() => { setStep("input"); setBundle(null); }}>다른 파일</button>}
+            {step === "preview" && <button className="btn-ghost text-sm" onClick={() => { setStep("input"); setBundle(null); }}>다시 고르기</button>}
             {(step === "preview" || step === "applying") && (
               <button className="btn-primary text-sm" disabled={step === "applying" || selectedCount === 0} onClick={apply}>
                 {step === "applying" ? "백업 후 복원하는 중…" : `선택한 ${selectedCount}건 복원`}
