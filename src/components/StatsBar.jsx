@@ -2,7 +2,7 @@ import { useState } from "react";
 import { today, dday, fmtDate } from "../utils";
 import { buildPendingTodos } from "../statsTodos";
 
-export default function StatsBar({ cases, standaloneTodos = [], onSelectCase, onOpenStandaloneTodos, onCleanupOverdue }) {
+export default function StatsBar({ cases, standaloneTodos = [], onSelectCase, onOpenStandaloneTodos }) {
   const [dropdown, setDropdown] = useState(null); // "month" | "week" | "todos" | null
 
   // 이번 달 기일 목록
@@ -22,7 +22,6 @@ export default function StatsBar({ cases, standaloneTodos = [], onSelectCase, on
 
   // 미완료 할 일 목록
   const pendingTodos = buildPendingTodos(cases, new Date(), standaloneTodos);
-  const overdueTodoCount = pendingTodos.filter((t) => t.overdue).length;
 
   // 불변기간 미체크 항목 (마감일 임박순 정렬)
   const uncheckedDeadlines = cases.filter(c => c.status === "진행중").flatMap(c =>
@@ -103,13 +102,6 @@ export default function StatsBar({ cases, standaloneTodos = [], onSelectCase, on
         <>
           <div className="fixed inset-0 z-30" onClick={() => setDropdown(null)} />
           <div className="absolute left-0 right-0 z-40 bg-slate-800 border-b border-slate-600 shadow-xl max-h-64 overflow-y-auto">
-            {dropdown === "todos" && overdueTodoCount > 0 && onCleanupOverdue && (
-              <div className="sticky top-0 z-10 flex items-center justify-between gap-3 px-6 py-2 bg-slate-900 border-b border-slate-700">
-                <span className="text-xs text-rose-300">기한 지남 {overdueTodoCount}건</span>
-                <button onClick={() => { setDropdown(null); onCleanupOverdue(); }}
-                  className="text-xs rounded-md border border-rose-300/50 px-2.5 py-1 text-rose-200 hover:bg-rose-400/10">기한 지난 할 일 삭제…</button>
-              </div>
-            )}
             {activeDropdown.items.map((item, i) => (
               <div key={i}
                 onClick={() => handleItemClick(item, dropdown === "todos" ? "todos" : dropdown === "briefs" ? "briefs" : "overview")}

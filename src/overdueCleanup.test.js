@@ -4,11 +4,13 @@ import {
   isCleanupTarget,
   daysOverdue,
   collectOverdueTodos,
-  countOverdueTodos,
   planOverdueDeletion,
+  planOverdueOnce,
+  OVERDUE_ONCE_CUTOFF,
   buildCleanupEntry,
   appendCleanupEntry,
-  lastActiveCleanup,
+  newestCleanup,
+  findCleanup,
   markCleanupUndone,
   hiddenTaskRecords,
   mergeHiddenTasks,
@@ -62,7 +64,7 @@ test('진행 중 사건 → 일반 할 일 → 종결 사건 순으로 묶고, �
   assert.deepEqual(groups[0].items.map((i) => i.days), [17, 7, 1]);
   assert.equal(groups[0].items[1].google, true);
   assert.equal(groups[1].caseId, STANDALONE_TODOS_CASE_ID);
-  assert.equal(countOverdueTodos(cases(), standalone(), TODAY), 5);
+  assert.equal(groups.reduce((n, g) => n + g.items.length, 0), 5);
   // 키는 다시 계산해도 같다 (선택 상태 유지)
   assert.deepEqual(collectOverdueTodos(cases(), standalone(), TODAY)[0].items.map((i) => i.key), groups[0].items.map((i) => i.key));
 });
@@ -132,11 +134,15 @@ test('되돌리기 기록은 최근 것만, 문서 크기 안에서 남긴다', 
   const trimmed = appendCleanupEntry([{ at: 'a', items: [{ todo: { text: 'y'.repeat(5000) } }] }, { at: 'b', items: [] }], big, { maxBytes: 6000 });
   assert.deepEqual(trimmed.map((e) => e.at), ['b', 'z']);
 
-  const log = [{ at: '2026-10-07T01:00:00Z', items: [] }, { at: '2026-10-07T03:00:00Z', items: [] }];
-  assert.equal(lastActiveCleanup(log).at, '2026-10-07T03:00:00Z');
+  const log = [{ at: '2026-10-07T03:00:00Z', items: [] }, { at: '2026-10-07T01:00:00Z', items: [] }];
+  assert.equal(newestCleanup(log).at, '2026-10-07T03:00:00Z');
   const undone = markCleanupUndone(log, '2026-10-07T03:00:00Z', '2026-10-07T04:00:00Z');
-  assert.equal(lastActiveCleanup(undone).at, '2026-10-07T01:00:00Z');
-  assert.equal(lastActiveCleanup([]), null);
+  // 되돌린 기록도 가장 최근 기록으로 본다 (안내줄이 그 전 정리를 다시 꺼내지 않도록)
+  assert.equal(newestCleanup(undone).at, '2026-10-07T03:00:00Z');
+  assert.equal(newestCleanup(undone).undoneAt, '2026-10-07T04:00:00Z');
+  assert.equal(findCleanup(undone, '2026-10-07T01:00:00Z').undoneAt, undefined);
+  assert.equal(findCleanup(undone, 'x'), null);
+  assert.equal(newestCleanup([]), null);
 });
 
 test('지운 Google 할 일은 동기화 때 다시 가져오지 않되, Google 쪽에서 기한을 바꾸면 다시 가져온다', () => {
@@ -183,4 +189,26 @@ test('되돌리기는 지운 할 일을 원래 자리(사건·일반 할 일)에
   assert.deepEqual(restored.todos.map((t) => t.id).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6]);
   // 두 번 되돌려도 더 늘지 않는다
   assert.equal(planCleanupUndo([restored, nowCases[1]], [], { items: entry.items.filter((i) => i.caseId === 'c1') }).changes.length, 0);
+});
+
+test('1회 정리는 요청일(2026. 10. 7.)보다 기한이 앞선 미완료 할 일만 지운다 — 그 뒤 밀린 할 일은 남긴다', () => {
+  assert.equal(OVERDUE_ONCE_CUTOFF, '2026-10-07');
+  const all = [
+    { id: 'c1', title: '진행 사건', status: '진행중', todos: [
+      { id: 1, text: '10. 6. 기한', dueDate: '2026-10-06', done: false },
+      { id: 2, text: '10. 7. 기한(요청 당일)', dueDate: '2026-10-07', done: false },
+      { id: 3, text: '10. 8. 기한(요청 뒤에 밀림)', dueDate: '2026-10-08', done: false },
+      { id: 4, text: '완료', dueDate: '2026-09-01', done: true },
+      { id: 5, text: '옛 캘린더', dueDate: '2026-09-01', done: false, fromCalendar: true },
+      { id: 6, text: '기한 없음', dueDate: '', done: false },
+    ] },
+    { id: 'c2', title: '종결 사건', status: '종결', todos: [{ id: 7, text: '종결 사건 할 일', dueDate: '2026-08-01', done: false }] },
+  ];
+  const sa = [{ id: 8, text: '일반', dueDate: '2026-09-30', done: false }, { id: 9, text: '일반 미래', dueDate: '2026-12-01', done: false }];
+  // 나중에(10. 20.) 앱을 열어 실행해도 기준일은 그대로다
+  const { changes, skipped } = planOverdueOnce(all, sa);
+  assert.equal(skipped, 0);
+  assert.deepEqual(changes.map((c) => [c.caseId, c.removed.map((t) => t.id)]), [['c1', [1]], [STANDALONE_TODOS_CASE_ID, [8]], ['c2', [7]]]);
+  assert.deepEqual(changes[0].next.todos.map((t) => t.id), [2, 3, 4, 5, 6]);
+  assert.deepEqual(planOverdueOnce([], []).changes, []);
 });
