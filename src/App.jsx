@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { auth, provider, db, firebaseProjectId } from "./firebase";
 import { onAuthStateChanged, signOut, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
-import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, getDocFromServer, runTransaction, arrayUnion } from "firebase/firestore";
+import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, getDocFromServer, getDocsFromServer, runTransaction, arrayUnion } from "firebase/firestore";
 import { TYPES, todayStr, dday, fmtDate, emptyCase, SAMPLE_CASES, localDateStr } from "./utils";
 import { LIST_STATUSES, filterCaseList, countCasesByListStatus, firstActiveCaseId } from "./caseList";
 import { TypeBadge } from "./components/Badges";
@@ -32,10 +32,9 @@ import { ensureTaskCalendar, upsertTaskEvent, CalendarAuthError } from "./calend
 import { mergeGoogleTaskIntoStandaloneTodos, readStandaloneTodos, STANDALONE_TODOS_CASE_ID } from "./standaloneTodos";
 import { diffCase, applyCaseDiff, normalizeCaseDoc, stableStringify } from "./caseMerge";
 import { createCaseWriter } from "./caseWriter";
-import OverdueTodosModal from "./components/OverdueTodosModal";
 import {
-  planOverdueDeletion, buildCleanupEntry, appendCleanupEntry, lastActiveCleanup, markCleanupUndone,
-  hiddenTaskRecords, mergeHiddenTasks, unhideTasks, linkedTaskIds, isHiddenGoogleTask, planCleanupUndo, countOverdueTodos,
+  planOverdueOnce, OVERDUE_ONCE_CUTOFF, buildCleanupEntry, appendCleanupEntry, newestCleanup, findCleanup, markCleanupUndone,
+  hiddenTaskRecords, mergeHiddenTasks, unhideTasks, linkedTaskIds, isHiddenGoogleTask, planCleanupUndo,
 } from "./overdueCleanup";
 
 // 화면 전용 표시는 문서에 저장하지 않는다
@@ -100,11 +99,13 @@ export default function App() {
   const [restoreDefaultInput, setRestoreDefaultInput] = useState("");
   // 링크(?restore=시트 id)로 열면 복원 창을 그 파일로 채워 연다
   const [restoreLink, setRestoreLink] = useState(() => (typeof window === "undefined" ? "" : restoreParamFromSearch(window.location.search)));
-  const [showOverdueCleanup, setShowOverdueCleanup] = useState(false);
-  // 링크(?cleanup=overdue)로 열면 기한 지난 할 일 삭제 창을 연다
-  const [cleanupLink, setCleanupLink] = useState(() => {
-    try { return new URLSearchParams(window.location.search).get("cleanup") === "overdue"; } catch { return false; }
-  });
+  // 기한 지난 할 일 1회 정리 기록 (위쪽 안내줄·되돌리기)
+  const [todoCleanupDoc, setTodoCleanupDoc] = useState(null);
+  const [showCleanupList, setShowCleanupList] = useState(false);
+  const [cleanupBusy, setCleanupBusy] = useState(false);
+  // 1회 정리 확인이 끝났는지. 끝나기 전에는 Google 할 일 자동 동기화를 시작하지 않는다
+  // (동기화가 옛 화면 판본으로 계산해 방금 지운 할 일을 다시 써 넣지 않도록).
+  const [overdueOnceSettled, setOverdueOnceSettled] = useState(false);
   // 앱을 연 날과 오늘이 다르면(자정을 넘김) D-day 를 맞추도록 새로고침을 권한다
   const [dayChanged, setDayChanged] = useState(false);
   const [mobileView, setMobileView] = useState("list");
@@ -368,9 +369,9 @@ export default function App() {
     else alert(`${changed.length}건 착수금 완납처리 완료.`);
   }, [user, cases, saveCase]);
 
-  // ── 기한 지난 할 일 일괄 삭제 ─────────────────────────────────────────────
+  // ── 기한 지난 할 일 1회 정리 (2026. 10. 7. 요청) ──────────────────────────
   // 사건·일반 할 일마다 바뀐 판본을 저장한다(바뀐 부분만 서버 최신 문서에 얹음).
-  // 연결이 느리면 15초 뒤 결과를 먼저 알리고, 저장은 대기열이 이어서 한다.
+  // 연결이 느리면 15초 뒤 결과를 먼저 돌려주고, 저장은 대기열이 이어서 한다.
   const saveTodoChanges = useCallback(async (changes) => {
     const works = changes.map((ch) => (ch.standalone
       ? saveStandaloneTodos({ todos: ch.next.todos }, { todos: ch.base.todos })
@@ -386,69 +387,112 @@ export default function App() {
     taskSync: doc(db, "users", user.uid, "meta", "taskSync"),
   }), [user]);
 
-  // ① 되돌리기 기록과 Google 할 일 숨김 기록을 먼저 서버에 남긴다(남기지 못하면 지우지 않는다)
-  // ② 사건마다 고른 할 일만 뺀 판본을 저장한다. 미리보기 뒤 완료하거나 고친 할 일은 건너뛴다.
-  const deleteOverdueTodos = useCallback(async (selection) => {
-    if (!user) throw new Error("로그인이 필요합니다.");
-    if (!casesSynced) throw new Error("서버 데이터를 확인하는 중입니다. 잠시 뒤 다시 시도해 주세요.");
-    const { changes, skipped } = planOverdueDeletion(casesRef.current, standaloneTodosRef.current, selection);
-    if (changes.length === 0) return { deleted: 0, google: 0, skipped, failed: 0 };
-    const at = new Date().toISOString();
-    const entry = buildCleanupEntry(changes, at);
-    const hidden = hiddenTaskRecords(entry);
-    const refs = todoCleanupRefs();
-    try {
-      await Promise.race([
-        runTransaction(db, async (tx) => {
-          const logSnap = await tx.get(refs.log);
-          const syncSnap = hidden.length ? await tx.get(refs.taskSync) : null;
-          tx.set(refs.log, { entries: appendCleanupEntry(logSnap.exists() ? logSnap.data().entries : [], entry), updatedAt: at }, { merge: true });
-          if (syncSnap) {
-            tx.set(refs.taskSync, { deletedTasks: mergeHiddenTasks(syncSnap.exists() ? syncSnap.data().deletedTasks : [], hidden) }, { merge: true });
-          }
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("서버 응답 없음")), 20000)),
-      ]);
-    } catch (e) {
-      throw new Error(`되돌리기 기록을 서버에 남기지 못해 삭제하지 않았습니다(${e.code || e.message}). 연결을 확인한 뒤 다시 시도해 주세요.`);
-    }
-    const saved = await saveTodoChanges(changes);
-    return { deleted: entry.items.length, google: hidden.length, skipped, ...saved };
-  }, [user, casesSynced, todoCleanupRefs, saveTodoChanges]);
-
-  const readCleanupEntries = useCallback(async () => {
-    const snap = await getDocFromServer(todoCleanupRefs().log);
-    return snap.exists() ? (snap.data().entries || []) : [];
-  }, [todoCleanupRefs]);
-
-  const loadLastCleanup = useCallback(async () => {
+  // 요청 당시 기한이 지난 미완료 할 일을 계정당 한 번만 지운다(기준일 OVERDUE_ONCE_CUTOFF, 상시 기능 아님).
+  //  - 기기 캐시가 아니라 서버 판본을 직접 읽어 계산한다.
+  //  - 되돌리기 기록과 '정리함' 표시를 한 트랜잭션으로 먼저 남긴다. 다른 기기가 먼저 했으면 하지 않는다.
+  //  - Google 할 일에서 온 항목은 숨김 기록을 남겨 다음 동기화 때 다시 들어오지 않게 한다.
+  const runOverdueOnce = useCallback(async () => {
     if (!user) return null;
-    const last = lastActiveCleanup(await readCleanupEntries());
-    return last ? { at: last.at, count: (last.items || []).length } : null;
-  }, [user, readCleanupEntries]);
+    const refs = todoCleanupRefs();
+    const first = await getDocFromServer(refs.log);
+    if (first.exists() && first.data().overdueOnce) return null;
+    const [casesSnap, standaloneSnap] = await Promise.all([
+      getDocsFromServer(collection(db, "users", user.uid, "cases")),
+      getDocFromServer(doc(db, "users", user.uid, "meta", "standaloneTodos")),
+    ]);
+    const casesNow = casesSnap.docs.map((d) => normalizeCaseDoc({ ...d.data(), id: d.id }, todayStr));
+    const standaloneNow = readStandaloneTodos(standaloneSnap.exists() ? standaloneSnap.data() : null);
+    const { changes } = planOverdueOnce(casesNow, standaloneNow, OVERDUE_ONCE_CUTOFF);
+    const at = new Date().toISOString();
+    const entry = changes.length ? buildCleanupEntry(changes, at) : null;
+    const hidden = entry ? hiddenTaskRecords(entry) : [];
+    const claimed = await runTransaction(db, async (tx) => {
+      const logSnap = await tx.get(refs.log);
+      const data = logSnap.exists() ? logSnap.data() : {};
+      if (data.overdueOnce) return false; // 다른 기기가 먼저 정리함
+      const syncSnap = hidden.length ? await tx.get(refs.taskSync) : null;
+      tx.set(refs.log, {
+        ...(entry ? { entries: appendCleanupEntry(data.entries, entry) } : {}),
+        overdueOnce: { at, cutoff: OVERDUE_ONCE_CUTOFF, count: entry ? entry.items.length : 0 },
+        updatedAt: at,
+      }, { merge: true });
+      if (syncSnap) {
+        tx.set(refs.taskSync, { deletedTasks: mergeHiddenTasks(syncSnap.exists() ? syncSnap.data().deletedTasks : [], hidden) }, { merge: true });
+      }
+      return true;
+    });
+    if (!claimed || !entry) return null;
+    return saveTodoChanges(changes);
+  }, [user, todoCleanupRefs, saveTodoChanges]);
 
-  // 마지막 삭제 되돌리기: 지운 할 일을 원래 사건(또는 일반 할 일)에 다시 넣는다. 이미 있는 것은 넣지 않는다.
-  const undoLastCleanup = useCallback(async () => {
+  const overdueOnceStarted = useRef(false);
+  useEffect(() => {
+    if (!user || !casesSynced || overdueOnceStarted.current) return;
+    overdueOnceStarted.current = true;
+    runOverdueOnce()
+      .catch((e) => console.warn("기한 지난 할 일 1회 정리 실패(다음에 앱을 열 때 다시 시도):", e))
+      .finally(() => setOverdueOnceSettled(true));
+  }, [user, casesSynced, runOverdueOnce]);
+
+  // 정리 기록 구독: 가장 최근 정리를 위쪽 안내줄로 보여 준다(닫거나 되돌리기 전까지, 모든 기기에서)
+  useEffect(() => {
+    if (!user) { setTodoCleanupDoc(null); return undefined; }
+    return onSnapshot(doc(db, "users", user.uid, "meta", "todoCleanup"),
+      (snap) => setTodoCleanupDoc(snap.exists() ? snap.data() : null),
+      (e) => console.warn("정리 기록 동기화 오류:", e));
+  }, [user]);
+  const cleanupNotice = useMemo(() => {
+    const newest = newestCleanup(todoCleanupDoc?.entries);
+    if (!newest || newest.undoneAt || todoCleanupDoc?.noticeClosedFor === newest.at) return null;
+    return newest;
+  }, [todoCleanupDoc]);
+
+  // 정리 되돌리기: 지운 할 일을 원래 사건(또는 일반 할 일)에 다시 넣는다. 이미 있는 것은 넣지 않는다.
+  const undoCleanupEntry = useCallback(async (at) => {
     if (!user) throw new Error("로그인이 필요합니다.");
     if (!casesSynced) throw new Error("서버 데이터를 확인하는 중입니다. 잠시 뒤 다시 시도해 주세요.");
-    const last = lastActiveCleanup(await readCleanupEntries());
-    if (!last) return null;
-    const { changes, missing, present, taskIds } = planCleanupUndo(casesRef.current, standaloneTodosRef.current, last);
+    const refs = todoCleanupRefs();
+    const snap = await getDocFromServer(refs.log);
+    const entry = findCleanup(snap.exists() ? snap.data().entries : [], at);
+    if (!entry || entry.undoneAt) return null;
+    const { changes, missing, present, taskIds } = planCleanupUndo(casesRef.current, standaloneTodosRef.current, entry);
     const saved = changes.length ? await saveTodoChanges(changes) : { failed: 0 };
     const undoneAt = new Date().toISOString();
-    const refs = todoCleanupRefs();
     await runTransaction(db, async (tx) => {
       const logSnap = await tx.get(refs.log);
       const syncSnap = taskIds.length ? await tx.get(refs.taskSync) : null;
-      tx.set(refs.log, { entries: markCleanupUndone(logSnap.exists() ? logSnap.data().entries : [], last.at, undoneAt), updatedAt: undoneAt }, { merge: true });
+      tx.set(refs.log, { entries: markCleanupUndone(logSnap.exists() ? logSnap.data().entries : [], at, undoneAt), updatedAt: undoneAt }, { merge: true });
       if (syncSnap && syncSnap.exists()) {
-        tx.set(refs.taskSync, { deletedTasks: unhideTasks(syncSnap.data().deletedTasks, taskIds, last.at) }, { merge: true });
+        tx.set(refs.taskSync, { deletedTasks: unhideTasks(syncSnap.data().deletedTasks, taskIds, at) }, { merge: true });
       }
     });
     return { restored: changes.reduce((n, ch) => n + ch.restored.length, 0), missing, present, ...saved };
-  }, [user, casesSynced, readCleanupEntries, todoCleanupRefs, saveTodoChanges]);
+  }, [user, casesSynced, todoCleanupRefs, saveTodoChanges]);
 
-  const overdueCount = useMemo(() => countOverdueTodos(cases, standaloneTodos, new Date()), [cases, standaloneTodos]);
+  const undoCleanupNotice = useCallback(async () => {
+    if (!cleanupNotice || cleanupBusy) return;
+    if (!window.confirm(`정리한 할 일 ${(cleanupNotice.items || []).length}건을 모두 되살릴까요?`)) return;
+    setCleanupBusy(true);
+    try {
+      const r = await undoCleanupEntry(cleanupNotice.at);
+      if (!r) return;
+      const extra = [r.present ? `이미 있던 ${r.present}건 제외` : "", r.missing ? `사건이 없어진 ${r.missing}건 제외` : ""].filter(Boolean).join(", ");
+      setCaseSaveMsg(r.failed
+        ? { type: "err", text: `되살린 할 일 중 ${r.failed}곳을 저장하지 못했습니다. 새로고침해 확인해 주세요.` }
+        : { type: r.pending ? "warn" : "ok", text: `할 일 ${r.restored}건을 되살렸습니다${extra ? `(${extra})` : ""}.${r.pending ? " 서버 연결이 느려 저장을 이어서 진행합니다." : ""}` });
+    } catch (e) {
+      setCaseSaveMsg({ type: "err", text: `되돌리기 실패: ${e.message || e}` });
+    } finally {
+      setCleanupBusy(false);
+    }
+  }, [cleanupNotice, cleanupBusy, undoCleanupEntry]);
+
+  const closeCleanupNotice = useCallback(() => {
+    if (!user || !cleanupNotice) return;
+    setShowCleanupList(false);
+    setDoc(doc(db, "users", user.uid, "meta", "todoCleanup"), { noticeClosedFor: cleanupNotice.at }, { merge: true })
+      .catch((e) => console.warn("안내 닫기 저장 실패", e));
+  }, [user, cleanupNotice]);
 
   const applyAI = useCallback((result, matchedCase) => {
     if (matchedCase) {
@@ -709,10 +753,10 @@ export default function App() {
   }, [user, googleToken, casesSynced, cases.length, calSyncing, syncCalendar]);
 
   useEffect(() => {
-    if (!user || !googleToken || !casesSynced || cases.length === 0 || taskSyncing || autoTaskSyncStarted.current) return;
+    if (!user || !googleToken || !casesSynced || !overdueOnceSettled || cases.length === 0 || taskSyncing || autoTaskSyncStarted.current) return;
     autoTaskSyncStarted.current = true;
     syncTasks();
-  }, [user, googleToken, casesSynced, cases.length, taskSyncing, syncTasks]);
+  }, [user, googleToken, casesSynced, overdueOnceSettled, cases.length, taskSyncing, syncTasks]);
 
   const runMigration = useCallback(async () => {
     if (!user) return;
@@ -976,22 +1020,6 @@ export default function App() {
     setRestoreLink("");
   }, [restoreLink, user, casesSynced, openRestore]);
 
-  // ?cleanup=overdue 링크로 열었으면, 서버 데이터를 받은 뒤 기한 지난 할 일 삭제 창을 연다
-  useEffect(() => {
-    if (!cleanupLink) return;
-    try {
-      const url = new URL(window.location.href);
-      if (url.searchParams.has("cleanup")) {
-        url.searchParams.delete("cleanup");
-        window.history.replaceState(null, "", url.pathname + url.search + url.hash);
-      }
-    } catch { /* 주소 정리 실패는 무시 */ }
-    if (!user || !casesSynced) return;
-    setAppMode("cases");
-    setShowOverdueCleanup(true);
-    setCleanupLink(false);
-  }, [cleanupLink, user, casesSynced]);
-
   // 자정을 넘기면 D-day·'오늘' 기준이 앱을 연 날짜에 머물러 있으므로 새로고침을 권한다
   useEffect(() => {
     const check = () => { if (localDateStr(new Date()) !== todayStr) setDayChanged(true); };
@@ -1057,6 +1085,31 @@ export default function App() {
               className="flex-shrink-0 text-xs border border-white/60 rounded px-2 py-1 hover:bg-white/10">새로고침</button>
           </div>
         )}
+        {/* 기한 지난 할 일 1회 정리 결과 (닫거나 되돌리기 전까지) */}
+        {cleanupNotice && (
+          <div className="px-4 py-2 text-sm bg-slate-700 text-white">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <span className="font-medium">기한 지난 미완료 할 일 {(cleanupNotice.items || []).length}건을 정리했습니다.</span>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button onClick={() => setShowCleanupList((v) => !v)}
+                  className="text-xs border border-white/60 rounded px-2 py-1 hover:bg-white/10">{showCleanupList ? "목록 닫기" : "지운 목록"}</button>
+                <button onClick={undoCleanupNotice} disabled={cleanupBusy}
+                  className="text-xs border border-white/60 rounded px-2 py-1 hover:bg-white/10 disabled:opacity-50">{cleanupBusy ? "되살리는 중…" : "되돌리기"}</button>
+                <button onClick={closeCleanupNotice} disabled={cleanupBusy} title="안내 닫기"
+                  className="text-white/80 hover:text-white text-base leading-none px-1">✕</button>
+              </div>
+            </div>
+            {showCleanupList && (
+              <ul className="mt-2 max-h-48 overflow-y-auto text-xs text-slate-200 space-y-0.5">
+                {(cleanupNotice.items || []).map((it, i) => (
+                  <li key={i} className="break-words">
+                    {it.caseTitle} · {it.todo?.text || "(내용 없음)"}<span className="text-slate-400"> (기한 {fmtDate(it.todo?.dueDate)})</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
         {/* 사건 저장 대기·실패 안내 */}
         {writerState.waiting && (
           <div className="px-4 py-2 text-sm flex items-center justify-between gap-3 bg-amber-500 text-white">
@@ -1120,7 +1173,7 @@ export default function App() {
               {showAdv && (
                 <>
                   <div className="fixed inset-0 z-40" onClick={() => setShowAdv(false)} />
-                  <div className="absolute right-0 mt-1 w-52 bg-white rounded-lg shadow-xl border border-slate-200 py-1 z-50">
+                  <div className="absolute right-0 mt-1 w-44 bg-white rounded-lg shadow-xl border border-slate-200 py-1 z-50">
                     <div className="px-3 py-1 text-[10px] text-slate-400 uppercase tracking-wider">구글시트 (1회성)</div>
                     <button onClick={() => { setShowAdv(false); runMigration(); }}
                       className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"
@@ -1133,9 +1186,6 @@ export default function App() {
                     <div className="px-3 py-1 mt-1 border-t border-slate-100 text-[10px] text-slate-400 uppercase tracking-wider">일괄 작업</div>
                     <button onClick={() => { setShowAdv(false); bulkMarkRetainersPaid(); }}
                       className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"><span>💰</span> 착수금 일괄 완납처리</button>
-                    <button onClick={() => { setShowAdv(false); setShowOverdueCleanup(true); }}
-                      className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"
-                      title="기한이 지났는데 완료하지 않은 할 일을 확인하고 한꺼번에 지웁니다"><span>🧹</span> 기한 지난 할 일 삭제{overdueCount ? ` (${overdueCount})` : ""}</button>
                   </div>
                 </>
               )}
@@ -1192,8 +1242,7 @@ export default function App() {
         )}
 
         {/* 통계 바 */}
-        <StatsBar cases={cases} standaloneTodos={standaloneTodos} onOpenStandaloneTodos={() => setShowStandaloneTodos(true)}
-          onCleanupOverdue={() => setShowOverdueCleanup(true)} onSelectCase={(caseId, tab) => {
+        <StatsBar cases={cases} standaloneTodos={standaloneTodos} onOpenStandaloneTodos={() => setShowStandaloneTodos(true)} onSelectCase={(caseId, tab) => {
           setSelectedId(caseId);
           setActiveTab(tab || "overview");
           setMobileView("detail");
@@ -1371,17 +1420,6 @@ export default function App() {
           loadRecentSources={loadRecentSources}
           onUndo={undoLastRestore}
           onClose={() => setShowRestore(false)}
-        />
-      )}
-      {showOverdueCleanup && (
-        <OverdueTodosModal
-          cases={cases}
-          standaloneTodos={standaloneTodos}
-          ready={casesSynced}
-          onDelete={deleteOverdueTodos}
-          loadLastCleanup={loadLastCleanup}
-          onUndo={undoLastCleanup}
-          onClose={() => setShowOverdueCleanup(false)}
         />
       )}
       {showForm && (

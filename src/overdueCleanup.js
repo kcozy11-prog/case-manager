@@ -1,8 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
-//  기한 지난 미완료 할 일 일괄 삭제 (순수 헬퍼)
-//  - 대상: 사건 할 일·일반 할 일 가운데 기한이 오늘보다 앞서고 아직 완료하지 않은 것
+//  기한 지난 미완료 할 일 1회 정리 (순수 헬퍼)
+//  - 2026. 10. 7. 요청: 그때 이미 기한이 지난 미완료 할 일을 한 번만 지운다(상시 기능 아님).
+//  - 대상: 사건 할 일·일반 할 일 가운데 기한이 기준일보다 앞서고 아직 완료하지 않은 것
 //    (화면의 '기한 지남' 표시와 같은 기준). 화면에 나오지 않는 옛 캘린더 할 일(fromCalendar)은 뺀다.
-//  - 미리보기에서 본 그대로인 항목만 지운다. 그 사이 완료하거나 고친 항목은 건너뛴다.
 //  - 지운 할 일은 원본 그대로 되돌리기 기록에 남긴다.
 //  - Google 할 일에서 온 항목은 Google 쪽 목록에 그대로 있다(이 앱은 Google 할 일을 읽기만 한다).
 //    다음 동기화 때 다시 들어오지 않도록 숨김 기록을 두되, Google 쪽에서 기한을 바꾸면 다시 가져온다.
@@ -11,6 +11,8 @@ import { isOverdueTodo } from "./todoUi.js";
 import { STANDALONE_TODOS_CASE_ID, STANDALONE_TODOS_TITLE } from "./standaloneTodos.js";
 import { itemKey, stableStringify } from "./caseMerge.js";
 
+// 이 날짜보다 기한이 앞선 미완료 할 일을 한 번 지운다 (요청일 2026. 10. 7. — 그날 기한인 할 일은 남긴다)
+export const OVERDUE_ONCE_CUTOFF = "2026-10-07";
 export const CLEANUP_LOG_LIMIT = 10;
 // 기록 문서 하나는 1MB 를 넘을 수 없다. 오래된 기록부터 덜어 이 크기 안으로 둔다.
 export const CLEANUP_LOG_MAX_BYTES = 600000;
@@ -73,9 +75,6 @@ export function collectOverdueTodos(cases = [], standaloneTodos = [], today = ne
   return [...active, ...standalone, ...closed];
 }
 
-export function countOverdueTodos(cases = [], standaloneTodos = [], today = new Date()) {
-  return collectOverdueTodos(cases, standaloneTodos, today).reduce((n, g) => n + g.items.length, 0);
-}
 
 function targetOf(caseId, cases, standaloneTodos) {
   if (caseId === STANDALONE_TODOS_CASE_ID) {
@@ -95,7 +94,7 @@ function groupByCase(list) {
   return byCase;
 }
 
-// 고른 할 일만 뺀 판본을 사건마다 만든다. selection: [{ caseId, todo }] (미리보기에서 본 그대로의 할 일)
+// 고른 할 일만 뺀 판본을 사건마다 만든다. selection: [{ caseId, todo }] (계산할 때 본 그대로의 할 일)
 // 반환: { changes: [{ caseId, caseTitle, standalone, base, next, removed }], skipped }
 export function planOverdueDeletion(cases = [], standaloneTodos = [], selection = []) {
   const changes = [];
@@ -127,6 +126,13 @@ export function planOverdueDeletion(cases = [], standaloneTodos = [], selection 
   return { changes, skipped };
 }
 
+// 1회 정리 계획: 기준일보다 기한이 앞선 미완료 할 일 전부를 뺀 판본
+export function planOverdueOnce(cases = [], standaloneTodos = [], cutoff = OVERDUE_ONCE_CUTOFF) {
+  const day = new Date(`${cutoff}T00:00:00`);
+  const selection = collectOverdueTodos(cases, standaloneTodos, day).flatMap((g) => g.items);
+  return planOverdueDeletion(cases, standaloneTodos, selection);
+}
+
 // ── 되돌리기 기록 (users/{uid}/meta/todoCleanup.entries) ──────────────────────
 // 기록 한 건: { at, items: [{ caseId, caseTitle, todo }], undoneAt? }
 // (JSON 으로 한 번 복사해 값이 undefined 인 필드를 뺀다 — Firestore 는 undefined 를 저장하지 못한다)
@@ -145,11 +151,16 @@ export function appendCleanupEntry(entries, entry, { limit = CLEANUP_LOG_LIMIT, 
   return out;
 }
 
-export function lastActiveCleanup(entries) {
+// 가장 최근 정리 기록 (되돌린 것 포함 — 안내줄은 가장 최근 정리만 보여 준다)
+export function newestCleanup(entries) {
   return asArray(entries)
-    .filter((e) => e && e.at && !e.undoneAt)
+    .filter((e) => e && e.at)
     .sort((a, b) => String(a.at).localeCompare(String(b.at)))
     .pop() || null;
+}
+
+export function findCleanup(entries, at) {
+  return asArray(entries).find((e) => e && e.at === at) || null;
 }
 
 export function markCleanupUndone(entries, at, undoneAt) {
