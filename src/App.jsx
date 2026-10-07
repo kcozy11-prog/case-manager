@@ -106,6 +106,8 @@ export default function App() {
   // 1회 정리 확인이 끝났는지. 끝나기 전에는 Google 할 일 자동 동기화를 시작하지 않는다
   // (동기화가 옛 화면 판본으로 계산해 방금 지운 할 일을 다시 써 넣지 않도록).
   const [overdueOnceSettled, setOverdueOnceSettled] = useState(false);
+  // 1회 정리 진행 상태 (이 기기): idle | running | done | error — 결과를 안내줄로 알린다
+  const [overdueOnceState, setOverdueOnceState] = useState({ phase: "idle" });
   // 앱을 연 날과 오늘이 다르면(자정을 넘김) D-day 를 맞추도록 새로고침을 권한다
   const [dayChanged, setDayChanged] = useState(false);
   const [mobileView, setMobileView] = useState("list");
@@ -391,11 +393,12 @@ export default function App() {
   //  - 기기 캐시가 아니라 서버 판본을 직접 읽어 계산한다.
   //  - 되돌리기 기록과 '정리함' 표시를 한 트랜잭션으로 먼저 남긴다. 다른 기기가 먼저 했으면 하지 않는다.
   //  - Google 할 일에서 온 항목은 숨김 기록을 남겨 다음 동기화 때 다시 들어오지 않게 한다.
-  const runOverdueOnce = useCallback(async () => {
-    if (!user) return null;
+  const runOverdueOnce = useCallback(async ({ onWork } = {}) => {
+    if (!user) return { already: true };
     const refs = todoCleanupRefs();
     const first = await getDocFromServer(refs.log);
-    if (first.exists() && first.data().overdueOnce) return null;
+    if (first.exists() && first.data().overdueOnce) return { already: true };
+    if (onWork) onWork();
     const [casesSnap, standaloneSnap] = await Promise.all([
       getDocsFromServer(collection(db, "users", user.uid, "cases")),
       getDocFromServer(doc(db, "users", user.uid, "meta", "standaloneTodos")),
@@ -421,18 +424,28 @@ export default function App() {
       }
       return true;
     });
-    if (!claimed || !entry) return null;
-    return saveTodoChanges(changes);
+    if (!claimed) return { already: true };
+    if (!entry) return { count: 0 };
+    return { count: entry.items.length, ...(await saveTodoChanges(changes)) };
   }, [user, todoCleanupRefs, saveTodoChanges]);
+
+  // 실행하고 결과를 상태로 남긴다(실패해도 지운 것은 없다 — 다음에 앱을 열거나 '다시 시도'로 다시 한다)
+  const startOverdueOnce = useCallback(() => (
+    runOverdueOnce({ onWork: () => setOverdueOnceState({ phase: "running" }) })
+      .then((result) => setOverdueOnceState({ phase: "done", ...result }))
+      .catch((e) => {
+        console.warn("기한 지난 할 일 1회 정리 실패:", e);
+        setOverdueOnceState({ phase: "error", message: String(e?.code || e?.message || e) });
+      })
+      .finally(() => setOverdueOnceSettled(true))
+  ), [runOverdueOnce]);
 
   const overdueOnceStarted = useRef(false);
   useEffect(() => {
     if (!user || !casesSynced || overdueOnceStarted.current) return;
     overdueOnceStarted.current = true;
-    runOverdueOnce()
-      .catch((e) => console.warn("기한 지난 할 일 1회 정리 실패(다음에 앱을 열 때 다시 시도):", e))
-      .finally(() => setOverdueOnceSettled(true));
-  }, [user, casesSynced, runOverdueOnce]);
+    startOverdueOnce();
+  }, [user, casesSynced, startOverdueOnce]);
 
   // 정리 기록 구독: 가장 최근 정리를 위쪽 안내줄로 보여 준다(닫거나 되돌리기 전까지, 모든 기기에서)
   useEffect(() => {
@@ -445,6 +458,12 @@ export default function App() {
     const newest = newestCleanup(todoCleanupDoc?.entries);
     if (!newest || newest.undoneAt || todoCleanupDoc?.noticeClosedFor === newest.at) return null;
     return newest;
+  }, [todoCleanupDoc]);
+  // 1회 정리를 했는데 지울 할 일이 없었던 경우도 알린다(닫기 전까지)
+  const overdueOnceZero = useMemo(() => {
+    const once = todoCleanupDoc?.overdueOnce;
+    if (!once || once.count !== 0 || todoCleanupDoc?.noticeClosedFor === once.at) return null;
+    return once;
   }, [todoCleanupDoc]);
 
   // 정리 되돌리기: 지운 할 일을 원래 사건(또는 일반 할 일)에 다시 넣는다. 이미 있는 것은 넣지 않는다.
@@ -488,11 +507,12 @@ export default function App() {
   }, [cleanupNotice, cleanupBusy, undoCleanupEntry]);
 
   const closeCleanupNotice = useCallback(() => {
-    if (!user || !cleanupNotice) return;
+    const at = cleanupNotice?.at || overdueOnceZero?.at;
+    if (!user || !at) return;
     setShowCleanupList(false);
-    setDoc(doc(db, "users", user.uid, "meta", "todoCleanup"), { noticeClosedFor: cleanupNotice.at }, { merge: true })
+    setDoc(doc(db, "users", user.uid, "meta", "todoCleanup"), { noticeClosedFor: at }, { merge: true })
       .catch((e) => console.warn("안내 닫기 저장 실패", e));
-  }, [user, cleanupNotice]);
+  }, [user, cleanupNotice, overdueOnceZero]);
 
   const applyAI = useCallback((result, matchedCase) => {
     if (matchedCase) {
@@ -1108,6 +1128,23 @@ export default function App() {
                 ))}
               </ul>
             )}
+          </div>
+        )}
+        {!cleanupNotice && overdueOnceState.phase === "running" && (
+          <div className="px-4 py-2 text-sm bg-slate-700 text-white font-medium">기한 지난 미완료 할 일을 정리하는 중…</div>
+        )}
+        {!cleanupNotice && overdueOnceState.phase === "error" && (
+          <div className="px-4 py-2 text-sm flex items-center justify-between gap-3 bg-red-600 text-white">
+            <span className="font-medium break-all">기한 지난 할 일 정리를 하지 못했습니다({overdueOnceState.message}). 지운 것은 없습니다.</span>
+            <button onClick={startOverdueOnce}
+              className="flex-shrink-0 text-xs border border-white/60 rounded px-2 py-1 hover:bg-white/10">다시 시도</button>
+          </div>
+        )}
+        {!cleanupNotice && overdueOnceState.phase !== "running" && overdueOnceZero && (
+          <div className="px-4 py-2 text-sm flex items-center justify-between gap-3 bg-slate-700 text-white">
+            <span className="font-medium">기한 지난 할 일 정리: 기한이 {fmtDate(overdueOnceZero.cutoff)}보다 앞선 미완료 할 일이 없어 지운 것이 없습니다.</span>
+            <button onClick={closeCleanupNotice} title="안내 닫기"
+              className="flex-shrink-0 text-white/80 hover:text-white text-base leading-none px-1">✕</button>
           </div>
         )}
         {/* 사건 저장 대기·실패 안내 */}
