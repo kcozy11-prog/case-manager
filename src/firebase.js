@@ -13,6 +13,9 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 
+// 과거 시점 조회(REST)에 쓰는 프로젝트 id — 공개 설정값이며 비밀이 아니다
+export const firebaseProjectId = firebaseConfig.projectId || "";
+
 export const auth = getAuth(app);
 export const provider = new GoogleAuthProvider();
 // 캘린더 읽기 + 쓰기(전용 캘린더 생성·할일 이벤트 등록). 권한 확대로 1회 재로그인 필요.
