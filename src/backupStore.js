@@ -6,7 +6,7 @@
 import { collection, doc, getDocs, getDocsFromServer, getDoc, getDocFromServer } from "firebase/firestore";
 import { db } from "./firebase";
 
-export const BACKUP_META_DOCS = ["standaloneTodos", "taskSync", "calendarSync", "restoreLog"];
+export const BACKUP_META_DOCS = ["standaloneTodos", "taskSync", "calendarSync", "restoreLog", "todoCleanup"];
 
 async function readAll(uid, fromServer) {
   const casesCol = collection(db, "users", uid, "cases");
