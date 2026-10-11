@@ -493,3 +493,18 @@ test("resolveTaskDone: 지난 동기화 기록이 없으면 Google 상태를 따
   assert.equal(resolveTaskDone({ done: true, sourceUpdatedAt: "x" }, { done: false, sourceUpdatedAt: "x" }), true);
   assert.equal(resolveTaskDone({ done: false, sourceUpdatedAt: "x" }, { done: true, sourceUpdatedAt: "y" }), true);
 });
+
+test("matchTasksToCases: 정규화하면 비거나 짧아지는 사건번호는 사건번호 매칭에 쓰지 않는다", () => {
+  const cases = [
+    { id: "blank", title: "가나다 자문", status: "진행중", caseNumber: " - ", todos: [] },
+    { id: "short", title: "라마바 사건", status: "진행중", caseNumber: "1-2", todos: [] },
+    { id: "real", title: "분양대금 반환", status: "진행중", caseNumber: "2026가합12345", todos: [] },
+  ];
+  const tasks = [
+    { id: "t1", title: "2026가합12345 준비서면 제출" },
+    { id: "t2", title: "2026가단999 기록 열람" },
+  ];
+  const { matched, unmatched } = matchTasksToCases(tasks, cases);
+  assert.deepEqual(matched.map((m) => [m.task.id, m.caseObj.id]), [["t1", "real"]]);
+  assert.deepEqual(unmatched.map((u) => u.task.id), ["t2"]);
+});

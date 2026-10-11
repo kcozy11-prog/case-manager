@@ -74,3 +74,18 @@ test("findMatchingCase keeps existing 사건번호 and 당사자 matching behavi
   assert.equal(findMatchingCase(["2026가합12345"], cases)?.id, "1");
   assert.equal(findMatchingCase(["보험설계사"], cases)?.id, "2");
 });
+
+test("findMatchingCase: 하이픈·공백뿐인 사건번호는 사건번호 비교에서 빠진다 (모든 식별어가 그 사건에 붙던 버그)", () => {
+  const cases = [
+    { id: "blank", title: "가나다 자문", caseNumber: " - " },
+    { id: "dash", title: "라마바 사건", caseNumber: "--" },
+    { id: "short", title: "사아자 사건", caseNumber: "1-2" },
+    { id: "real", title: "분양대금 반환", caseNumber: "2026가합12345" },
+  ];
+  // 4자 이상 식별어 — 예전에는 normalize(" - ") === "" 이라 "".includes 가 참이 되어 첫 사건으로 붙었다
+  assert.equal(findMatchingCase(["홍길동보험계약"], cases), null);
+  assert.equal(findMatchingCase(["2026가합12345"], cases)?.id, "real");
+  assert.equal(findMatchingCase(["분양대금"], cases)?.id, "real");
+  // 사건번호가 빈칸이어도 사건명으로는 여전히 찾는다
+  assert.equal(findMatchingCase(["가나다라"], cases)?.id, "blank");
+});

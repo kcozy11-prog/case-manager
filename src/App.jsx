@@ -31,7 +31,9 @@ import GlobalSearch from "./components/GlobalSearch";
 import { ensureTaskCalendar, upsertTaskEvent, CalendarAuthError } from "./calendarPush";
 import { mergeGoogleTaskIntoStandaloneTodos, readStandaloneTodos, STANDALONE_TODOS_CASE_ID } from "./standaloneTodos";
 import { diffCase, applyCaseDiff, normalizeCaseDoc, stableStringify } from "./caseMerge";
-import { createCaseWriter } from "./caseWriter";
+import { createCaseWriter, bindWriterLifecycle, pendingNotice } from "./caseWriter";
+import { createPendingStore } from "./pendingWrites";
+import { lastBackupInfo, backupAgeLabel, formatBackupDate } from "./backupStatus";
 import {
   planOverdueOnce, OVERDUE_ONCE_CUTOFF, buildCleanupEntry, appendCleanupEntry, newestCleanup, findCleanup, markCleanupUndone,
   hiddenTaskRecords, mergeHiddenTasks, unhideTasks, linkedTaskIds, isHiddenGoogleTask, planCleanupUndo,
@@ -81,6 +83,7 @@ export default function App() {
   const [casesSynced, setCasesSynced] = useState(false);
   const [serverStandaloneTodos, setServerStandaloneTodos] = useState([]);
   const [writerState, setWriterState] = useState({ pending: 0, waiting: false, error: null });
+  const writerNotice = pendingNotice(writerState);
   const [writerTick, setWriterTick] = useState(0);
   const writerRef = useRef(null);
   const [selectedId, setSelectedId] = useState(null);
@@ -89,6 +92,14 @@ export default function App() {
   const [typeFilter, setTypeFilter] = useState("전체");
   const [activeTab, setActiveTab] = useState("overview");
   const [appMode, setAppMode] = useState("cases"); // cases | journal
+  // 업무일지에 저장하지 않은 입력이 있는지 (화면을 바꾸거나 로그아웃할 때 경고)
+  const journalDirtyRef = useRef(false);
+  const onJournalDirtyChange = useCallback((d) => { journalDirtyRef.current = !!d; }, []);
+  const confirmLeaveJournal = useCallback(() => (
+    !journalDirtyRef.current || window.confirm(
+      "업무일지에 저장하지 않은 내용이 있습니다.\n화면을 바꾸면 입력은 이 기기에 초안으로만 남습니다(업무일지를 다시 열면 복구할 수 있습니다). 계속할까요?",
+    )
+  ), []);
   const [showSearch, setShowSearch] = useState(false);
   const [showAdv, setShowAdv] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -110,6 +121,11 @@ export default function App() {
   const [overdueOnceState, setOverdueOnceState] = useState({ phase: "idle" });
   // 앱을 연 날과 오늘이 다르면(자정을 넘김) D-day 를 맞추도록 새로고침을 권한다
   const [dayChanged, setDayChanged] = useState(false);
+  // 내보내기 기록(meta/exports) — 마지막 백업 날짜 표시용
+  const [exportItems, setExportItems] = useState([]);
+  const [backupNoticeHiddenOn, setBackupNoticeHiddenOn] = useState(() => {
+    try { return localStorage.getItem("caseManager.backupNoticeHiddenOn") || ""; } catch { return ""; }
+  });
   const [mobileView, setMobileView] = useState("list");
   const [googleToken, setGoogleToken] = useState(() => sessionStorage.getItem("googleToken"));
   const [calSyncing, setCalSyncing] = useState(false);
@@ -134,22 +150,22 @@ export default function App() {
   // 사건 저장 대기열 (사건별 순서 보장 · 서버 연결 대기 · 화면 즉시 반영)
   useEffect(() => {
     if (!user) return undefined;
+    // 대기 중인 저장은 사용자별로 이 기기에 보관한다. 앱을 다시 열면 보관분을 불러와 화면에 겹쳐 보이고,
+    // 서버 판본을 받은 뒤(casesSynced → release) 같은 diff 병합 경로로 보낸다.
     const writer = createCaseWriter({
       commit: (caseId, diff, newCase) => commitCaseDiff(user.uid, caseId, diff, newCase),
       onChange: (s) => { setWriterState(s); setWriterTick((t) => t + 1); },
       isOnline: () => typeof navigator === "undefined" || navigator.onLine !== false,
+      store: createPendingStore(user.uid),
+      startPaused: true,
     });
     writerRef.current = writer;
-    const onOnline = () => writer.retryNow();
-    // 서버에 아직 못 보낸 저장이 있으면 창을 닫기 전에 묻는다
-    const onBeforeUnload = (e) => {
-      if (writer.state().pending > 0) { e.preventDefault(); e.returnValue = ""; }
-    };
-    window.addEventListener("online", onOnline);
-    window.addEventListener("beforeunload", onBeforeUnload);
+    setWriterState(writer.state());
+    setWriterTick((t) => t + 1);
+    // online → 바로 다시 보냄, 화면 숨김 → 보내 봄, 대기분이 있으면 창 닫기 전에 물음
+    const unbind = bindWriterLifecycle(writer);
     return () => {
-      window.removeEventListener("online", onOnline);
-      window.removeEventListener("beforeunload", onBeforeUnload);
+      unbind();
       writer.dispose();
       if (writerRef.current === writer) writerRef.current = null;
       setWriterState({ pending: 0, waiting: false, error: null });
@@ -180,7 +196,11 @@ export default function App() {
       const writer = writerRef.current;
       if (writer) writer.reconcile(data);
       setServerCases(data);
-      if (fromServer) setCasesSynced(true);
+      if (fromServer) {
+        setCasesSynced(true);
+        // 서버 판본을 받은 뒤에 대기분(지난번에 이 기기에 보관된 것 포함)을 보내기 시작한다
+        if (writer) writer.release();
+      }
       const visible = writer ? writer.overlay(data) : data;
       setSelectedId(prev => {
         if (prev && visible.find(c => c.id === prev)) return prev;
@@ -806,10 +826,28 @@ export default function App() {
     if (!user || !url) return;
     try {
       await setDoc(doc(db, "users", user.uid, "meta", "exports"), {
-        items: arrayUnion({ url, title: title || "", kind, at: new Date().toISOString() }),
+        items: arrayUnion({ url, title: title || "", kind, at: new Date().toISOString(), ...(kind === "source" ? {} : { fromServer: true }) }),
       }, { merge: true });
     } catch (e) { console.warn("[복원] 파일 목록 기록 실패", e); }
   }, [user]);
+
+  // 내보내기 기록 구독 → 마지막 백업 N일 전
+  useEffect(() => {
+    if (!user) { setExportItems([]); return undefined; }
+    return onSnapshot(doc(db, "users", user.uid, "meta", "exports"),
+      (snap) => setExportItems(snap.exists() && Array.isArray(snap.data().items) ? snap.data().items : []),
+      (e) => console.warn("[백업] 내보내기 기록 구독 오류", e));
+  }, [user]);
+  const backupInfo = useMemo(() => lastBackupInfo(exportItems, Date.now()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [exportItems, dayChanged]);
+  const todayKeyKst = localDateStr(new Date());
+  const showBackupNotice = !!user && casesSynced && backupInfo.stale && backupNoticeHiddenOn !== todayKeyKst;
+  const hideBackupNoticeToday = useCallback(() => {
+    const k = localDateStr(new Date());
+    setBackupNoticeHiddenOn(k);
+    try { localStorage.setItem("caseManager.backupNoticeHiddenOn", k); } catch { /* 이 기기에서만 숨김 */ }
+  }, []);
 
   const loadRecentSources = useCallback(async () => {
     if (!user) return [];
@@ -825,8 +863,18 @@ export default function App() {
       if (!token) { alert("Google 인증이 필요합니다."); return; }
     }
     try {
-      // 서버 판본 전체를 읽어, 사람이 읽는 시트와 '복원용 원본'(숨김 시트)을 함께 만든다
-      const all = await collectAllUserData(user.uid);
+      // 서버 판본 전체를 읽어, 사람이 읽는 시트와 '복원용 원본'(숨김 시트)을 함께 만든다.
+      // 백업은 서버 데이터로만 만든다 — 서버에 닿지 못하면 기기 캐시(옛 사본일 수 있음)로 만들지 않고 멈춘다.
+      let all;
+      try {
+        all = await Promise.race([
+          collectAllUserData(user.uid, { requireServer: true }),
+          new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error("서버 응답 없음(20초)"), { code: "timeout" })), 20000)),
+        ]);
+      } catch (e) {
+        alert(`서버에 연결되지 않아 내보내기(백업)를 하지 않았습니다. 백업은 서버 데이터로만 만듭니다. 연결된 뒤 다시 시도해 주세요.\n(${e.code || e.message})`);
+        return;
+      }
       const exportCases = all.cases.map(c => normalizeCaseDoc(c, todayStr));
       const exportTitle = `사건관리 내보내기 ${new Date().toLocaleDateString("ko-KR")}`;
       const options = { title: exportTitle, raw: { data: all, info: { fromServer: all.fromServer, appBuild: __BUILD_TIME__ } } };
@@ -840,7 +888,6 @@ export default function App() {
         url = await exportToGoogleSheet(token, exportCases, all.journal, options);
       }
       if (url) recordRestoreSource({ url, title: exportTitle, kind: "export" });
-      if (url && !all.fromServer) alert("서버에 연결되지 않아 이 기기에 저장된 사본으로 내보냈습니다. 연결된 뒤 한 번 더 내보내기를 권합니다.");
       if (url) openSpreadsheetUrl(url);
       else alert("내보내기 실패. 로그아웃 후 다시 로그인해주세요.");
     } catch (e) {
@@ -1147,10 +1194,21 @@ export default function App() {
               className="flex-shrink-0 text-white/80 hover:text-white text-base leading-none px-1">✕</button>
           </div>
         )}
+        {showBackupNotice && (
+          <div className="px-4 py-2 text-sm flex items-center justify-between gap-3 bg-red-600 text-white flex-wrap">
+            <span className="font-medium">
+              ⚠ {backupInfo.none ? "내보내기(백업) 기록이 없습니다." : `${backupAgeLabel(backupInfo)}입니다(${formatBackupDate(backupInfo.at)}).`} 7일이 넘었으니 내보내기로 백업해 두세요.
+            </span>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <button onClick={runExport} className="text-xs border border-white/70 rounded px-2 py-1 hover:bg-white/10">지금 내보내기</button>
+              <button onClick={hideBackupNoticeToday} className="text-xs text-white/80 hover:text-white px-1">오늘은 닫기</button>
+            </div>
+          </div>
+        )}
         {/* 사건 저장 대기·실패 안내 */}
-        {writerState.waiting && (
-          <div className="px-4 py-2 text-sm flex items-center justify-between gap-3 bg-amber-500 text-white">
-            <span className="font-medium break-all">⏱ 서버 연결 대기 중 — 저장 대기 {writerState.pending}건. 연결되면 자동으로 저장합니다. 이 창을 닫지 마세요.</span>
+        {writerNotice && (
+          <div className={`px-4 py-2 text-sm flex items-center justify-between gap-3 text-white ${writerNotice.tone === "warn" ? "bg-amber-500" : "bg-slate-700"}`}>
+            <span className="font-medium break-all">⏱ {writerNotice.text}</span>
             <button onClick={() => writerRef.current?.retryNow()}
               className="flex-shrink-0 text-xs border border-white/60 rounded px-2 py-1 hover:bg-white/10">지금 다시 시도</button>
           </div>
@@ -1168,7 +1226,7 @@ export default function App() {
             <span className="text-white font-bold text-base tracking-tight hidden sm:inline">법률 업무 통합</span>
             <div className="flex items-center bg-slate-800 rounded-lg p-0.5 ml-1">
               {[["cases", "사건"], ["journal", "업무일지"]].map(([key, label]) => (
-                <button key={key} onClick={() => setAppMode(key)}
+                <button key={key} onClick={() => { if (key !== appMode && appMode === "journal" && !confirmLeaveJournal()) return; setAppMode(key); }}
                   className={`text-xs px-3 py-1.5 rounded-md transition-colors font-medium ${
                     appMode === key ? "bg-indigo-500 text-white" : "text-slate-400 hover:text-white"
                   }`}>{label}</button>
@@ -1205,18 +1263,24 @@ export default function App() {
             </button>
             <div className="relative">
               <button onClick={() => setShowAdv(v => !v)}
-                className="flex items-center text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-2.5 py-1.5 rounded-lg transition-colors"
-                title="고급 (구글시트 가져오기/내보내기)">⋯</button>
+                className="relative flex items-center text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-2.5 py-1.5 rounded-lg transition-colors"
+                title={`고급 (구글시트 가져오기/내보내기) — ${backupAgeLabel(backupInfo)}`}>
+                ⋯
+                {backupInfo.stale && <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-red-500 ring-2 ring-slate-900" aria-label="백업이 7일 넘게 없음" />}
+              </button>
               {showAdv && (
                 <>
                   <div className="fixed inset-0 z-40" onClick={() => setShowAdv(false)} />
-                  <div className="absolute right-0 mt-1 w-44 bg-white rounded-lg shadow-xl border border-slate-200 py-1 z-50">
+                  <div className="absolute right-0 mt-1 w-52 bg-white rounded-lg shadow-xl border border-slate-200 py-1 z-50">
                     <div className="px-3 py-1 text-[10px] text-slate-400 uppercase tracking-wider">구글시트 (1회성)</div>
                     <button onClick={() => { setShowAdv(false); runMigration(); }}
                       className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"
                       title="옛 '사건진행부' 시트에서 앱에 없는 사건만 추가합니다 (내보내기 파일 복원은 '데이터 복원')"><span>📥</span> 사건진행부 가져오기</button>
                     <button onClick={() => { setShowAdv(false); runExport(); }}
                       className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"><span>📤</span> 내보내기 (사건+업무일지)</button>
+                    <div className={`px-3 pb-1.5 -mt-1 pl-8 text-[10px] ${backupInfo.stale ? "text-red-600 font-semibold" : "text-slate-400"}`}>
+                      {backupAgeLabel(backupInfo)}{backupInfo.at ? ` (${formatBackupDate(backupInfo.at)})` : ""}
+                    </div>
                     <button onClick={() => { setShowAdv(false); openRestore(); }}
                       className="w-full text-left px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 flex items-center gap-2"
                       title="예전 내보내기 파일과 비교해 없어진 기록·되돌아간 상태를 되살립니다"><span>🛟</span> 데이터 복원</button>
@@ -1232,7 +1296,11 @@ export default function App() {
               {!casesSynced && <span className="text-amber-300 text-[10px]" title="기기에 저장된 사본을 보여 주는 중입니다. 서버 데이터를 받으면 자동 동기화가 시작됩니다.">서버 확인 중…</span>}
               <span className="text-slate-500 text-[10px] hidden sm:inline" title={`빌드: ${__BUILD_TIME__}`}>v{__BUILD_TIME__}</span>
               <span className="text-slate-300 text-xs hidden sm:inline">{user.displayName}</span>
-              <button onClick={() => { sessionStorage.removeItem("googleToken"); setGoogleToken(null); signOut(auth); }}
+              <button onClick={() => {
+                if (appMode === "journal" && !confirmLeaveJournal()) return;
+                if ((writerRef.current?.state().pending || 0) > 0 && !window.confirm("서버에 아직 보내지 못한 사건 저장이 있습니다. 이 기기에 보관되어 다시 로그인하면 이어서 보냅니다. 로그아웃할까요?")) return;
+                sessionStorage.removeItem("googleToken"); setGoogleToken(null); signOut(auth);
+              }}
                 className="text-xs text-slate-400 hover:text-white border border-slate-600 hover:border-slate-400 px-2.5 py-1.5 rounded-lg transition-colors">
                 로그아웃
               </button>
@@ -1288,7 +1356,7 @@ export default function App() {
 
         {/* 본문 */}
         {appMode === "journal" ? (
-          <JournalApp user={user} cases={cases} onPushTask={pushTaskToCalendar} onUpdateCase={saveCaseFromJournal} />
+          <JournalApp user={user} cases={cases} onPushTask={pushTaskToCalendar} onUpdateCase={saveCaseFromJournal} onDirtyChange={onJournalDirtyChange} />
         ) : (
         <div className="flex flex-1 min-h-0">
           {/* 좌측 목록 */}
