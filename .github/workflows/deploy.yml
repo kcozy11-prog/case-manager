@@ -10,6 +10,7 @@
 #         (이 값은 배포된 앱에 그대로 포함되는 공개 값이다. 데이터 보호는 Firestore 보안 규칙과
 #          Google 로그인이 담당한다.)
 #     값이 하나라도 비면 빌드 전에 중단되어 잘못된 앱이 배포되지 않는다.
+#     단위 테스트(npm test)가 하나라도 실패하면 빌드·배포하지 않는다.
 #
 # (2) 템플릿 복사본(다른 변호사의 저장소)
 #     저장소 변수(Variables)에 VITE_FIREBASE_API_KEY 등이 설정된 경우에만 실행되며,
@@ -41,6 +42,8 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - name: 단위 테스트 (실패하면 배포하지 않음)
+        run: npm test
       - name: Firebase 설정 준비
         id: firebase
         env:
@@ -128,6 +131,8 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - name: 단위 테스트 (실패하면 배포하지 않음)
+        run: npm test
       - run: npm run build
         env:
           VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}

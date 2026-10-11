@@ -1,7 +1,9 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
-  subscribeJournal, saveJournalEntry, deleteJournalEntry, emptyJournalEntry,
+  subscribeJournal, saveJournalEntryMerged, deleteJournalEntry, emptyJournalEntry,
 } from "../../journalStore";
+import { mergeJournalEntries } from "../../journalMerge";
+import { saveJournalDraft, loadJournalDraft, clearJournalDraft, draftDiffersFromForm } from "../../journalDraft";
 import {
   parseJsonArray, carryForwardTomorrowTasks, carryForwardPendingDocs,
   buildLearnedTopicGroups, searchLearnedItems, buildLearnedArchiveStats,
@@ -124,7 +126,58 @@ function delegatedBadge(item, currentDate) {
   return { text: "오늘 위임", tone: "slate" };
 }
 
-export default function JournalApp({ user, cases = [], onPushTask = null, onUpdateCase = null }) {
+function fmtStamp(iso) {
+  try { return new Date(iso).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }); } catch { return iso || ""; }
+}
+
+const isOfflineError = (e) => e?.code === "unavailable" || e?.code === "deadline-exceeded" || e?.code === "timeout"
+  || /offline|network|failed to fetch/i.test(String(e?.message || ""));
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error("서버 응답 없음"), { code: "timeout" })), ms)),
+  ]);
+}
+
+// 저장 충돌 선택 창: 같은 항목을 이 기기와 다른 기기가 서로 다르게 바꾼 경우만 묻는다
+function JournalConflictDialog({ conflicts, onResolve, onCancel }) {
+  const [choices, setChoices] = useState(() => Object.fromEntries(conflicts.map((c) => [c.id, "mine"])));
+  const Row = ({ c, side, text }) => (
+    <label className={`flex items-start gap-2 rounded-lg border px-3 py-2 cursor-pointer ${choices[c.id] === side ? "border-indigo-400 bg-indigo-50" : "border-slate-200"}`}>
+      <input type="radio" className="mt-1" checked={choices[c.id] === side} onChange={() => setChoices((p) => ({ ...p, [c.id]: side }))} />
+      <span className="min-w-0 flex-1">
+        <span className="block text-[11px] text-slate-500">{side === "mine" ? "이 기기(지금 화면)" : "다른 기기(서버에 저장된 것)"}</span>
+        <span className="block text-sm text-slate-700 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">{text || "(비어 있음)"}</span>
+      </span>
+    </label>
+  );
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-2 sm:p-4">
+      <div className="bg-white rounded-2xl w-full max-w-xl shadow-2xl flex flex-col max-h-[92vh]">
+        <div className="px-5 py-3.5 rounded-t-2xl" style={{ background: "#1E293B" }}>
+          <div className="text-white font-semibold">다른 기기에서 바뀐 내용과 겹칩니다</div>
+          <div className="text-slate-400 text-xs mt-0.5">겹치지 않는 내용은 이미 합쳤습니다. 아래 {conflicts.length}건만 어느 쪽을 남길지 골라 주세요.</div>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {conflicts.map((c) => (
+            <div key={c.id} className="space-y-1.5">
+              <div className="text-xs font-semibold text-slate-600">{c.label}</div>
+              <Row c={c} side="mine" text={c.mine} />
+              <Row c={c} side="theirs" text={c.theirs} />
+            </div>
+          ))}
+        </div>
+        <div className="px-4 py-3 border-t border-slate-100 flex justify-end gap-2">
+          <button className="btn-ghost text-sm" onClick={onCancel}>저장하지 않고 닫기</button>
+          <button className="btn-primary text-sm" onClick={() => onResolve(choices)}>고른 대로 합쳐 저장</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function JournalApp({ user, cases = [], onPushTask = null, onUpdateCase = null, onDirtyChange = null }) {
   const [entries, setEntries] = useState({});
   const [view, setView] = useState("write"); // write | list | search | learned | migrate
   const [currentDate, setCurrentDate] = useState(todayKey());
@@ -153,6 +206,75 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
   const [staleSuggestion, setStaleSuggestion] = useState(null); // { date, prevDate, docs, tasks }
   const [staleFormNotice, setStaleFormNotice] = useState(false);
   const [reloadTick, setReloadTick] = useState(0);
+  // 이 화면이 출발한 서버 판본(저장 때 3자 병합의 기준)
+  const baseEntryRef = useRef(null);
+  const dirtyRef = useRef(false);
+  const [saving, setSaving] = useState(false);
+  const [saveNotice, setSaveNotice] = useState(null); // { tone: "info"|"warn"|"err", text }
+  const [conflictState, setConflictState] = useState(null); // { conflicts }
+  const [draftOffer, setDraftOffer] = useState(null); // 이 기기에 남은 초안
+  const retryOnOnlineRef = useRef(false);
+
+  dirtyRef.current = dirty;
+
+  // 상위(App)에 미저장 여부를 알린다 — 사건 화면으로 바꾸거나 로그아웃할 때 경고하는 데 쓴다
+  useEffect(() => { if (onDirtyChange) onDirtyChange(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => () => { if (onDirtyChange) onDirtyChange(false); }, [onDirtyChange]);
+
+  // 작성 중인 내용을 이 기기에 초안으로 자동 보관한다(입력이 멈추고 0.4초 뒤)
+  const flushDraft = useCallback(() => {
+    if (!user || !dirtyRef.current || loadedDateRef.current !== currentDate) return;
+    saveJournalDraft(user.uid, currentDate, { form: formRef.current, base: baseEntryRef.current });
+  }, [user, currentDate]);
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const t = setTimeout(flushDraft, 400);
+    return () => clearTimeout(t);
+  }, [form, dirty, flushDraft]);
+
+  // 창을 닫거나 앱을 내릴 때: 초안을 바로 남기고, 저장하지 않은 내용이 있으면 닫기 전에 묻는다
+  useEffect(() => {
+    const onBeforeUnload = (e) => {
+      flushDraft();
+      if (dirtyRef.current) { e.preventDefault(); e.returnValue = ""; return ""; }
+      return undefined;
+    };
+    const onHide = () => { if (document.visibilityState === "hidden") flushDraft(); };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      document.removeEventListener("visibilitychange", onHide);
+      flushDraft(); // 화면을 떠날 때(사건 화면으로 바꾸기 등)
+    };
+  }, [flushDraft]);
+
+  // 저장하지 않은 채 다른 날짜로 옮길 때 확인한다
+  const confirmLeave = useCallback(() => {
+    if (!dirtyRef.current) return true;
+    flushDraft();
+    return window.confirm("저장하지 않은 내용이 있습니다.\n다른 날짜로 옮기면 이 화면의 입력은 이 기기에 초안으로만 남습니다(이 날짜를 다시 열면 복구할 수 있습니다). 옮길까요?");
+  }, [flushDraft]);
+  const changeDate = useCallback((k) => {
+    if (!k || k === currentDate) return;
+    if (!confirmLeave()) return;
+    setCurrentDate(k);
+  }, [currentDate, confirmLeave]);
+
+  const restoreDraft = useCallback(() => {
+    const d = draftOffer;
+    if (!d) return;
+    setForm(d.form);
+    formRef.current = d.form;
+    // 초안이 출발한 서버 판본을 기준으로 삼아, 저장할 때 그 뒤 다른 기기 변경과 합친다
+    baseEntryRef.current = d.base || null;
+    setDirty(true);
+    setDraftOffer(null);
+  }, [draftOffer]);
+  const discardDraft = useCallback(() => {
+    if (user) clearJournalDraft(user.uid, currentDate);
+    setDraftOffer(null);
+  }, [user, currentDate]);
 
   // 실시간 구독
   // 기기 캐시(오래된 사본일 수 있음)만 받은 상태에서는 작성 폼을 만들지 않는다. 캐시로 이월을 계산하면
@@ -211,9 +333,17 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     setForm(f);
     loadedDateRef.current = currentDate;
     loadedSavedAtRef.current = (base && base._savedAt) || null;
+    baseEntryRef.current = base;
     formFromServerRef.current = entriesFromServer;
     setStaleFormNotice(false);
     setDirty(false);
+    // 저장하지 않고 닫은 초안이 이 기기에 남아 있으면 복구를 제안한다
+    const draft = user ? loadJournalDraft(user.uid, currentDate) : null;
+    if (draft && draftDiffersFromForm(draft, f)) setDraftOffer(draft);
+    else {
+      setDraftOffer(null);
+      if (draft && user) clearJournalDraft(user.uid, currentDate);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentDate, entries, user, entriesReady, entriesFromServer, reloadTick]);
 
@@ -313,31 +443,87 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     return stamp;
   }, []);
 
-  const save = useCallback(async () => {
-    if (!user || !entriesReady) return;
-    // 이 화면을 연 뒤 다른 기기(또는 다른 창)가 같은 날짜 일지를 저장했다면 덮어쓰기 전에 묻는다
-    const serverSavedAt = entries[currentDate]?._savedAt || null;
-    if (serverSavedAt && serverSavedAt !== loadedSavedAtRef.current && !ownSavedAtRef.current.has(serverSavedAt)) {
-      const ok = window.confirm(
-        "이 날짜 일지가 다른 기기(또는 다른 창)에서 먼저 저장되었습니다.\n"
-        + "지금 저장하면 그 내용을 이 화면 내용으로 덮어씁니다. 계속할까요?\n\n"
-        + "(취소를 누르면 저장하지 않습니다. 입력한 내용을 따로 옮겨 둔 뒤 새로고침하면 최신 판본을 볼 수 있습니다.)"
-      );
-      if (!ok) return;
+  // 병합 저장: 저장 직전에 서버 판본을 다시 읽어(트랜잭션) 이 화면이 출발한 판본(base)과 비교해 항목 단위로 합친다.
+  //  - 다른 기기만 바꾼 항목은 그쪽을, 이 화면만 바꾼 항목은 이 화면 것을 남긴다(덮어쓰지 않음).
+  //  - 같은 항목을 양쪽이 다르게 바꿨으면 저장하지 않고 충돌 목록을 돌려준다(choices 로 골라 다시 부른다).
+  // 반환: { status: "saved" | "conflict" | "offline" | "error" | "skipped", ... }
+  const persist = useCallback(async (nextForm, { choices = {} } = {}) => {
+    if (!user) return { status: "skipped" };
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return { status: "offline" };
+    const mine = formToEntry({ ...nextForm, entryDate: currentDate });
+    const base = baseEntryRef.current;
+    const stamp = nextOwnStamp();
+    let res;
+    try {
+      res = await withTimeout(saveJournalEntryMerged(user.uid, currentDate, (latest) => {
+        const r = mergeJournalEntries(base, mine, latest, choices);
+        if (r.unresolved.length) return { unresolved: r.unresolved, conflicts: r.conflicts };
+        // 목록에서 만드는 요약 글(서면·위임·배운 점)은 합친 목록으로 다시 만들고, 모르는 필드는 그대로 둔다
+        const normalized = formToEntry(entryToForm({ ...r.merged, entryDate: currentDate }, currentDate));
+        return { entry: { ...r.merged, ...normalized }, otherChanged: r.otherChanged };
+      }, stamp), 20000);
+    } catch (e) {
+      return { status: isOfflineError(e) ? "offline" : "error", error: e };
     }
-    const entry = formToEntry({ ...form, entryDate: currentDate });
-    const saved = await saveJournalEntry(user.uid, currentDate, entry, nextOwnStamp());
-    if (saved && saved._savedAt) loadedSavedAtRef.current = saved._savedAt;
-    setDirty(false);
-    setCleanedNotice(null);
-    setSavedFlash(true);
-    setTimeout(() => setSavedFlash(false), 1800);
-  }, [user, form, currentDate, entries, entriesReady, nextOwnStamp]);
+    if (!res.saved) return { status: "conflict", conflicts: res.unresolved || [] };
+    baseEntryRef.current = res.saved;
+    loadedSavedAtRef.current = res.saved._savedAt;
+    // 저장하는 동안 더 입력하지 않았을 때만 화면을 저장본으로 맞추고 '미저장'을 끈다
+    const untouched = formRef.current === nextForm;
+    if (untouched) {
+      if (res.otherChanged) setForm(entryToForm(res.saved, currentDate));
+      setDirty(false);
+      clearJournalDraft(user.uid, currentDate);
+    }
+    return { status: "saved", otherChanged: !!res.otherChanged };
+  }, [user, currentDate, nextOwnStamp]);
+
+  const reportSave = useCallback((r, { auto = false, choices = {} } = {}) => {
+    if (r.status === "saved") {
+      retryOnOnlineRef.current = false;
+      setCleanedNotice(null);
+      setSaveNotice(r.otherChanged ? { tone: "info", text: "다른 기기에서 저장한 내용과 합쳐 저장했습니다." } : null);
+      if (!auto) { setSavedFlash(true); setTimeout(() => setSavedFlash(false), 1800); }
+      return;
+    }
+    setDirty(true);
+    if (r.status === "conflict") {
+      if (auto) setSaveNotice({ tone: "warn", text: "다른 기기에서 바뀐 내용과 겹쳐 자동으로 저장하지 못했습니다. '저장'을 눌러 정리해 주세요." });
+      else setConflictState({ conflicts: r.conflicts, prior: choices }); // 앞서 고른 것은 다음 저장에 이어 쓴다
+    } else if (r.status === "offline") {
+      retryOnOnlineRef.current = true;
+      setSaveNotice({ tone: "warn", text: "서버에 연결되지 않아 저장하지 못했습니다. 입력은 이 기기에 초안으로 보관되어 있고, 연결되면 자동으로 다시 저장합니다." });
+    } else if (r.status === "error") {
+      setSaveNotice({ tone: "err", text: `저장하지 못했습니다(${r.error?.code || r.error?.message || "오류"}). 입력은 이 기기에 초안으로 보관되어 있습니다.` });
+    }
+  }, []);
+
+  const save = useCallback(async (choices) => {
+    if (!user || !entriesReady || saving) return;
+    setSaving(true);
+    setConflictState(null);
+    // 저장 직전 초안도 남겨 둔다(저장이 실패해도 입력이 남도록)
+    saveJournalDraft(user.uid, currentDate, { form: formRef.current, base: baseEntryRef.current });
+    const used = choices && typeof choices === "object" && !choices.nativeEvent ? choices : {};
+    const r = await persist(formRef.current, { choices: used });
+    setSaving(false);
+    reportSave(r, { choices: used });
+  }, [user, entriesReady, saving, currentDate, persist, reportSave]);
+
+  // 연결이 돌아오면, 연결이 없어 못 한 저장을 다시 한다
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  useEffect(() => {
+    const onOnline = () => { if (retryOnOnlineRef.current && dirtyRef.current) saveRef.current(); };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, []);
 
   const openDate = useCallback((k) => {
+    if (k !== currentDate && !confirmLeave()) return;
     setCurrentDate(k);
     setView("write");
-  }, []);
+  }, [currentDate, confirmLeave]);
 
   // 일지 할일 → 구글 캘린더 푸시: 이벤트 등록 후 form 항목에 eventId 저장 + 즉시 저장
   // (부수효과를 setState 업데이터 밖에서 수행 — StrictMode 이중 호출/이중 저장 방지)
@@ -351,13 +537,12 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
       it.id === item.id ? { ...it, googleEventId: eventId, needsCalendarSync: false } : it);
     const next = { ...cur, [fieldName]: arr };
     setForm(next);
-    if (user) {
-      saveJournalEntry(user.uid, currentDate, formToEntry({ ...next, entryDate: currentDate }), nextOwnStamp())
-        .then((saved) => { if (saved && saved._savedAt) loadedSavedAtRef.current = saved._savedAt; })
-        .catch((e) => console.warn("[journal] 캘린더 후 저장 실패", e));
-    }
+    formRef.current = next;
+    setDirty(true);
+    persist(next).then((r) => reportSave(r, { auto: true }))
+      .catch((e) => console.warn("[journal] 캘린더 후 저장 실패", e));
     return eventId;
-  }, [onPushTask, user, currentDate, nextOwnStamp]);
+  }, [onPushTask, persist, reportSave]);
 
   // ── 일지 → 사건 기록 (공통: 사건 갱신 후 일지 항목에 연동 식별자 기록 + 즉시 저장) ──
   // baseCase: 기록을 만들 때 출발한 사건 판본 — 바뀐 부분만 서버 최신 사건 문서에 얹는다
@@ -368,12 +553,11 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     const arr = (cur[fieldName] || []).map((it) => (it.id === itemId ? { ...it, ...patch } : it));
     const next = { ...cur, [fieldName]: arr };
     setForm(next);
-    if (user) {
-      saveJournalEntry(user.uid, currentDate, formToEntry({ ...next, entryDate: currentDate }), nextOwnStamp())
-        .then((saved) => { if (saved && saved._savedAt) loadedSavedAtRef.current = saved._savedAt; })
-        .catch((e) => console.warn("[journal] 사건 기록 후 저장 실패", e));
-    }
-  }, [onUpdateCase, user, currentDate, nextOwnStamp]);
+    formRef.current = next;
+    setDirty(true);
+    persist(next).then((r) => reportSave(r, { auto: true }))
+      .catch((e) => console.warn("[journal] 사건 기록 후 저장 실패", e));
+  }, [onUpdateCase, persist, reportSave]);
 
   // ① 사건 진행 기록 → 진행경과(timeline)
   const handleRecordProgress = useCallback(async (item, fieldName) => {
@@ -574,13 +758,29 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
                 <button onClick={() => setCleanedNotice(null)} className="flex-shrink-0 text-slate-400 hover:text-slate-600">✕</button>
               </div>
             )}
+            {draftOffer && (
+              <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-900 flex items-center gap-2 flex-wrap">
+                <span className="flex-1 min-w-0">이 기기에 저장하지 않은 초안이 있습니다({fmtStamp(draftOffer.at)} 작성). 복구하면 그 내용으로 이어서 쓰고, 저장할 때 그 뒤 다른 기기에서 바뀐 내용과 합칩니다.</span>
+                <button onClick={restoreDraft} className="flex-shrink-0 px-2 py-1 rounded border border-indigo-300 bg-white hover:bg-indigo-100">초안 복구</button>
+                <button onClick={discardDraft} className="flex-shrink-0 px-2 py-1 rounded border border-indigo-200 hover:bg-indigo-100">버리기</button>
+              </div>
+            )}
+            {saveNotice && (
+              <div className={`mb-3 rounded-lg border px-3 py-2 text-xs flex items-start gap-2 ${
+                saveNotice.tone === "err" ? "border-red-200 bg-red-50 text-red-700"
+                : saveNotice.tone === "warn" ? "border-amber-200 bg-amber-50 text-amber-800"
+                : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
+                <span className="flex-1 min-w-0">{saveNotice.text}</span>
+                <button onClick={() => setSaveNotice(null)} className="flex-shrink-0 opacity-60 hover:opacity-100">✕</button>
+              </div>
+            )}
             {/* 헤더 */}
             <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
               <div className="flex items-center gap-3">
                 <input
                   type="date"
                   value={currentDate}
-                  onChange={(e) => setCurrentDate(e.target.value)}
+                  onChange={(e) => changeDate(e.target.value)}
                   className="input font-mono text-sm w-44"
                 />
                 <span className="text-sm text-slate-500">{fmtDateLabel(currentDate)}</span>
@@ -589,7 +789,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
                 {savedFlash && <span className="text-xs text-emerald-600">✓ 저장됨</span>}
                 {dirty && <span className="text-xs text-amber-500">● 미저장</span>}
                 <button onClick={runDailyCloseCheck} className="btn-ghost text-sm">마감 점검</button>
-                <button onClick={save} className="btn-primary text-sm">저장</button>
+                <button onClick={() => save()} disabled={saving} className="btn-primary text-sm">{saving ? "저장 중…" : "저장"}</button>
               </div>
             </div>
 
@@ -805,6 +1005,13 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
           <JournalMigratePanel user={user} existing={entries} />
         )}
       </div>
+      {conflictState && (
+        <JournalConflictDialog
+          conflicts={conflictState.conflicts}
+          onResolve={(choices) => save({ ...(conflictState.prior || {}), ...choices })}
+          onCancel={() => setConflictState(null)}
+        />
+      )}
     </div>
   );
 }

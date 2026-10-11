@@ -13,15 +13,20 @@ export function normalizeTextForCaseMatching(s = "") {
   return String(s).replace(/[\s()㈜㈔·\-_.,'"#:]/g, "");
 }
 
+// 사건번호 비교에 쓸 수 있는 최소 길이. 하이픈·공백뿐인 사건번호는 정규화하면 빈 문자열이 되어
+// includes("")가 늘 참이 되므로(모든 식별어가 그 사건에 붙음), 정규화 뒤 이 길이 미만은 비교에서 뺀다.
+export const MIN_CASE_NUMBER_MATCH_LENGTH = 4;
+
 export function findMatchingCase(identifiers, cases) {
   if (!identifiers?.length || !cases?.length) return null;
 
   for (const c of cases) {
     if (!c.caseNumber || c.caseNumber === "—") continue;
     const cn = normalizeTextForCaseMatching(c.caseNumber);
+    if (cn.length < MIN_CASE_NUMBER_MATCH_LENGTH) continue;
     for (const id of identifiers) {
       const ci = normalizeTextForCaseMatching(id);
-      if (ci.length >= 4 && (cn.includes(ci) || ci.includes(cn))) return c;
+      if (ci.length >= MIN_CASE_NUMBER_MATCH_LENGTH && (cn.includes(ci) || ci.includes(cn))) return c;
     }
   }
 

@@ -590,7 +590,11 @@ export function matchTasksToCases(tasks, cases) {
     const caseNumMatch = text.match(/(\d{4}[가-힣]{1,4}\d+)/);
     let found = null;
     if (caseNumMatch) {
-      found = activeCases.find(c => c.caseNumber && normalize(c.caseNumber).includes(normalize(caseNumMatch[1])));
+      // 정규화하면 빈 문자열이나 너무 짧아지는 사건번호(하이픈·공백뿐 등)는 사건번호 비교에서 뺀다
+      found = activeCases.find((c) => {
+        const cn = normalize(c.caseNumber);
+        return cn.length >= 4 && cn.includes(normalize(caseNumMatch[1]));
+      });
     }
 
     // 사건번호 매칭 실패 시 당사자명/사건명으로 매칭

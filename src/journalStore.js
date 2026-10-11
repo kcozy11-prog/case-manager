@@ -6,7 +6,7 @@
 //  일지 entry 는 law-journal 의 필드 스키마를 그대로 유지한다.
 //  (대부분 JSON 문자열 필드 — journalLogic.js 의 함수들이 이 형태를 그대로 소비)
 // ─────────────────────────────────────────────────────────────────────────────
-import { collection, doc, setDoc, deleteDoc, onSnapshot, getDocs } from "firebase/firestore";
+import { collection, doc, setDoc, deleteDoc, onSnapshot, getDocs, runTransaction } from "firebase/firestore";
 import { db } from "./firebase";
 
 // law-journal 의 FIELDS 와 동일한 entry 필드 집합
@@ -56,6 +56,24 @@ export async function saveJournalEntry(uid, dateKey, data, savedAt = new Date().
   const entry = { ...data, entryDate: dateKey, _savedAt: savedAt };
   await setDoc(doc(journalCol(uid), dateKey), entry);
   return entry;
+}
+
+// 병합 저장: 트랜잭션 안에서 서버 최신 판본(latest)을 읽어 prepare(latest)에 넘기고,
+// prepare 가 { entry } 를 돌려주면 그 내용으로 저장한다. { unresolved: [...] } 를 돌려주면 저장하지 않는다
+// (사용자가 충돌을 고른 뒤 다시 부른다). 읽은 뒤 다른 기기가 또 저장하면 트랜잭션이 다시 읽어 prepare 를 다시 부른다.
+// 반환: { saved: 저장한 entry | null, ...prepare 결과 }
+export async function saveJournalEntryMerged(uid, dateKey, prepare, savedAt = new Date().toISOString()) {
+  if (!uid || !dateKey) return { saved: null };
+  const ref = doc(journalCol(uid), dateKey);
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    const latest = snap.exists() ? snap.data() : null;
+    const plan = prepare(latest) || {};
+    if (!plan.entry || (plan.unresolved && plan.unresolved.length)) return { saved: null, ...plan };
+    const entry = { ...plan.entry, entryDate: dateKey, _savedAt: savedAt };
+    tx.set(ref, entry);
+    return { ...plan, saved: entry };
+  });
 }
 
 // 일지 삭제
