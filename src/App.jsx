@@ -34,6 +34,8 @@ import { diffCase, applyCaseDiff, normalizeCaseDoc, stableStringify } from "./ca
 import { createCaseWriter, bindWriterLifecycle, pendingNotice } from "./caseWriter";
 import { createPendingStore } from "./pendingWrites";
 import { lastBackupInfo, backupAgeLabel, formatBackupDate } from "./backupStatus";
+import { subscribeJournal } from "./journalStore";
+import { journalPendingTasks, journalTodayKey } from "./journalTasks";
 import {
   planOverdueOnce, OVERDUE_ONCE_CUTOFF, buildCleanupEntry, appendCleanupEntry, newestCleanup, findCleanup, markCleanupUndone,
   hiddenTaskRecords, mergeHiddenTasks, unhideTasks, linkedTaskIds, isHiddenGoogleTask, planCleanupUndo,
@@ -121,6 +123,8 @@ export default function App() {
   const [overdueOnceState, setOverdueOnceState] = useState({ phase: "idle" });
   // 앱을 연 날과 오늘이 다르면(자정을 넘김) D-day 를 맞추도록 새로고침을 권한다
   const [dayChanged, setDayChanged] = useState(false);
+  // 업무일지(미완료 오늘·내일 할 일을 사건 화면 '미완료 할 일'에 함께 세기 위해)
+  const [journalEntries, setJournalEntries] = useState({});
   // 내보내기 기록(meta/exports) — 마지막 백업 날짜 표시용
   const [exportItems, setExportItems] = useState([]);
   const [backupNoticeHiddenOn, setBackupNoticeHiddenOn] = useState(() => {
@@ -831,6 +835,15 @@ export default function App() {
     } catch (e) { console.warn("[복원] 파일 목록 기록 실패", e); }
   }, [user]);
 
+  // 업무일지 구독 → 오늘 기준 미완료 오늘·내일 할 일
+  useEffect(() => {
+    if (!user) { setJournalEntries({}); return undefined; }
+    return subscribeJournal(user.uid, (map) => setJournalEntries(map));
+  }, [user]);
+  const journalTasks = useMemo(() => journalPendingTasks(journalEntries, journalTodayKey()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [journalEntries, dayChanged]);
+
   // 내보내기 기록 구독 → 마지막 백업 N일 전
   useEffect(() => {
     if (!user) { setExportItems([]); return undefined; }
@@ -1347,7 +1360,9 @@ export default function App() {
         )}
 
         {/* 통계 바 */}
-        <StatsBar cases={cases} standaloneTodos={standaloneTodos} onOpenStandaloneTodos={() => setShowStandaloneTodos(true)} onSelectCase={(caseId, tab) => {
+        <StatsBar cases={cases} standaloneTodos={standaloneTodos} journalTasks={journalTasks}
+          onOpenJournal={() => setAppMode("journal")}
+          onOpenStandaloneTodos={() => setShowStandaloneTodos(true)} onSelectCase={(caseId, tab) => {
           setSelectedId(caseId);
           setActiveTab(tab || "overview");
           setMobileView("detail");

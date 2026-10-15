@@ -2,7 +2,7 @@ import { useState } from "react";
 import { today, dday, fmtDate } from "../utils";
 import { buildPendingTodos } from "../statsTodos";
 
-export default function StatsBar({ cases, standaloneTodos = [], onSelectCase, onOpenStandaloneTodos }) {
+export default function StatsBar({ cases, standaloneTodos = [], journalTasks = [], onSelectCase, onOpenStandaloneTodos, onOpenJournal }) {
   const [dropdown, setDropdown] = useState(null); // "month" | "week" | "todos" | null
 
   // 이번 달 기일 목록
@@ -21,7 +21,8 @@ export default function StatsBar({ cases, standaloneTodos = [], onSelectCase, on
   ).sort((a, b) => new Date(a.date) - new Date(b.date));
 
   // 미완료 할 일 목록
-  const pendingTodos = buildPendingTodos(cases, new Date(), standaloneTodos);
+  // 사건 할 일 + 일반 할 일 + 업무일지의 오늘·내일 할 일
+  const pendingTodos = buildPendingTodos(cases, new Date(), standaloneTodos, journalTasks);
 
   // 불변기간 미체크 항목 (마감일 임박순 정렬)
   const uncheckedDeadlines = cases.filter(c => c.status === "진행중").flatMap(c =>
@@ -66,6 +67,11 @@ export default function StatsBar({ cases, standaloneTodos = [], onSelectCase, on
   };
 
   const handleItemClick = (item, tab) => {
+    if (dropdown === "todos" && item.journal) {
+      if (onOpenJournal) onOpenJournal();
+      setDropdown(null);
+      return;
+    }
     if (dropdown === "todos" && item.standalone) {
       if (onOpenStandaloneTodos) onOpenStandaloneTodos();
       setDropdown(null);
@@ -107,6 +113,7 @@ export default function StatsBar({ cases, standaloneTodos = [], onSelectCase, on
                 onClick={() => handleItemClick(item, dropdown === "todos" ? "todos" : dropdown === "briefs" ? "briefs" : "overview")}
                 className="flex items-center justify-between px-6 py-2.5 hover:bg-slate-700 cursor-pointer border-b border-slate-700/50 last:border-b-0 transition-colors">
                 <div className="flex items-center gap-3 min-w-0">
+                  {item.sourceLabel && <span className="flex-shrink-0 rounded border border-sky-300/40 px-1.5 py-0.5 text-[10px] text-sky-300">{item.sourceLabel}</span>}
                   <span className="text-xs font-medium text-slate-300 truncate max-w-[200px]">{item.caseTitle}</span>
                   <span className="text-xs text-slate-400 truncate">{item.text || item.title || item.type || ""}</span>
                 </div>
