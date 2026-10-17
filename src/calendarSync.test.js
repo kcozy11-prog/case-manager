@@ -284,6 +284,37 @@ test("mergeCalendarEventIntoCase: 수동 선택된 LBOX 일정을 사건 기일�
   assert.equal(result.caseObj.timeline[0].activityType, "hearing");
 });
 
+test("mergeCalendarEventIntoCase: Claude 반영으로 먼저 들어온 같은 날 같은 종류 기일은 새로 만들지 않고 LBOX 일정에 연결", () => {
+  const claude = { batchId: "b1", itemId: "i1", fp: "0000abcd" };
+  const ev = { id: "ev9", summary: "가나다, 변론, 가상지방법원-2026가단10000 제301호 법정 14:00", start: { date: "2026-11-15" } };
+  for (const claudeHearing of [
+    { id: "cl:b1:i1", date: "2026-11-15", time: "", type: "변론기일", result: "가상지방법원 301호", claude },
+    { id: "cl:b1:i1", date: "2026-11-15", time: "14:00", type: "변론", result: "", claude },
+  ]) {
+    const c = { id: "c1", hearings: [claudeHearing], memos: [], timeline: [] };
+    const result = mergeCalendarEventIntoCase(c, ev, { today: "2026-10-17", makeId: () => 1 });
+    assert.equal(result.added, false);
+    assert.equal(result.caseObj.hearings.length, 1);
+    assert.equal(result.caseObj.hearings[0].id, "cl:b1:i1");
+    assert.equal(result.caseObj.hearings[0].calendarEventId, "ev9");
+    assert.equal(result.caseObj.hearings[0].time, "14:00");
+    assert.deepEqual(result.caseObj.hearings[0].claude, claude);
+    assert.equal(result.caseObj.memos.length, 0);
+    assert.equal(result.caseObj.timeline.length, 0);
+  }
+});
+
+test("mergeCalendarEventIntoCase: Claude 표시가 없는 기일, 시각이 다른 Claude 기일은 종전처럼 따로 둔다", () => {
+  const ev = { id: "ev9", summary: "가나다, 변론, 가상지방법원-2026가단10000 제301호 법정 14:00", start: { date: "2026-11-15" } };
+  const manual = { id: 7, date: "2026-11-15", time: "", type: "변론기일", result: "" };
+  const otherTime = { id: "cl:b1:i2", date: "2026-11-15", time: "10:00", type: "변론기일", result: "", claude: { batchId: "b1", itemId: "i2" } };
+  for (const h of [manual, otherTime]) {
+    const result = mergeCalendarEventIntoCase({ id: "c1", hearings: [h], memos: [], timeline: [] }, ev, { today: "2026-10-17", makeId: () => 1 });
+    assert.equal(result.added, true);
+    assert.equal(result.caseObj.hearings.length, 2);
+  }
+});
+
 test("조회 구간은 한국시간 기준 오늘 0시부터 시작 (지난 일정은 다시 가져오지 않음)", () => {
   // UTC 2026-09-20 16:30 = KST 2026-09-21 01:30 → KST 9/21 0시(UTC 9/20 15:00)부터
   const now = new Date("2026-09-20T16:30:00Z");

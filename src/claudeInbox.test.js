@@ -637,3 +637,173 @@ test('buildLedgerPatch and ledgerBatchesToPrune keep the ledger small', () => {
   assert.deepEqual(ledgerBatchesToPrune(ledger, 3), []);
   assert.deepEqual(ledgerBatchesToPrune(null, 3), []);
 });
+
+// ── 2차 검증 보완 (저장 시점 보호, 되돌리기 기록, 경계 입력) ─────────
+test('ledgerBatchesToPrune also trims by size, oldest first', () => {
+  const big = 'x'.repeat(300);
+  const ledger = { batches: { a: { at: '2026-01-01', items: { i: big } }, b: { at: '2026-02-01', items: { i: big } }, c: { at: '2026-03-01', items: { i: big } } } };
+  assert.deepEqual(ledgerBatchesToPrune(ledger, 1000, 700), ['a']); // 묶음 하나가 약 330자
+  assert.deepEqual(ledgerBatchesToPrune(ledger, 1000, 400), ['a', 'b']);
+  assert.deepEqual(ledgerBatchesToPrune(ledger, 2, 1e6), ['a']);
+});
+
+test('a brief submitted by Claude carries its own marker, so reverting it to pending does not invite a re-apply', () => {
+  const b = batchOf([item('brief.submitted', { title: '준비서면(2)', date: '2026-10-17' }, { id: 'rv1' })]);
+  const cases = makeCases();
+  const [{ next }] = planBatch(b, cases, ['rv1'], { today: TODAY });
+  assert.deepEqual(next.briefs[0].claudeSubmit, markOf(b, 'rv1'));
+  // 사용자가 서면 탭에서 「제출 대기로 되돌리기」를 누른 상태(markBriefPending 와 같은 결과)
+  const reverted = { ...next, briefs: [{ ...next.briefs[0], status: 'pending', submittedDate: '', submitTimelineId: '' }], timeline: next.timeline.filter((t) => !String(t.id).endsWith(':tl')) };
+  const report = validateBatch(b, [reverted, ...cases.slice(1)], null, { today: TODAY });
+  assert.equal(report.items[0].status, 'applied');
+});
+
+test('the plan carries a save-time guard: created keys per item and the field patch for an existing brief', () => {
+  const b = batchOf([
+    item('brief.submitted', { title: '준비서면(2)', date: '2026-10-17', details: '가공 메모' }, { id: 'g1' }),
+    item('call', { date: '2026-10-16', title: '통화', asClientRequest: true }, { id: 'g2' }),
+  ]);
+  const [{ guard }] = planBatch(b, makeCases(), ['g1', 'g2'], { today: TODAY });
+  const base = `cl:${b.batchId}`;
+  assert.equal(guard.batchId, b.batchId);
+  assert.deepEqual(guard.items.map((g) => [g.itemId, g.created.map((c) => c.key)]), [
+    ['g1', [`id:${base}:g1:tl`]],
+    ['g2', [`id:${base}:g2`, `id:${base}:g2:memo`]],
+  ]);
+  assert.equal(guard.items[0].briefPatch.key, 'id:51');
+  assert.deepEqual(guard.items[0].briefPatch.set, {
+    status: 'submitted', submittedDate: '2026-10-17', submitTimelineId: `${base}:g1:tl`, claudeSubmit: markOf(b, 'g1'),
+  });
+  assert.equal(guard.items[0].briefPatch.fillDetails, '가공 메모');
+});
+
+test('saving a guarded plan never overwrites edits made elsewhere in the meantime', () => {
+  const b = batchOf([
+    item('todo', { text: '새 할 일' }, { id: 's1' }),
+    item('brief.submitted', { title: '준비서면(2)', date: '2026-10-17' }, { id: 's2' }),
+  ]);
+  const cases = makeCases();
+  const [{ base, next, guard }] = planBatch(b, cases, ['s1', 's2'], { today: TODAY });
+  const diff = { ...diffCase(base, next), claude: guard };
+  // 그 사이 다른 기기: 같은 묶음을 먼저 반영하고 할 일을 완료, 서면은 직접 제출 처리
+  const server = {
+    ...cases[0],
+    todos: [...cases[0].todos, { ...next.todos.find((t) => t.claude?.itemId === 's1'), done: true }],
+    briefs: [{ ...cases[0].briefs[0], status: 'submitted', submittedDate: '2026-10-16', submitTimelineId: 777 }],
+    timeline: [...cases[0].timeline, { id: 777, date: '2026-10-16', content: '준비서면 (2) 제출', activityType: 'document' }],
+  };
+  const merged = applyCaseDiff(server, diff);
+  assert.equal(merged.todos.find((t) => t.claude?.itemId === 's1').done, true);
+  assert.deepEqual(merged.briefs, server.briefs);
+  assert.equal(merged.timeline.filter((t) => /준비서면/.test(t.content)).length, 1);
+});
+
+test('briefs with duplicate or invalid ids are never matched; a new brief is created instead', () => {
+  for (const briefs of [
+    [{ id: 7, title: '답변서', status: 'submitted', submittedDate: '2026-09-01', submitTimelineId: 99 }, { id: 7, title: '의견서', status: 'pending' }],
+    [{ id: NaN, title: '의견서', status: 'pending' }],
+  ]) {
+    const cases = makeCases();
+    cases[0].briefs = briefs;
+    cases[0].timeline.push({ id: 99, date: '2026-09-01', content: '답변서 제출(전자소송)' });
+    const b = batchOf([item('brief.submitted', { title: '의견서', date: '2026-10-15' }, { id: 'dup1' })]);
+    const [{ base, next }] = planBatch(b, cases, ['dup1'], { today: TODAY });
+    const d = diffCase(base, next);
+    assert.deepEqual(d.arrays.briefs.upserts.map((u) => u.key), [`id:cl:${b.batchId}:dup1`]);
+    assert.ok(next.timeline.some((t) => t.id === 99 && t.content === '답변서 제출(전자소송)'));
+  }
+});
+
+test('a case with a null list gets item-level changes, never a whole-list overwrite', () => {
+  const cases = makeCases();
+  cases[1].todos = null;
+  const b = batchOf([item('todo', { text: '가공' }, { id: 'n0', cmCaseId: C2, caseNumber: '2026가합20000' })]);
+  const [{ base, next }] = planBatch(b, cases, ['n0'], { today: TODAY });
+  const d = diffCase(base, next);
+  assert.deepEqual(d.set, {});
+  const merged = applyCaseDiff({ ...cases[1], todos: [{ id: 99, text: '다른 기기' }] }, d);
+  assert.deepEqual(merged.todos.map((t) => t.id), [99, `cl:${b.batchId}:n0`]);
+});
+
+test('odd inputs give Korean messages, never a crash, and item text is kept verbatim', () => {
+  assert.throws(() => parseBatch('{"format":{"toString":1},"batchId":"x","items":[{}]}'), /형식이 cm-update-v1이 아닙니다\(받은 값: object\)/);
+  let deep = '"todo"';
+  for (let i = 0; i < 3000; i++) deep = `[${deep}]`;
+  const raw = `{"format":"cm-update-v1","batchId":"deep","items":[{"id":"d1","cmCaseId":"${C1}","op":${deep}}]}`;
+  const r = validateBatch(parseBatch(raw), makeCases(), null, { today: TODAY }).items[0];
+  assert.equal(r.status, 'error');
+  assert.match(r.errors.join(' '), /알 수 없는 op: 배열/);
+  const text = '코드 ```json 블록``` 끝';
+  const parsed = parseBatch(`설명\n\`\`\`json\n${JSON.stringify(batchOf([item('todo', { text })]))}\n\`\`\``);
+  assert.equal(parsed.items[0].text, text);
+  assert.equal(parseBatch(JSON.stringify(batchOf([item('todo', { text })]))).items[0].text, text);
+  assert.deepEqual(planBatch(batchOf([item('todo', { text: 'a' })]), makeCases(), null, { today: TODAY }), []);
+});
+
+test('memo titles the app manages itself are rejected', () => {
+  const report = validateBatch(batchOf([
+    item('memo', { category: '공식결과메모', title: '캘린더 업무 요약' }, { id: 'w1' }),
+    item('deadline', { title: '캘린더 업무요약', date: '2026-10-31' }, { id: 'w2' }),
+  ]), makeCases(), null, { today: TODAY });
+  for (const r of report.items) {
+    assert.equal(r.status, 'error');
+    assert.match(r.errors.join(' '), /앱이 자동으로 쓰는 메모 제목/);
+  }
+});
+
+test('seeded fuzz: plans only add this batch\'s items, never overwrite, and re-pasting is a no-op', () => {
+  let s = 20261017;
+  const rnd = () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 2 ** 32);
+  const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
+  const T = ['준비서면(2)', '준비서면 (2)', '답변서'];
+  const D = ['2026-10-01', '2026-10-17', '2026-11-20', '2026-02-30'];
+  const gen = {
+    'brief.submitted': () => ({ title: pick(T), date: pick(D) }), 'brief.pending': () => ({ title: pick(T) }),
+    deadline: () => ({ title: pick(T), date: pick(D) }), todo: () => ({ text: pick(['가공 할 일', '증거목록 정리']), priority: pick(['높음', '낮음']) }),
+    hearing: () => ({ date: pick(D), type: '변론기일', time: pick(['10:00', '24:00']) }), progress: () => ({ date: pick(D), content: '가공 기록' }),
+    call: () => ({ date: pick(D), title: '통화', asClientRequest: rnd() < 0.5 }), memo: () => ({ category: pick(['일반메모', '불변기간']), title: '메모' }),
+  };
+  const sameTitle = (a, b) => String(a).replace(/\s+/g, '') === String(b).replace(/\s+/g, '');
+  for (let iter = 0; iter < 300; iter++) {
+    const cases = makeCases();
+    if (rnd() < 0.5) cases[0].briefs.push({ id: 52, title: pick(T), status: 'pending' });
+    if (rnd() < 0.2) cases[1].todos = null;
+    if (rnd() < 0.2) cases[0].briefs.push({ id: 51, title: pick(T), status: 'pending' });
+    const items = Array.from({ length: 1 + Math.floor(rnd() * 6) }, (_, k) => {
+      const op = pick(Object.keys(gen));
+      const [cmCaseId, caseNumber] = pick([[C1, '2026가단10000'], [C2, '2026가합20000'], [C2, '2026가단10000'], ['c9', ''], [C3, '']]);
+      return { id: `i${k % 4}`, cmCaseId, caseNumber, op, basis: '가공', ...gen[op]() };
+    });
+    const b = parseBatch(JSON.stringify(batchOf(items, `fz${iter}`)));
+    const snap = structuredClone({ cases, b });
+    const sel = items.map((x) => x.id).filter(() => rnd() < 0.8);
+    const report = validateBatch(b, cases, null, { today: TODAY });
+    const plan = planBatch(b, cases, sel, { today: TODAY });
+    const rOf = (id) => report.items.find((x) => x.id === id);
+    for (const p of plan) {
+      assert.ok(cases.includes(p.base), `iter ${iter}`);
+      for (const id of p.itemIds) assert.ok(sel.includes(id) && ['ok', 'warn'].includes(rOf(id).status) && rOf(id).cmCaseId === String(p.caseId), `iter ${iter} ${id}`);
+      const diff = diffCase(p.base, p.next);
+      assert.deepEqual(diff.set, {}, `iter ${iter}`);
+      for (const [field, d] of Object.entries(diff.arrays)) {
+        assert.deepEqual(d.removed, [], `iter ${iter} ${field}`);
+        for (const u of d.upserts) {
+          const own = p.itemIds.some((id) => u.key === `id:cl:${b.batchId}:${id}` || u.key.startsWith(`id:cl:${b.batchId}:${id}:`));
+          const submittedPending = field === 'briefs' && u.items.every((x) => x.status === 'submitted' && p.itemIds.some((id) => rOf(id).op === 'brief.submitted' && sameTitle(rOf(id).norm.title, x.title)));
+          assert.ok(own || submittedPending, `iter ${iter}: ${field} ${u.key}`);
+        }
+      }
+      const guarded = { ...diff, claude: p.guard };
+      const once = applyCaseDiff(p.base, guarded);
+      assert.deepEqual(applyCaseDiff(once, guarded), once, `iter ${iter}`);
+      assert.deepEqual(once, applyCaseDiff(p.base, diff), `iter ${iter}: guard changes a fresh save`);
+    }
+    const after = cases.map((c) => plan.find((p) => p.base === c)?.next || c);
+    for (const today of [TODAY, '2026-12-01']) {
+      const again = validateBatch(b, after, null, { today });
+      for (const id of plan.flatMap((p) => p.itemIds)) assert.equal(again.items.find((x) => x.id === id).status, 'applied', `iter ${iter} ${id}`);
+    }
+    assert.deepEqual(planBatch(b, after, sel, { today: TODAY }), [], `iter ${iter}`);
+    assert.deepEqual({ cases, b }, snap, `iter ${iter}: inputs mutated`);
+  }
+});

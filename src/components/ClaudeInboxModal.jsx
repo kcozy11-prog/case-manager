@@ -33,14 +33,13 @@ function resultMessage(r) {
   }
   if (r.skipped) parts.push(`고른 항목 중 ${r.skipped}건은 상태가 바뀌어 건너뜀(다시 확인해 주세요)`);
   if (r.failedItems) parts.push(`${r.failedCases}곳 ${r.failedItems}건 저장 실패 — 새로고침 뒤 다시 확인해 주세요`);
-  if (!r.ledgerSaved) parts.push("반영 기록 저장 실패(사건에 남긴 표시로 중복은 막힘)");
-  return { tone: r.failedItems ? "err" : r.pendingItems || r.skipped || !r.ledgerSaved ? "warn" : "ok", text: parts.join(". ") + "." };
+  return { tone: r.failedItems ? "err" : r.pendingItems || r.skipped ? "warn" : "ok", text: parts.join(". ") + "." };
 }
 
 // ── Claude 반영 검토함 ────────────────────────────────────────────────────────
 // Claude가 만든 반영 블록(cm-update-v1)을 붙여넣거나 파일로 골라, 사건별로 확인하고 고른 항목만 반영한다.
 //  - ready=false(서버 판본·반영 기록을 아직 못 받음)이면 미리보기만 하고 반영은 막는다.
-//  - onApply(batch, itemIds, seen) → { cases, items, pendingItems, failedCases, failedItems, skipped, ledgerSaved }
+//  - onApply(batch, itemIds, seen) → { cases, items, pendingItems, failedCases, failedItems, skipped }
 //    seen: 화면에서 본 판정 { 항목 id: status } — 그 사이 정상 → 경고로 바뀐 항목은 반영하지 않는다
 export default function ClaudeInboxModal({ cases, ledger, ready, notReadyText = "", onApply, onClose }) {
   const [text, setText] = useState("");

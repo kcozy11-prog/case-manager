@@ -13,7 +13,8 @@ import OverviewTab from "./components/OverviewTab";
 import TodosTab from "./components/TodosTab";
 import AiParseModal from "./components/AiParseModal";
 import ClaudeInboxModal from "./components/ClaudeInboxModal";
-import { planBatch, buildBindingCode, buildLedgerPatch, ledgerBatchesToPrune } from "./claudeInbox";
+import { planBatch, buildBindingCode, buildLedgerPatch, ledgerBatchesToPrune, ledgerItemIds } from "./claudeInbox";
+import { resolveClaudeGuard, claudeLedgerEntries } from "./claudeGuard";
 import CaseFormModal from "./components/CaseFormModal";
 import { fetchCalendarEvents, syncEventsWithCases, mergeCalendarEventIntoCase, fetchWorkCalendarEvents, syncWorkEventsWithCases, inferCaseType, fetchWorkTasks, matchTasksToCases, mergeTaskIntoCaseTodos } from "./calendarSync";
 import UnmatchedTasksModal from "./components/UnmatchedTasksModal";
@@ -49,9 +50,47 @@ function stripTransient(c) {
   return rest;
 }
 
+// Claude 반영 저장 결과(사건|묶음 → { applied, skipped }). 반영 창의 결과 안내에 쓴다.
+const claudeCommitResults = new Map();
+
+// Claude 반영: 사건 문서와 반영 기록(meta/claudeInbox)을 한 트랜잭션에서 읽고 쓴다.
+//  - 저장 순간의 최신 문서·반영 기록으로 보호 정보를 풀어(claudeGuard.js) 다른 기기에서 고친 내용을 덮지 않고,
+//    지운 항목을 되살리지 않는다.
+//  - 실제로 들어간(또는 이미 있던) 항목만 같은 트랜잭션에서 반영 기록에 남긴다(저장과 기록이 함께 되거나 함께 안 됨).
+//  - 이 기기에 보관되었다가 앱을 다시 열어 보내는 저장도 같은 길로 간다.
+async function commitClaudeDiff(uid, caseId, diff) {
+  const ref = doc(db, "users", uid, "cases", caseId);
+  const ledgerRef = doc(db, "users", uid, "meta", "claudeInbox");
+  const guard = diff.claude;
+  const resultKey = `${caseId}|${guard.batchId}`;
+  let committedDiff = null; // 실제로 쓴 diff — 저장 뒤 화면 겹쳐 보기에 쓴다(건너뛴 항목이 다시 보이지 않게)
+  const result = await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    const ledgerSnap = await tx.get(ledgerRef);
+    if (!snap.exists()) {
+      claudeCommitResults.set(resultKey, { applied: [], skipped: (guard.items || []).map((g) => ({ itemId: g.itemId, reason: "case-missing" })) });
+      committedDiff = null;
+      return "missing"; // Claude 반영은 사건을 새로 만들지 않는다
+    }
+    const latest = normalizeCaseDoc(snap.data(), todayStr);
+    const ledger = ledgerSnap.exists() ? ledgerSnap.data() : null;
+    const { diff: resolved, applied, skipped } = resolveClaudeGuard(latest, diff, { skipItemIds: [...ledgerItemIds(ledger, guard.batchId)] });
+    const merged = applyCaseDiff(latest, resolved);
+    const changed = stableStringify(merged) !== stableStringify(latest);
+    if (changed) tx.set(ref, merged);
+    const entries = claudeLedgerEntries(guard, applied, skipped, caseId);
+    if (Object.keys(entries).length) tx.set(ledgerRef, buildLedgerPatch(guard.batchId, entries, new Date().toISOString()), { merge: true });
+    claudeCommitResults.set(resultKey, { applied, skipped });
+    committedDiff = changed ? resolved : null;
+    return changed ? "saved" : "unchanged";
+  });
+  return { result, committedDiff };
+}
+
 // 서버의 최신 사건 문서를 읽어 이번 수정분(diff)만 얹는다.
 // 트랜잭션이므로 읽은 뒤 다른 기기가 고치면 다시 읽어 얹는다 → 옛 판본으로 문서 전체를 덮어쓰지 않는다.
 async function commitCaseDiff(uid, caseId, diff, newCase) {
+  if (diff && diff.claude && caseId !== STANDALONE_TODOS_CASE_ID) return commitClaudeDiff(uid, caseId, diff);
   if (caseId === STANDALONE_TODOS_CASE_ID) {
     const ref = doc(db, "users", uid, "meta", "standaloneTodos");
     return runTransaction(db, async (tx) => {
@@ -261,14 +300,15 @@ export default function App() {
   // 사건 저장: next 는 저장할 사건, base 는 그 수정의 출발점(화면이 보던 판본, 새 사건이면 null).
   // 바뀐 부분만 서버 최신 문서에 얹으므로, 그 사이 다른 기기·자동 동기화가 저장한 내용이 지워지지 않는다.
   // select=false: 캘린더·할 일 자동 동기화처럼 백그라운드 저장일 때는 보고 있던 사건을 바꾸지 않는다.
-  const saveCase = useCallback((next, { base, select = true } = {}) => {
+  // claudeGuard: Claude 반영 저장 보호 정보(planBatch 의 guard) — 저장 순간 서버 최신본에 맞춰 풀린다(commitClaudeDiff)
+  const saveCase = useCallback((next, { base, select = true, claudeGuard = null } = {}) => {
     const writer = writerRef.current;
     if (!user || !writer || !next?.id) return Promise.resolve("skipped");
     const clean = stripTransient(next);
     if (select) setSelectedId(clean.id);
     const from = base === undefined ? (casesRef.current.find(x => x.id === clean.id) || null) : base;
     const work = from
-      ? writer.submit(clean.id, diffCase(from, clean))
+      ? writer.submit(clean.id, claudeGuard ? { ...diffCase(from, clean), claude: claudeGuard } : diffCase(from, clean))
       : writer.submit(clean.id, diffCase({ id: clean.id }, clean), { newCase: clean });
     work.catch(() => {}); // 실패는 상단 배너(writerState.error)로 알린다
     return work;
@@ -606,9 +646,9 @@ export default function App() {
     });
   }, [user, showClaudeInbox]);
 
-  // 고른 항목을 사건별로 저장한다(바뀐 부분만 서버 최신 문서에 얹음). 연결이 느리면 15초 뒤 결과를 먼저 돌려주고
-  // 저장은 대기열이 이어서 한다. 반영 기록은 그 사건의 저장이 서버에서 확인된 뒤에만 남긴다
-  // (확인 전에 기록하면 저장이 끝내 실패했을 때 항목이 「이미 반영됨」으로 묶인다. 중복은 사건 안 표시로도 막힌다).
+  // 고른 항목을 사건별로 저장한다. 저장은 사건 문서와 반영 기록을 한 트랜잭션에서 쓰고(commitClaudeDiff),
+  // 그 순간의 서버 최신본에 맞춰 이미 있거나 다른 기기에서 처리된 항목은 건너뛴다.
+  // 연결이 느리면 25초 뒤 결과를 먼저 돌려주고(대기열의 재시도 간격 15초보다 길게) 저장은 대기열이 이어서 한다.
   const applyClaudeBatch = useCallback(async (batch, selectedIds, seen = null) => {
     if (!user) throw new Error("로그인이 필요합니다.");
     if (!casesSynced) throw new Error("서버 데이터를 받기 전에는 반영할 수 없습니다. 잠시 뒤 다시 시도해 주세요.");
@@ -616,33 +656,47 @@ export default function App() {
     if (!ledgerState?.serverSeen) throw new Error("반영 기록을 서버에서 아직 받지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
     const plan = planBatch(batch, casesRef.current, selectedIds, { today: todayStr, ledger: ledgerState.data, seen });
     const planned = plan.reduce((n, ch) => n + ch.itemIds.length, 0);
-    const summary = { cases: 0, items: 0, pendingItems: 0, failedCases: 0, failedItems: 0, skipped: selectedIds.length - planned, ledgerSaved: true };
+    const summary = { cases: 0, items: 0, pendingItems: 0, failedCases: 0, failedItems: 0, skipped: selectedIds.length - planned };
     if (!plan.length) return summary;
 
-    const ledgerRef = doc(db, "users", user.uid, "meta", "claudeInbox");
     const SAVED = ["saved", "created", "unchanged"];
-    const recordLedger = (ch) => setDoc(ledgerRef, buildLedgerPatch(batch.batchId, ch.fingerprints, new Date().toISOString()), { merge: true })
-      .then(() => "ok", (e) => { console.warn("Claude 반영 기록 저장 실패", e); return "fail"; });
-    const works = plan.map((ch) => saveCase(ch.next, { base: ch.base, select: false }));
-    const ledgerWrites = works.map((work, i) => work.then((v) => (SAVED.includes(v) ? recordLedger(plan[i]) : "skip"), () => "skip"));
-
-    const withTimeout = (work, ms = 15000) => Promise.race([work, new Promise((res) => setTimeout(() => res("pending"), ms))]);
-    const results = await Promise.allSettled(works.map((work) => withTimeout(work)));
-    const confirmed = [];
+    const resultKey = (ch) => `${ch.caseId}|${batch.batchId}`;
+    plan.forEach((ch) => claudeCommitResults.delete(resultKey(ch)));
+    const withTimeout = (work, ms = 25000) => Promise.race([work, new Promise((res) => setTimeout(() => res("pending"), ms))]);
+    const settle = (p) => p.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
+    // 사건마다 차례로 저장한다(사건 저장이 모두 같은 반영 기록 문서를 함께 쓰므로 동시에 보내면 서로 다툰다).
+    // 연결이 느려 한 곳이 대기로 넘어가면 나머지는 대기열에 넣고 기다리지 않는다(대기열이 이어서 저장).
+    const results = [];
+    let slow = false;
+    for (const ch of plan) {
+      const work = saveCase(ch.next, { base: ch.base, select: false, claudeGuard: ch.guard });
+      if (slow) { work.catch(() => {}); results.push({ status: "fulfilled", value: "pending" }); continue; }
+      const r = await settle(withTimeout(work));
+      results.push(r);
+      if (r.status === "fulfilled" && r.value === "pending") slow = true;
+    }
     results.forEach((r, i) => {
-      const n = plan[i].itemIds.length;
-      if (r.status === "fulfilled" && SAVED.includes(r.value)) { confirmed.push(i); summary.cases++; summary.items += n; }
-      else if (r.status === "fulfilled" && r.value === "pending") { summary.cases++; summary.items += n; summary.pendingItems += n; }
-      else { summary.failedCases++; summary.failedItems += n; }
+      const ch = plan[i];
+      const n = ch.itemIds.length;
+      if (r.status === "fulfilled" && SAVED.includes(r.value)) {
+        const info = claudeCommitResults.get(resultKey(ch));
+        claudeCommitResults.delete(resultKey(ch));
+        const done = info ? info.applied.length : n;
+        if (done) summary.cases++;
+        summary.items += done;
+        summary.skipped += n - done; // 저장 순간 이미 있거나 다른 기기에서 처리·삭제된 항목
+      } else if (r.status === "fulfilled" && r.value === "pending") {
+        summary.cases++; summary.items += n; summary.pendingItems += n;
+      } else {
+        summary.failedCases++; summary.failedItems += n;
+      }
     });
-    const ledgerOutcomes = await Promise.all(confirmed.map((i) => withTimeout(ledgerWrites[i])));
-    summary.ledgerSaved = !ledgerOutcomes.includes("fail");
 
     // 반영 기록 문서가 너무 커지지 않게 오래된 묶음을 정리한다(실패해도 반영에는 영향 없음)
     const prune = ledgerBatchesToPrune(claudeLedgerRef.current?.data).filter((id) => id !== batch.batchId);
     if (prune.length) {
       const args = prune.flatMap((id) => [new FieldPath("batches", id), deleteField()]);
-      updateDoc(ledgerRef, ...args).catch((e) => console.warn("Claude 반영 기록 정리 실패", e));
+      updateDoc(doc(db, "users", user.uid, "meta", "claudeInbox"), ...args).catch((e) => console.warn("Claude 반영 기록 정리 실패", e));
     }
     return summary;
   }, [user, casesSynced, saveCase]);

@@ -7,10 +7,10 @@
 //     fp 는 항목 내용의 지문이다. 같은 묶음·항목 id로 다른 내용이 오면(묶음 id 재사용) 앞 기록을 덮지 않도록 오류로 막는다.
 //   - 저장은 하지 않는다. App 이 saveCase(next, { base }) 로 바뀐 부분만 서버 최신 문서에 얹는다.
 // ─────────────────────────────────────────────────────────────────────────────
-import { extractJsonObject, normalizeTextForCaseMatching, MIN_CASE_NUMBER_MATCH_LENGTH } from "./aiParse.js";
+import { normalizeTextForCaseMatching, MIN_CASE_NUMBER_MATCH_LENGTH } from "./aiParse.js";
 import { upsertBrief, markBriefSubmitted, upsertTimelineEntry, upsertCaseMemo, buildCallTimelineContent } from "./caseLink.js";
 import { getTimelineActivity, DEFAULT_TIMELINE_ACTIVITY_TYPE } from "./timelineActivity.js";
-import { CASE_ARRAY_FIELDS, stableStringify } from "./caseMerge.js";
+import { CASE_ARRAY_FIELDS, stableStringify, diffCase } from "./caseMerge.js";
 import { MEMO_CATEGORIES } from "./utils.js";
 
 export const CM_UPDATE_FORMAT = "cm-update-v1";
@@ -23,6 +23,8 @@ export const LEDGER_KEEP_BATCHES = 1000;
 export const TODO_PRIORITIES = ["높음", "보통"];
 // 일반 메모로 받을 수 있는 분류. 불변기간은 checked 상태가 필요하므로 op "deadline"으로만 받는다.
 export const CLAUDE_MEMO_CATEGORIES = MEMO_CATEGORIES.filter((c) => c !== "불변기간");
+// 회사업무 캘린더 동기화가 사건마다 하나씩 관리하는 메모 제목(calendarSync.WORK_SUMMARY_MEMO_TITLE)
+const RESERVED_MEMO_TITLES = ["캘린더 업무 요약"];
 
 const BATCH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/;
 const ITEM_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/;
@@ -49,7 +51,11 @@ const isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const asArray = (v) => (Array.isArray(v) ? v : []);
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 const isBlank = (v) => v === undefined || v === null || (typeof v === "string" && v.trim() === "");
-const hasId = (x) => !!x && x.id !== undefined && x.id !== null && x.id !== "";
+const hasId = (x) => !!x && x.id !== undefined && x.id !== null && x.id !== "" && !Number.isNaN(x.id);
+// 서면 중 id가 하나뿐인 것만 짝지을 수 있다(id가 겹치거나 비정상이면 엉뚱한 서면이 제출 처리될 수 있음)
+const uniqueIdIn = (list) => (b) => hasId(b) && asArray(list).filter((x) => x && x.id === b.id).length === 1;
+// 오류 문구에 넣을 값 설명(문자열이 아니면 종류만)
+const describeValue = (v) => (typeof v === "string" ? v.slice(0, 60) : v === null ? "null" : Array.isArray(v) ? "배열" : typeof v);
 // 비교용: 공백을 모두 뺀다 ("준비서면 (2)" = "준비서면(2)")
 const compact = (s) => String(s ?? "").replace(/\s+/g, "");
 
@@ -80,14 +86,27 @@ export function isValidTime(s) {
 }
 
 // ── 붙여넣은 글·파일 → 묶음 ─────────────────────────────────────────────────
+// 글 전체 → 코드 상자(```json … ```) 안 → 첫 { 부터 끝 } 까지 순서로 JSON 을 찾는다. 못 찾으면 undefined.
+// (aiParse 의 extractJsonObject 는 글 속 ``` 를 모두 지우므로, 항목 글을 바꾸지 않도록 여기서는 쓰지 않는다)
+function readJsonText(raw) {
+  const tries = [raw];
+  const fenced = /```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/i.exec(raw);
+  if (fenced) tries.push(fenced[1]);
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start >= 0 && end > start) tries.push(raw.slice(start, end + 1));
+  for (const t of tries) {
+    try { return JSON.parse(t); } catch { /* 다음 방법 */ }
+  }
+  return undefined;
+}
+
 // 묶음 전체에 관한 형식 오류는 여기서 던진다. 항목별 검사는 validateBatch 가 한다.
 export function parseBatch(text) {
   const raw = String(text ?? "").replace(/^﻿/, "").trim();
   if (!raw) throw new Error("붙여넣은 내용이 없습니다.");
-  let data;
-  try {
-    data = extractJsonObject(raw);
-  } catch {
+  const data = readJsonText(raw);
+  if (data === undefined) {
     throw new Error("반영 블록(JSON)을 읽지 못했습니다. Claude가 준 블록이나 .cm.json 파일 내용을 그대로 넣어 주세요.");
   }
   if (!isPlainObject(data)) throw new Error("반영 블록은 { … } 모양의 JSON이어야 합니다.");
@@ -95,7 +114,7 @@ export function parseBatch(text) {
     throw new Error("연결 코드(cm-binding-v1)입니다. 연결 코드는 Claude 사건 폴더 세션에 붙여넣는 것이고, 여기에는 반영 블록(cm-update-v1)을 넣어야 합니다.");
   }
   if (data.format !== CM_UPDATE_FORMAT) {
-    throw new Error(`형식이 ${CM_UPDATE_FORMAT}이 아닙니다(받은 값: ${data.format === undefined ? "없음" : String(data.format)}).`);
+    throw new Error(`형식이 ${CM_UPDATE_FORMAT}이 아닙니다(받은 값: ${data.format === undefined ? "없음" : describeValue(data.format)}).`);
   }
   const unknown = Object.keys(data).filter((k) => !BATCH_FIELDS.includes(k));
   if (unknown.length) throw new Error(`묶음에 알 수 없는 필드가 있습니다: ${unknown.join(", ")}`);
@@ -128,31 +147,43 @@ export function parseBatch(text) {
 }
 
 // ── 반영 기록(meta/claudeInbox) ─────────────────────────────────────────────
-// 모양: { batches: { [batchId]: { at: 마지막 반영 시각, items: { [항목 id]: 지문 } } } }
-// App 은 사건 저장이 서버에서 확인된 항목만 여기에 적는다.
+// 모양: { batches: { [batchId]: { at: 마지막 반영 시각, items: { [항목 id]: { fp: 지문, caseId: 넣은 사건 } } } } }
+// App 은 사건 저장과 같은 트랜잭션에서, 실제로 들어간(또는 이미 있던) 항목만 여기에 적는다.
 function ledgerItems(ledger, batchId) {
   const batches = isPlainObject(ledger?.batches) ? ledger.batches : null;
   const entry = batches && hasOwn(batches, batchId) ? batches[batchId] : null;
   return isPlainObject(entry?.items) ? entry.items : {};
 }
 
+const ledgerFp = (v) => (typeof v === "string" ? v : isPlainObject(v) ? String(v.fp || "") : "");
+
 export function ledgerItemIds(ledger, batchId) {
   return new Set(Object.keys(ledgerItems(ledger, batchId)));
 }
 
-// 반영 기록 문서에 적을 내용 (setDoc merge 용)
-export function buildLedgerPatch(batchId, fingerprints, at) {
-  return { batches: { [batchId]: { at, items: { ...fingerprints } } }, updatedAt: at };
+// 반영 기록 문서에 적을 내용 (setDoc merge 용). entries: { 항목 id: { fp, caseId } }
+export function buildLedgerPatch(batchId, entries, at) {
+  return { batches: { [batchId]: { at, items: { ...entries } } }, updatedAt: at };
 }
 
-// 남겨 둘 수를 넘은 오래된 묶음 id (마지막 반영 시각 기준)
-export function ledgerBatchesToPrune(ledger, keep = LEDGER_KEEP_BATCHES) {
+// 반영 기록 문서 크기(Firestore 문서 한도 1MB)를 넘지 않게 지울 오래된 묶음 id.
+// 묶음 수가 keep 을 넘거나, 대략 크기가 maxChars 를 넘으면 마지막 반영이 오래된 것부터 고른다.
+export const LEDGER_MAX_CHARS = 600000;
+export function ledgerBatchesToPrune(ledger, keep = LEDGER_KEEP_BATCHES, maxChars = LEDGER_MAX_CHARS) {
   const batches = isPlainObject(ledger?.batches) ? ledger.batches : {};
-  const ids = Object.keys(batches);
-  if (ids.length <= keep) return [];
-  return ids
-    .sort((a, b) => String(batches[a]?.at || "").localeCompare(String(batches[b]?.at || "")))
-    .slice(0, ids.length - keep);
+  const ids = Object.keys(batches)
+    .sort((a, b) => String(batches[a]?.at || "").localeCompare(String(batches[b]?.at || "")));
+  const sizeOf = (id) => id.length + JSON.stringify(batches[id] ?? null).length;
+  let count = ids.length;
+  let size = ids.reduce((n, id) => n + sizeOf(id), 0);
+  const out = [];
+  for (const id of ids) {
+    if (count <= keep && size <= maxChars) break;
+    out.push(id);
+    count -= 1;
+    size -= sizeOf(id);
+  }
+  return out;
 }
 
 export function claudeItemBaseId(batchId, itemId) {
@@ -170,6 +201,9 @@ export function findClaudeItem(caseObj, batchId, itemId) {
       const id = String(x.id ?? "");
       const marked = x.claude && x.claude.batchId === batchId && x.claude.itemId === itemId;
       if (marked || id === baseId || id.startsWith(`${baseId}:`)) return { fp: marked ? String(x.claude.fp || "") : "" };
+      // 기존 제출대기 서면을 이 항목이 제출 처리한 표시(제출 대기로 되돌린 뒤에도 남아 다시 반영을 막는다)
+      const sub = x.claudeSubmit;
+      if (sub && sub.batchId === batchId && sub.itemId === itemId) return { fp: String(sub.fp || "") };
     }
   }
   return null;
@@ -244,7 +278,7 @@ export function normalizeItem(item, { today = "" } = {}) {
   const spec = typeof item.op === "string" && hasOwn(OP_SPECS, item.op) ? OP_SPECS[item.op] : null;
   if (typeof item.id !== "string" || !ITEM_ID_RE.test(item.id)) errors.push("항목 id가 없거나 형식이 맞지 않음(영문·숫자·-·_)");
   if (!spec) {
-    errors.push(item.op === undefined ? "op 없음" : `알 수 없는 op: ${(typeof item.op === "string" ? item.op : JSON.stringify(item.op) ?? String(item.op)).slice(0, 60)}`);
+    errors.push(item.op === undefined ? "op 없음" : `알 수 없는 op: ${describeValue(item.op)}`);
     return { errors, norm: null };
   }
   const allowed = [...COMMON_FIELDS, ...Object.keys(spec.fields)];
@@ -267,6 +301,11 @@ export function normalizeItem(item, { today = "" } = {}) {
   for (const [name, kind] of Object.entries(spec.fields)) {
     const v = checkField(name, kind, item[name], errors);
     norm[name] = kind.startsWith("bool") ? v === true : (v || "");
+  }
+  // 앱이 따로 관리하는 메모 제목은 쓰지 못한다(회사업무 캘린더 동기화가 덮어쓰거나 지움)
+  const memoTitle = item.op === "memo" || item.op === "deadline" || (item.op === "call" && norm.asClientRequest) ? norm.title : "";
+  if (memoTitle && RESERVED_MEMO_TITLES.some((t) => compact(t) === compact(memoTitle))) {
+    errors.push(`「${memoTitle}」은 앱이 자동으로 쓰는 메모 제목이라 쓸 수 없음`);
   }
   // 지문은 파일에 적힌 값으로만 만든다(기본값의 '오늘'이 들어가면 다음 날 같은 묶음이 다른 내용으로 보인다)
   const fp = itemFingerprint(norm);
@@ -305,7 +344,7 @@ function contentWarnings(n, caseObj, { today, batchPendingTitles, batchSubmitted
 
   switch (n.op) {
     case "brief.submitted": {
-      const pending = briefs.filter((b) => hasId(b) && b.status !== "submitted" && sameTitle(b));
+      const pending = briefs.filter((b) => uniqueIdIn(briefs)(b) && b.status !== "submitted" && sameTitle(b));
       const submitted = briefs.filter((b) => b.status === "submitted" && sameTitle(b));
       if (pending.length > 1) warns.push(`같은 제목의 제출대기 서면이 ${pending.length}건 — 먼저 등록된 것을 제출 처리함`);
       if (!pending.length) {
@@ -401,7 +440,7 @@ export function validateBatch(batch, cases = [], ledger = null, { today = "" } =
     if (!structural) {
       const ledgerHit = hasOwn(ledgerMap, id);
       const found = findClaudeItem(caseObj, batchId, id);
-      const prevFp = (ledgerHit && String(ledgerMap[id] || "")) || found?.fp || "";
+      const prevFp = (ledgerHit && ledgerFp(ledgerMap[id])) || found?.fp || "";
       if (ledgerHit || found) {
         if (prevFp && prevFp !== fp) {
           // 같은 고정 id 로 반영하면 앞 기록을 덮어쓰므로 막는다
@@ -495,7 +534,7 @@ export function applyItem(caseObj, n, { batchId, today = "", fp = "" } = {}) {
     case "brief.submitted": {
       // 같은 제목 제출대기 서면이 있으면 그것을 제출 처리, 없으면 새로 만들어 제출 처리 (+ 진행경과 "제목 제출")
       const briefs = asArray(caseObj.briefs);
-      const pending = briefs.find((b) => hasId(b) && b.status !== "submitted" && compact(b.title) === compact(n.title));
+      const pending = briefs.find((b) => uniqueIdIn(briefs)(b) && b.status !== "submitted" && compact(b.title) === compact(n.title));
       let next = caseObj;
       let briefId = pending?.id;
       if (pending) {
@@ -514,6 +553,8 @@ export function applyItem(caseObj, n, { batchId, today = "", fp = "" } = {}) {
       }
       const timelineId = `${baseId}:tl`;
       next = markBriefSubmitted(next, briefId, n.date, () => timelineId);
+      // 기존 서면을 제출 처리했으면 그 서면에도 표시를 남긴다(어느 묶음이 제출 처리했는지, 다시 반영 막기)
+      if (pending) next = { ...next, briefs: asArray(next.briefs).map((b) => (b && b.id === briefId ? { ...b, claudeSubmit: { ...mark } } : b)) };
       return markNew(next, "timeline", timelineId, mark);
     }
     case "brief.pending": {
@@ -564,11 +605,46 @@ export function applyItem(caseObj, n, { batchId, today = "", fp = "" } = {}) {
   }
 }
 
-// 고른 항목을 사건별 수정본으로 만든다: [{ caseId, base, next, itemIds, fingerprints }]
+// 항목 하나가 사건에 낸 변경을 나눈다: 새로 만든 항목(cl:… id)과, 서면 제출이 기존 제출대기 서면에 얹는 제출 칸.
+// 그 밖의 변경(기존 항목 수정·삭제, 사건 기본 필드 변경)이 섞이면 unexpected=true.
+function splitItemChange(before, after, r, batchId) {
+  const baseId = claudeItemBaseId(batchId, r.id);
+  const d = diffCase(before, after);
+  const created = [];
+  let briefPatch = null;
+  let unexpected = Object.keys(d.set).length > 0;
+  for (const [field, fd] of Object.entries(d.arrays)) {
+    if (fd.removed.length) unexpected = true;
+    for (const u of fd.upserts) {
+      const id = u.key.startsWith("id:") ? u.key.slice(3) : null;
+      if (id !== null && (id === baseId || id.startsWith(`${baseId}:`))) created.push({ field, key: u.key });
+      else if (field === "briefs" && r.norm.op === "brief.submitted" && !briefPatch && u.items.length === 1) {
+        const b = u.items[0];
+        // prev: 이 항목을 얹기 전 서면. 같은 묶음 앞 항목이 만든 서면인데 이 제출 처리만 저장 때 건너뛰면 이 판본으로 둔다
+        const prev = asArray(before.briefs).find((x) => x && `id:${String(x.id)}` === u.key) || null;
+        briefPatch = {
+          key: u.key,
+          set: { status: b.status, submittedDate: b.submittedDate, submitTimelineId: b.submitTimelineId, claudeSubmit: b.claudeSubmit },
+          fillDetails: r.norm.details || "",
+          prev,
+        };
+      } else unexpected = true;
+    }
+  }
+  // 서면 제출은 반드시 「제목 제출」 진행경과를 만들고, 기존 서면을 쓴 경우 그 서면이 제출 상태가 되어야 한다
+  if (r.norm.op === "brief.submitted") {
+    if (!created.some((c) => c.key === `id:${baseId}:tl`)) unexpected = true;
+    if (briefPatch && briefPatch.set.status !== "submitted") unexpected = true;
+  }
+  return { created, briefPatch, unexpected };
+}
+
+// 고른 항목을 사건별 수정본으로 만든다: [{ caseId, base, next, itemIds, fingerprints, guard }]
 // 다시 검증해서 오류·이미 반영됨 항목은 골랐더라도 넣지 않는다. 같은 사건의 항목은 묶음 순서대로 얹는다.
 // seen: 사용자가 화면에서 본 판정 { 항목 id: status }. 그 사이 정상 → 경고로 바뀐 항목은 확인 없이 넣지 않는다.
+// guard: 저장 순간 서버 최신본에 맞춰 다시 가리는 보호 정보(claudeGuard.js). App 이 diff 에 붙여 저장한다.
 export function planBatch(batch, cases = [], selectedItemIds = [], { today = "", ledger = null, seen = null } = {}) {
-  const selected = new Set(asArray([...selectedItemIds]).map(String));
+  const selected = new Set((selectedItemIds ? [...selectedItemIds] : []).map(String));
   const report = validateBatch(batch, cases, ledger, { today });
   const byCase = new Map();
   for (const r of report.items) {
@@ -578,15 +654,28 @@ export function planBatch(batch, cases = [], selectedItemIds = [], { today = "",
     if (!byCase.has(key)) byCase.set(key, { caseObj: r.caseObj, entries: [] });
     byCase.get(key).entries.push(r);
   }
-  return [...byCase.values()].map(({ caseObj, entries }) => {
+  const plan = [];
+  for (const { caseObj, entries } of byCase.values()) {
     let next = caseObj;
-    for (const r of entries) next = applyItem(next, r.norm, { batchId: batch.batchId, today, fp: r.fp });
-    return {
+    const done = [];
+    const guardItems = [];
+    for (const r of entries) {
+      const after = applyItem(next, r.norm, { batchId: batch.batchId, today, fp: r.fp });
+      const { created, briefPatch, unexpected } = splitItemChange(next, after, r, batch.batchId);
+      if (unexpected || (!created.length && !briefPatch)) continue; // 정해진 밖의 변경이 생기는 항목은 넣지 않는다
+      next = after;
+      done.push(r);
+      guardItems.push({ itemId: r.id, fp: r.fp, created, ...(briefPatch ? { briefPatch } : {}) });
+    }
+    if (!done.length) continue;
+    plan.push({
       caseId: caseObj.id, base: caseObj, next,
-      itemIds: entries.map((r) => r.id),
-      fingerprints: Object.fromEntries(entries.map((r) => [r.id, r.fp])),
-    };
-  });
+      itemIds: done.map((r) => r.id),
+      fingerprints: Object.fromEntries(done.map((r) => [r.id, r.fp])),
+      guard: { batchId: batch.batchId, items: guardItems },
+    });
+  }
+  return plan;
 }
 
 // ── 화면 표시용 ─────────────────────────────────────────────────────────────

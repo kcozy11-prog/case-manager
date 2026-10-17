@@ -8,6 +8,8 @@
 //   - 같은 diff 를 여러 번 적용해도 결과가 같다(멱등) — 재시도해도 안전하다.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { resolveClaudeGuard } from "./claudeGuard.js";
+
 export const CASE_ARRAY_FIELDS = ["hearings", "timeline", "memos", "documents", "todos", "briefs"];
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
@@ -95,7 +97,8 @@ export function diffCase(base, next) {
     if (value === undefined) continue;
     if (CASE_ARRAY_FIELDS.includes(key) && Array.isArray(value)) {
       const prev = hasOwn(before, key) ? before[key] : undefined;
-      if (prev === undefined || Array.isArray(prev)) {
+      // null 인 옛 칸도 빈 배열처럼 항목 단위로 비교한다(배열 전체를 덮어써 다른 기기의 항목을 지우지 않게)
+      if (prev === undefined || prev === null || Array.isArray(prev)) {
         const d = diffItems(prev, value);
         if (d.upserts.length || d.removed.length) arrays[key] = d;
         continue;
@@ -113,8 +116,10 @@ export function isEmptyCaseDiff(diff) {
 export function applyCaseDiff(latest, diff) {
   const out = { ...(latest || {}) };
   if (!diff) return out;
-  for (const [key, value] of Object.entries(diff.set || {})) out[key] = value;
-  for (const [key, d] of Object.entries(diff.arrays || {})) out[key] = applyItemsDiff(out[key], d);
+  // Claude 반영 diff 는 보호 정보(diff.claude)를 최신 문서에 맞춰 푼 뒤 얹는다(claudeGuard.js)
+  const d0 = diff.claude ? resolveClaudeGuard(latest, diff).diff : diff;
+  for (const [key, value] of Object.entries(d0.set || {})) out[key] = value;
+  for (const [key, d] of Object.entries(d0.arrays || {})) out[key] = applyItemsDiff(out[key], d);
   return out;
 }
 

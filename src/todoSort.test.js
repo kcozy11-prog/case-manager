@@ -24,3 +24,22 @@ test("sortPendingTodos keeps high priority first when due dates are the same", (
 
   assert.deepEqual(sorted.map((todo) => todo.id), [2, 1]);
 });
+
+test("sortPendingTodos orders string ids (Claude 반영, 업무일지) consistently after numeric ids", () => {
+  const todos = [
+    { id: 1760000005000, text: "a", priority: "보통", dueDate: "2026-10-20" },
+    { id: "cl:b:2", text: "b", priority: "보통", dueDate: "2026-10-20" },
+    { id: 1760000001000, text: "c", priority: "보통", dueDate: "2026-10-20" },
+    { id: "cl:b:1", text: "d", priority: "보통", dueDate: "2026-10-20" },
+  ];
+  assert.deepEqual(sortPendingTodos(todos).map((t) => t.id), [1760000001000, 1760000005000, "cl:b:1", "cl:b:2"]);
+  assert.deepEqual(sortPendingTodos([...todos].reverse()).map((t) => t.id), [1760000001000, 1760000005000, "cl:b:1", "cl:b:2"]);
+});
+
+test("sortPendingTodos applies priority to todos without a due date", () => {
+  const todos = [
+    { id: 1, text: "보통", priority: "보통", dueDate: "" },
+    { id: 2, text: "높음", priority: "높음", dueDate: "" },
+  ];
+  assert.deepEqual(sortPendingTodos(todos).map((t) => t.id), [2, 1]);
+});

@@ -153,3 +153,18 @@ test('재시도 대상 오류 판별', () => {
   assert.equal(isRetryableWriteError({ code: 'invalid-argument' }), false);
   assert.equal(isRetryableWriteError(null), false);
 });
+
+test('commit 이 { result, committedDiff } 를 돌려주면 실제로 쓴 diff 만 겹쳐 보이고, 쓴 것이 없으면 겹치지 않는다', async () => {
+  const base = { id: 'c1', title: '가공 사건', todos: [] };
+  const guarded = diffCase(base, { ...base, todos: [{ id: 'cl:b:i1', text: '건너뛸 항목' }] });
+  const written = diffCase(base, { ...base, todos: [{ id: 'cl:b:i2', text: '쓴 항목' }] });
+  let nextReturn = { result: 'saved', committedDiff: written };
+  const writer = createCaseWriter({ commit: async () => { await tick(); return nextReturn; } });
+  assert.equal(await writer.submit('c1', guarded), 'saved');
+  assert.deepEqual(writer.overlay([base])[0].todos.map((t) => t.id), ['cl:b:i2']);
+  const writer2 = createCaseWriter({ commit: async () => { await tick(); return { result: 'unchanged', committedDiff: null }; } });
+  assert.equal(await writer2.submit('c1', guarded), 'unchanged');
+  assert.deepEqual(writer2.overlay([base])[0].todos, []);
+  nextReturn = 'saved'; // 문자열을 돌려주는 종전 commit 은 그대로
+  assert.equal(await writer.submit('c1', written), 'saved');
+});
