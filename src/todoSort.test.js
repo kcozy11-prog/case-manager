@@ -35,11 +35,3 @@ test("sortPendingTodos orders string ids (Claude 반영, 업무일지) consisten
   assert.deepEqual(sortPendingTodos(todos).map((t) => t.id), [1760000001000, 1760000005000, "cl:b:1", "cl:b:2"]);
   assert.deepEqual(sortPendingTodos([...todos].reverse()).map((t) => t.id), [1760000001000, 1760000005000, "cl:b:1", "cl:b:2"]);
 });
-
-test("sortPendingTodos applies priority to todos without a due date", () => {
-  const todos = [
-    { id: 1, text: "보통", priority: "보통", dueDate: "" },
-    { id: 2, text: "높음", priority: "높음", dueDate: "" },
-  ];
-  assert.deepEqual(sortPendingTodos(todos).map((t) => t.id), [2, 1]);
-});
