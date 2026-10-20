@@ -7,6 +7,17 @@ function normalizeDueDate(dueDate) {
   return Number.isNaN(timestamp) ? Number.POSITIVE_INFINITY : timestamp;
 }
 
+// 숫자 id(Date.now())는 크기순, 문자 id(Claude 반영 "cl:…", 업무일지 등)는 숫자 id 뒤에 글자순
+function compareIds(a, b) {
+  const an = typeof a === "number" && Number.isFinite(a);
+  const bn = typeof b === "number" && Number.isFinite(b);
+  if (an && bn) return a - b;
+  if (an !== bn) return an ? -1 : 1;
+  const as = String(a ?? "");
+  const bs = String(b ?? "");
+  return as < bs ? -1 : as > bs ? 1 : 0;
+}
+
 export function sortPendingTodos(todos) {
   return [...todos].sort((a, b) => {
     const da = normalizeDueDate(a.dueDate);
@@ -18,6 +29,6 @@ export function sortPendingTodos(todos) {
     const priorityCompare = (PRIO_ORDER[a.priority] ?? 1) - (PRIO_ORDER[b.priority] ?? 1);
     if (priorityCompare !== 0) return priorityCompare;
 
-    return (a.id ?? 0) - (b.id ?? 0);
+    return compareIds(a.id, b.id);
   });
 }

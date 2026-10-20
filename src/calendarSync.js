@@ -375,13 +375,24 @@ export function mergeCalendarEventIntoCase(caseObj, ev, { today, makeId = () => 
     calendarEventId: ev.id,
   };
 
-  const existingIndex = hearings.findIndex(h =>
+  let existingIndex = hearings.findIndex(h =>
     (ev.id && h.calendarEventId === ev.id) ||
     (h.date === eventDate && h.type === hearingType && (h.time || "") === (hearingTime || ""))
   );
+  // Claude 반영으로 먼저 들어온 기일(claude 표시, 캘린더 연결 없음)은 날짜와 종류가 같고 시각이 같거나 한쪽이 비었으면
+  // 같은 기일로 보고 LBOX 일정에 연결한다(따로 하나 더 만들지 않음). 다른 기일에는 종전 규칙만 쓴다.
+  if (existingIndex < 0) {
+    const typeKey = (t) => String(t || "").replace(/\s+/g, "").replace(/기일$/, "");
+    existingIndex = hearings.findIndex(h =>
+      h && h.claude && !h.calendarEventId && h.date === eventDate && typeKey(h.type) === typeKey(hearingType) &&
+      (!h.time || !hearingTime || h.time === hearingTime)
+    );
+  }
 
   if (existingIndex >= 0) {
     const existing = hearings[existingIndex];
+    // LBOX 일정에 장소가 없으면 Claude 기일에 적힌 장소를 지우지 않는다
+    if (existing.claude && !nextHearing.result && existing.result) nextHearing.result = existing.result;
     const changed =
       existing.date !== nextHearing.date ||
       (existing.time || "") !== (nextHearing.time || "") ||

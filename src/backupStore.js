@@ -7,7 +7,7 @@ import { collection, doc, getDocs, getDocsFromServer, getDoc, getDocFromServer }
 import { db } from "./firebase";
 import { readWithServerPolicy } from "./backupRead.js";
 
-export const BACKUP_META_DOCS = ["standaloneTodos", "taskSync", "calendarSync", "restoreLog", "todoCleanup"];
+export const BACKUP_META_DOCS = ["standaloneTodos", "taskSync", "calendarSync", "restoreLog", "todoCleanup", "claudeInbox"];
 
 async function readAll(uid, fromServer) {
   const casesCol = collection(db, "users", uid, "cases");

@@ -116,8 +116,14 @@ export function createCaseWriter({
         }
         const job = q[0];
         let result;
+        // commit 이 { result, committedDiff } 를 돌려주면(Claude 반영 저장) 실제로 쓴 diff 를 겹쳐 보기에 쓴다
+        let committedDiff = job.diff;
         try {
           result = await commit(caseId, job.diff, job.newCase);
+          if (result && typeof result === "object") {
+            committedDiff = result.committedDiff || null;
+            result = result.result;
+          }
         } catch (e) {
           if (isRetryableWriteError(e)) {
             blocked.add(caseId);
@@ -138,7 +144,7 @@ export function createCaseWriter({
         blocked.delete(caseId);
         if (q.length === 0) queues.delete(caseId);
         persist(); // 서버 반영에 성공한 것은 보관분에서 지운다
-        if (result !== "missing") committed.push({ caseId, diff: job.diff, newCase: job.newCase, at: now() });
+        if (result !== "missing" && committedDiff) committed.push({ caseId, diff: committedDiff, newCase: job.newCase, at: now() });
         job.resolve(result);
         notify();
       }

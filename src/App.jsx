@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { auth, provider, db, firebaseProjectId } from "./firebase";
 import { onAuthStateChanged, signOut, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
-import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, getDocFromServer, getDocsFromServer, runTransaction, arrayUnion } from "firebase/firestore";
+import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, getDoc, getDocFromServer, getDocsFromServer, runTransaction, arrayUnion, updateDoc, deleteField, FieldPath } from "firebase/firestore";
 import { TYPES, todayStr, dday, fmtDate, emptyCase, SAMPLE_CASES, localDateStr } from "./utils";
 import { LIST_STATUSES, filterCaseList, countCasesByListStatus, firstActiveCaseId } from "./caseList";
 import { TypeBadge } from "./components/Badges";
@@ -12,6 +12,9 @@ import CaseItem from "./components/CaseItem";
 import OverviewTab from "./components/OverviewTab";
 import TodosTab from "./components/TodosTab";
 import AiParseModal from "./components/AiParseModal";
+import ClaudeInboxModal from "./components/ClaudeInboxModal";
+import { planBatch, buildBindingCode, buildLedgerPatch, ledgerBatchesToPrune, ledgerItemIds } from "./claudeInbox";
+import { resolveClaudeGuard, claudeLedgerEntries } from "./claudeGuard";
 import CaseFormModal from "./components/CaseFormModal";
 import { fetchCalendarEvents, syncEventsWithCases, mergeCalendarEventIntoCase, fetchWorkCalendarEvents, syncWorkEventsWithCases, inferCaseType, fetchWorkTasks, matchTasksToCases, mergeTaskIntoCaseTodos } from "./calendarSync";
 import UnmatchedTasksModal from "./components/UnmatchedTasksModal";
@@ -47,9 +50,47 @@ function stripTransient(c) {
   return rest;
 }
 
+// Claude 반영 저장 결과(사건|묶음 → { applied, skipped }). 반영 창의 결과 안내에 쓴다.
+const claudeCommitResults = new Map();
+
+// Claude 반영: 사건 문서와 반영 기록(meta/claudeInbox)을 한 트랜잭션에서 읽고 쓴다.
+//  - 저장 순간의 최신 문서·반영 기록으로 보호 정보를 풀어(claudeGuard.js) 다른 기기에서 고친 내용을 덮지 않고,
+//    지운 항목을 되살리지 않는다.
+//  - 실제로 들어간(또는 이미 있던) 항목만 같은 트랜잭션에서 반영 기록에 남긴다(저장과 기록이 함께 되거나 함께 안 됨).
+//  - 이 기기에 보관되었다가 앱을 다시 열어 보내는 저장도 같은 길로 간다.
+async function commitClaudeDiff(uid, caseId, diff) {
+  const ref = doc(db, "users", uid, "cases", caseId);
+  const ledgerRef = doc(db, "users", uid, "meta", "claudeInbox");
+  const guard = diff.claude;
+  const resultKey = `${caseId}|${guard.batchId}`;
+  let committedDiff = null; // 실제로 쓴 diff — 저장 뒤 화면 겹쳐 보기에 쓴다(건너뛴 항목이 다시 보이지 않게)
+  const result = await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    const ledgerSnap = await tx.get(ledgerRef);
+    if (!snap.exists()) {
+      claudeCommitResults.set(resultKey, { applied: [], skipped: (guard.items || []).map((g) => ({ itemId: g.itemId, reason: "case-missing" })) });
+      committedDiff = null;
+      return "missing"; // Claude 반영은 사건을 새로 만들지 않는다
+    }
+    const latest = normalizeCaseDoc(snap.data(), todayStr);
+    const ledger = ledgerSnap.exists() ? ledgerSnap.data() : null;
+    const { diff: resolved, applied, skipped } = resolveClaudeGuard(latest, diff, { skipItemIds: [...ledgerItemIds(ledger, guard.batchId)] });
+    const merged = applyCaseDiff(latest, resolved);
+    const changed = stableStringify(merged) !== stableStringify(latest);
+    if (changed) tx.set(ref, merged);
+    const entries = claudeLedgerEntries(guard, applied, skipped, caseId);
+    if (Object.keys(entries).length) tx.set(ledgerRef, buildLedgerPatch(guard.batchId, entries, new Date().toISOString()), { merge: true });
+    claudeCommitResults.set(resultKey, { applied, skipped });
+    committedDiff = changed ? resolved : null;
+    return changed ? "saved" : "unchanged";
+  });
+  return { result, committedDiff };
+}
+
 // 서버의 최신 사건 문서를 읽어 이번 수정분(diff)만 얹는다.
 // 트랜잭션이므로 읽은 뒤 다른 기기가 고치면 다시 읽어 얹는다 → 옛 판본으로 문서 전체를 덮어쓰지 않는다.
 async function commitCaseDiff(uid, caseId, diff, newCase) {
+  if (diff && diff.claude && caseId !== STANDALONE_TODOS_CASE_ID) return commitClaudeDiff(uid, caseId, diff);
   if (caseId === STANDALONE_TODOS_CASE_ID) {
     const ref = doc(db, "users", uid, "meta", "standaloneTodos");
     return runTransaction(db, async (tx) => {
@@ -108,6 +149,13 @@ export default function App() {
   const [showStandaloneTodos, setShowStandaloneTodos] = useState(false);
   const [editCase, setEditCase] = useState(null);
   const [showAI, setShowAI] = useState(false);
+  // Claude 반영 검토함: 창을 연 동안 반영 기록(meta/claudeInbox)을 실시간으로 받는다.
+  // serverSeen: 이번에 창을 연 뒤 서버 판본을 한 번이라도 받았는지 (받기 전에는 반영을 막는다)
+  const [showClaudeInbox, setShowClaudeInbox] = useState(false);
+  const [claudeLedger, setClaudeLedger] = useState(null); // { data, serverSeen }
+  const claudeLedgerRef = useRef(null);
+  claudeLedgerRef.current = claudeLedger;
+  const [bindingNotice, setBindingNotice] = useState(null); // { caseId, code, copied }
   const [showRestore, setShowRestore] = useState(false);
   const [restoreDefaultInput, setRestoreDefaultInput] = useState("");
   // 링크(?restore=시트 id)로 열면 복원 창을 그 파일로 채워 연다
@@ -252,14 +300,15 @@ export default function App() {
   // 사건 저장: next 는 저장할 사건, base 는 그 수정의 출발점(화면이 보던 판본, 새 사건이면 null).
   // 바뀐 부분만 서버 최신 문서에 얹으므로, 그 사이 다른 기기·자동 동기화가 저장한 내용이 지워지지 않는다.
   // select=false: 캘린더·할 일 자동 동기화처럼 백그라운드 저장일 때는 보고 있던 사건을 바꾸지 않는다.
-  const saveCase = useCallback((next, { base, select = true } = {}) => {
+  // claudeGuard: Claude 반영 저장 보호 정보(planBatch 의 guard) — 저장 순간 서버 최신본에 맞춰 풀린다(commitClaudeDiff)
+  const saveCase = useCallback((next, { base, select = true, claudeGuard = null } = {}) => {
     const writer = writerRef.current;
     if (!user || !writer || !next?.id) return Promise.resolve("skipped");
     const clean = stripTransient(next);
     if (select) setSelectedId(clean.id);
     const from = base === undefined ? (casesRef.current.find(x => x.id === clean.id) || null) : base;
     const work = from
-      ? writer.submit(clean.id, diffCase(from, clean))
+      ? writer.submit(clean.id, claudeGuard ? { ...diffCase(from, clean), claude: claudeGuard } : diffCase(from, clean))
       : writer.submit(clean.id, diffCase({ id: clean.id }, clean), { newCase: clean });
     work.catch(() => {}); // 실패는 상단 배너(writerState.error)로 알린다
     return work;
@@ -584,6 +633,88 @@ export default function App() {
       setShowForm(true);
     }
   }, [saveCase]);
+
+  // ── Claude 반영 검토함 ──────────────────────────────────────────────────
+  useEffect(() => {
+    if (!user || !showClaudeInbox) { setClaudeLedger(null); return undefined; }
+    const ref = doc(db, "users", user.uid, "meta", "claudeInbox");
+    return onSnapshot(ref, { includeMetadataChanges: true }, (snap) => {
+      const fromServer = !snap.metadata.fromCache;
+      setClaudeLedger((prev) => ({ data: snap.exists() ? snap.data() : {}, serverSeen: !!prev?.serverSeen || fromServer }));
+    }, (error) => {
+      console.error("Claude 반영 기록 동기화 오류:", error);
+    });
+  }, [user, showClaudeInbox]);
+
+  // 고른 항목을 사건별로 저장한다. 저장은 사건 문서와 반영 기록을 한 트랜잭션에서 쓰고(commitClaudeDiff),
+  // 그 순간의 서버 최신본에 맞춰 이미 있거나 다른 기기에서 처리된 항목은 건너뛴다.
+  // 연결이 느리면 25초 뒤 결과를 먼저 돌려주고(대기열의 재시도 간격 15초보다 길게) 저장은 대기열이 이어서 한다.
+  const applyClaudeBatch = useCallback(async (batch, selectedIds, seen = null) => {
+    if (!user) throw new Error("로그인이 필요합니다.");
+    if (!casesSynced) throw new Error("서버 데이터를 받기 전에는 반영할 수 없습니다. 잠시 뒤 다시 시도해 주세요.");
+    const ledgerState = claudeLedgerRef.current;
+    if (!ledgerState?.serverSeen) throw new Error("반영 기록을 서버에서 아직 받지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
+    const plan = planBatch(batch, casesRef.current, selectedIds, { today: todayStr, ledger: ledgerState.data, seen });
+    const planned = plan.reduce((n, ch) => n + ch.itemIds.length, 0);
+    const summary = { cases: 0, items: 0, pendingItems: 0, failedCases: 0, failedItems: 0, skipped: selectedIds.length - planned };
+    if (!plan.length) return summary;
+
+    const SAVED = ["saved", "created", "unchanged"];
+    const resultKey = (ch) => `${ch.caseId}|${batch.batchId}`;
+    plan.forEach((ch) => claudeCommitResults.delete(resultKey(ch)));
+    const withTimeout = (work, ms = 25000) => Promise.race([work, new Promise((res) => setTimeout(() => res("pending"), ms))]);
+    const settle = (p) => p.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
+    // 사건마다 차례로 저장한다(사건 저장이 모두 같은 반영 기록 문서를 함께 쓰므로 동시에 보내면 서로 다툰다).
+    // 연결이 느려 한 곳이 대기로 넘어가면 나머지는 대기열에 넣고 기다리지 않는다(대기열이 이어서 저장).
+    const results = [];
+    let slow = false;
+    for (const ch of plan) {
+      const work = saveCase(ch.next, { base: ch.base, select: false, claudeGuard: ch.guard });
+      if (slow) { work.catch(() => {}); results.push({ status: "fulfilled", value: "pending" }); continue; }
+      const r = await settle(withTimeout(work));
+      results.push(r);
+      if (r.status === "fulfilled" && r.value === "pending") slow = true;
+    }
+    results.forEach((r, i) => {
+      const ch = plan[i];
+      const n = ch.itemIds.length;
+      if (r.status === "fulfilled" && SAVED.includes(r.value)) {
+        const info = claudeCommitResults.get(resultKey(ch));
+        claudeCommitResults.delete(resultKey(ch));
+        const done = info ? info.applied.length : n;
+        if (done) summary.cases++;
+        summary.items += done;
+        summary.skipped += n - done; // 저장 순간 이미 있거나 다른 기기에서 처리·삭제된 항목
+      } else if (r.status === "fulfilled" && r.value === "pending") {
+        summary.cases++; summary.items += n; summary.pendingItems += n;
+      } else {
+        summary.failedCases++; summary.failedItems += n;
+      }
+    });
+
+    // 반영 기록 문서가 너무 커지지 않게 오래된 묶음을 정리한다(실패해도 반영에는 영향 없음)
+    const prune = ledgerBatchesToPrune(claudeLedgerRef.current?.data).filter((id) => id !== batch.batchId);
+    if (prune.length) {
+      const args = prune.flatMap((id) => [new FieldPath("batches", id), deleteField()]);
+      updateDoc(doc(db, "users", user.uid, "meta", "claudeInbox"), ...args).catch((e) => console.warn("Claude 반영 기록 정리 실패", e));
+    }
+    return summary;
+  }, [user, casesSynced, saveCase]);
+
+  // 사건 화면 「연결 코드 복사」: Claude 사건 폴더 세션에 붙여넣을 한 줄 JSON. 클립보드가 막히면 직접 복사하게 보여 준다.
+  const copyBindingCode = useCallback(async (c) => {
+    const code = buildBindingCode(c);
+    try {
+      // 권한 확인 등으로 응답이 없으면 2초 뒤 직접 복사 칸을 보여 준다
+      await Promise.race([
+        navigator.clipboard.writeText(code),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("clipboard timeout")), 2000)),
+      ]);
+      setBindingNotice({ caseId: c.id, code, copied: true });
+    } catch {
+      setBindingNotice({ caseId: c.id, code, copied: false });
+    }
+  }, []);
 
 
   // ── 구글 캘린더 동기화 ──────────────────────────────────────────────────
@@ -1270,6 +1401,11 @@ export default function App() {
               className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors">
               <span>✨</span> <span className="hidden sm:inline">AI 파싱</span>
             </button>
+            <button onClick={() => setShowClaudeInbox(true)} disabled={!casesSynced}
+              title={casesSynced ? "Claude가 만든 반영 블록(cm-update-v1)을 확인해 사건에 반영" : "서버 데이터 확인 중…"}
+              className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50">
+              <span>📨</span> <span className="hidden sm:inline">Claude 반영</span>
+            </button>
             <button onClick={() => { setEditCase(null); setShowForm(true); }}
               className="flex items-center gap-1.5 text-xs bg-indigo-500 hover:bg-indigo-400 text-white px-3 py-1.5 rounded-lg transition-colors font-semibold">
               <span>+</span> <span className="hidden sm:inline">새 사건</span>
@@ -1446,6 +1582,10 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
                     <button
+                      onClick={() => copyBindingCode(selected)}
+                      title="Claude 사건 폴더 세션에 붙여넣을 연결 코드(사건 ID·사건번호·사건명)를 복사합니다"
+                      className="btn-ghost text-xs">연결 코드 복사</button>
+                    <button
                       onClick={() => { setEditCase(selected); setShowForm(true); }}
                       className="btn-ghost text-xs">수정</button>
                     <button
@@ -1459,6 +1599,21 @@ export default function App() {
                     </button>
                   </div>
                 </div>
+                {bindingNotice && bindingNotice.caseId === selected.id && (
+                  <div className={`mx-4 sm:mx-6 mt-3 px-3 py-2 rounded-lg border text-xs ${bindingNotice.copied ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-amber-50 border-amber-200 text-amber-800"}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium">
+                        {bindingNotice.copied
+                          ? "연결 코드를 복사했습니다. Claude 사건 폴더 세션에 붙여넣으세요."
+                          : "클립보드에 복사하지 못했습니다. 아래 칸을 눌러 전체 선택한 뒤 직접 복사(Ctrl+C)해 주세요."}
+                      </span>
+                      <button onClick={() => setBindingNotice(null)} className="text-slate-400 hover:text-slate-600 text-sm leading-none px-1" title="닫기">✕</button>
+                    </div>
+                    <textarea readOnly rows={2} value={bindingNotice.code} onFocus={(e) => e.target.select()}
+                      className="mt-1.5 w-full font-mono text-[11px] text-slate-600 bg-white border border-slate-200 rounded px-2 py-1 resize-none"
+                      aria-label="연결 코드" />
+                  </div>
+                )}
                 <div className="flex border-b border-slate-100 px-4 sm:px-6">
                   {[["overview", "개요"], ["todos", "할 일"], ["briefs", "서면"]].map(([key, label]) => (
                     <button key={key} onClick={() => setActiveTab(key)}
@@ -1503,6 +1658,16 @@ export default function App() {
         />
       )}
       {showAI && <AiParseModal cases={cases} onClose={() => setShowAI(false)} onApply={applyAI} />}
+      {showClaudeInbox && (
+        <ClaudeInboxModal
+          cases={cases}
+          ledger={claudeLedger?.data || null}
+          ready={casesSynced && !!claudeLedger?.serverSeen}
+          notReadyText={!casesSynced ? "서버 데이터를 확인하는 중이라 아직 반영할 수 없습니다." : "반영 기록을 서버에서 받는 중이라 아직 반영할 수 없습니다."}
+          onApply={applyClaudeBatch}
+          onClose={() => setShowClaudeInbox(false)}
+        />
+      )}
       {showStandaloneTodos && (
         <StandaloneTodosModal
           todos={standaloneTodos}

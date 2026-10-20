@@ -124,3 +124,13 @@ test('옛 memo 문자열 문서를 memos 배열로 맞춘다', () => {
   const withMemos = { id: 'c', memos: [{ id: 2 }] };
   assert.deepEqual(normalizeCaseDoc(withMemos).memos, [{ id: 2 }]);
 });
+
+test("diffCase treats a null list like an empty one, so concurrent items on the server survive", () => {
+  const base = { id: "c1", todos: null };
+  const next = { id: "c1", todos: [{ id: 1, text: "새 할 일" }] };
+  const diff = diffCase(base, next);
+  assert.deepEqual(diff.set, {});
+  const merged = applyCaseDiff({ id: "c1", todos: [{ id: 99, text: "다른 기기" }] }, diff);
+  assert.deepEqual(merged.todos.map((t) => t.id), [99, 1]);
+  assert.deepEqual(applyCaseDiff({ id: "c1", todos: null }, diff).todos.map((t) => t.id), [1]);
+});
