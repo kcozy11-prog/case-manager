@@ -807,3 +807,263 @@ test('seeded fuzz: plans only add this batch\'s items, never overwrite, and re-p
     assert.deepEqual({ cases, b }, snap, `iter ${iter}: inputs mutated`);
   }
 });
+
+// ── 서면 작성 할 일 (todoBrief.js 와 같은 판정) ───────────────────────
+function withDraftTodos(...todos) {
+  const cases = makeCases();
+  cases[0].todos.push(...todos);
+  return cases;
+}
+const draftTodo = (extra = {}) => ({ id: 42, text: '준비서면(3) 작성', details: '쟁점 정리', priority: '높음', dueDate: '2026-10-20', done: false, ...extra });
+
+test('a todo that will move to a pending brief says so in its summary; others do not', () => {
+  const { norm } = normalizeItem(item('todo', { text: '증인 신청서 작성', dueDate: '2026-10-25' }), { today: TODAY });
+  assert.equal(describeItem(norm).meta, "우선순위 보통 · 마감 2026-10-25 · 완료 시 제출대기 서면 '증인 신청서'(으)로 이동");
+  for (const text of ['증거목록 정리', '준비서면(3)', '피고 답변서 검토']) {
+    const n = normalizeItem(item('todo', { text }), { today: TODAY }).norm;
+    assert.equal(describeItem(n).meta, '우선순위 보통', text);
+  }
+});
+
+test('a todo naming a brief without a drafting verb is warned that it will not move', () => {
+  const report = validateBatch(batchOf([
+    item('todo', { text: '준비서면(3)' }, { id: 'u1' }),
+    item('todo', { text: '답변서 제출' }, { id: 'u2' }),
+    item('todo', { text: '준비서면(3) 작성' }, { id: 'u3' }),
+    item('todo', { text: '증거 사진 정리' }, { id: 'u4' }),
+  ]), makeCases(), null, { today: TODAY });
+  const msg = '서면 작성 할 일로 인식되지 않음 — 완료해도 제출대기 서면으로 옮겨지지 않음';
+  for (const id of ['u1', 'u2']) {
+    assert.equal(statusOf(report, id).status, 'warn', id);
+    assert.deepEqual(statusOf(report, id).warnings, [msg], id);
+  }
+  for (const id of ['u3', 'u4']) assert.equal(statusOf(report, id).status, 'ok', id);
+  assert.deepEqual(defaultSelectedIds(report), ['u3', 'u4']);
+});
+
+test('brief.submitted completes the one matching drafting todo and submits its brief instead of making another', () => {
+  const cases = withDraftTodos(draftTodo());
+  const b = batchOf([item('brief.submitted', { title: '준비서면 (3)', date: '2026-10-16', details: '가공 메모' }, { id: 'k1' })]);
+  const r = statusOf(validateBatch(b, cases, null, { today: TODAY }), 'k1');
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.warnings, []);
+  assert.deepEqual(r.notes, ['같은 제목의 서면 작성 할 일을 완료 처리하고 제출함']);
+
+  const [{ base, next, guard }] = planBatch(b, cases, ['k1'], { today: TODAY });
+  const baseId = `cl:${b.batchId}:k1`;
+  const mark = markOf(b, 'k1');
+  assert.deepEqual(next.todos.find((t) => t.id === 42), {
+    ...draftTodo(), done: true, completedDate: '2026-10-16', completedTimelineId: `${baseId}:done`, briefId: baseId,
+  });
+  assert.equal(next.briefs.length, cases[0].briefs.length + 1); // 서면은 하나만 새로 생김
+  assert.deepEqual(next.briefs.find((x) => x.id === baseId), {
+    id: baseId, title: '준비서면(3)', status: 'submitted', preparedDate: '2026-10-16', submittedDate: '2026-10-16',
+    details: '쟁점 정리', fromTodoId: 42, submitTimelineId: `${baseId}:tl`, claude: mark,
+  });
+  assert.deepEqual(next.timeline.filter((t) => String(t.id).startsWith(baseId)), [
+    { id: `${baseId}:done`, date: '2026-10-16', content: '할 일 완료: 준비서면(3) 작성', detail: '쟁점 정리', activityType: 'other', claude: mark },
+    { id: `${baseId}:tl`, date: '2026-10-16', content: '준비서면(3) 제출', activityType: 'document', claude: mark },
+  ]);
+  // 바뀐 것: 새 항목 셋(서면·완료 진행경과·제출 진행경과)과 그 할 일의 완료 칸뿐
+  const d = diffCase(base, next);
+  assert.deepEqual(d.set, {});
+  assert.deepEqual(Object.fromEntries(Object.entries(d.arrays).map(([f, x]) => [f, [x.upserts.map((u) => u.key), x.removed]])), {
+    todos: [['id:42'], []],
+    briefs: [[`id:${baseId}`], []],
+    timeline: [[`id:${baseId}:done`, `id:${baseId}:tl`], []],
+  });
+  assert.equal(guard.items.length, 1);
+  const g = guard.items[0];
+  assert.equal(g.itemId, 'k1');
+  assert.equal(g.fp, mark.fp);
+  assert.deepEqual(g.created.map((c) => c.key).sort(), [`id:${baseId}`, `id:${baseId}:done`, `id:${baseId}:tl`]);
+  assert.equal(g.briefPatch, undefined);
+  assert.deepEqual(g.todoPatch, {
+    key: 'id:42',
+    set: { done: true, completedDate: '2026-10-16', completedTimelineId: `${baseId}:done`, briefId: baseId },
+    prev: draftTodo(),
+  });
+  // 원본 불변, 다시 붙여넣으면 이미 반영됨
+  assert.equal(cases[0].todos.find((t) => t.id === 42).done, false);
+  const after = [next, ...cases.slice(1)];
+  assert.equal(statusOf(validateBatch(b, after, null, { today: '2026-12-01' }), 'k1').status, 'applied');
+  assert.deepEqual(planBatch(b, after, ['k1'], { today: TODAY }), []);
+});
+
+test('brief.submitted fills the brief memo from the file only when the todo has none', () => {
+  const cases = withDraftTodos(draftTodo({ details: '' }));
+  const b = batchOf([item('brief.submitted', { title: '준비서면(3)', date: '2026-10-16', details: '가공 메모' }, { id: 'k2' })]);
+  const [{ next }] = planBatch(b, cases, ['k2'], { today: TODAY });
+  assert.equal(next.briefs.find((x) => x.fromTodoId === 42).details, '가공 메모');
+});
+
+test('two matching drafting todos: warned, todos left open, a new brief is made', () => {
+  const cases = withDraftTodos(draftTodo(), draftTodo({ id: 43, text: '준비서면 (3) 초안 작성' }));
+  const b = batchOf([item('brief.submitted', { title: '준비서면(3)', date: '2026-10-16' }, { id: 'k3' })]);
+  const r = statusOf(validateBatch(b, cases, null, { today: TODAY }), 'k3');
+  assert.equal(r.status, 'warn');
+  assert.deepEqual(r.warnings, ['같은 제목의 서면 작성 할 일이 2건 — 어느 할 일인지 정할 수 없어 할 일은 그대로 두고 새 서면을 만들어 제출 처리함']);
+  assert.deepEqual(r.notes, []);
+  const [{ base, next }] = planBatch(b, cases, ['k3'], { today: TODAY });
+  assert.deepEqual(next.todos, base.todos);
+  assert.deepEqual(diffCase(base, next).arrays.briefs.upserts.map((u) => u.key), [`id:cl:${b.batchId}:k3`]);
+  assert.equal(next.briefs.find((x) => x.id === `cl:${b.batchId}:k3`).fromTodoId, undefined);
+});
+
+test('todos that must not be linked: pending brief first, done, already moved, other title, unrecognized, odd ids', () => {
+  const variants = [
+    ['pending brief with the title wins', (c) => { c[0].briefs.push({ id: 52, title: '준비서면(3)', status: 'pending' }); c[0].todos.push(draftTodo()); }],
+    ['done todo', (c) => c[0].todos.push(draftTodo({ done: true }))],
+    ['todo already moved to a brief', (c) => { c[0].todos.push(draftTodo({ briefId: 53 })); c[0].briefs.push({ id: 53, title: '준비서면(3)', status: 'submitted', submittedDate: '2026-10-01' }); }],
+    ['brief pointing back at the todo', (c) => { c[0].todos.push(draftTodo()); c[0].briefs.push({ id: 54, title: '다른 제목', status: 'submitted', fromTodoId: 42 }); }],
+    ['stale completion link', (c) => c[0].todos.push(draftTodo({ completedTimelineId: 21 }))],
+    ['other title', (c) => c[0].todos.push(draftTodo({ text: '준비서면(4) 작성' }))],
+    ['no drafting verb', (c) => c[0].todos.push(draftTodo({ text: '준비서면(3)' }))],
+    ['duplicate todo id', (c) => c[0].todos.push(draftTodo({ id: 41 }))],
+  ];
+  for (const [label, setup] of variants) {
+    const cases = makeCases();
+    setup(cases);
+    const b = batchOf([item('brief.submitted', { title: '준비서면(3)', date: '2026-10-16' }, { id: 'k4' })]);
+    const r = statusOf(validateBatch(b, cases, null, { today: TODAY }), 'k4');
+    assert.deepEqual(r.notes, [], label);
+    const [{ base, next }] = planBatch(b, cases, ['k4'], { today: TODAY });
+    assert.deepEqual(next.todos, base.todos, label);
+    assert.ok(!next.timeline.some((t) => String(t.id).endsWith(':done')), label);
+  }
+});
+
+test('within one batch a drafting todo is linked once, and a todo the batch itself adds is never linked', () => {
+  const cases = withDraftTodos(draftTodo());
+  const b = batchOf([
+    item('brief.submitted', { title: '준비서면(3)', date: '2026-10-16' }, { id: 'm1' }),
+    item('brief.submitted', { title: '준비서면(3)', date: '2026-10-17' }, { id: 'm2' }),
+    item('todo', { text: '참고서면 작성' }, { id: 'm3' }),
+    item('brief.submitted', { title: '참고서면', date: '2026-10-17' }, { id: 'm4' }),
+  ]);
+  const report = validateBatch(b, cases, null, { today: TODAY });
+  assert.deepEqual(statusOf(report, 'm1').notes, ['같은 제목의 서면 작성 할 일을 완료 처리하고 제출함']);
+  assert.deepEqual(statusOf(report, 'm2').notes, []);
+  assert.match(statusOf(report, 'm2').warnings.join(' '), /새로 만들어 제출 처리함/);
+  assert.match(statusOf(report, 'm4').warnings.join(' '), /새로 만들어 제출 처리함/);
+  const [{ next }] = planBatch(b, cases, ['m1', 'm2', 'm3', 'm4'], { today: TODAY });
+  assert.equal(next.todos.find((t) => t.id === 42).briefId, `cl:${b.batchId}:m1`);
+  assert.equal(next.todos.find((t) => t.id === `cl:${b.batchId}:m3`).done, false);
+  assert.equal(next.briefs.filter((x) => x.fromTodoId !== undefined).length, 1);
+});
+
+test('saving a todo-linked submission never overwrites a todo finished or changed elsewhere', () => {
+  const cases = withDraftTodos(draftTodo());
+  const b = batchOf([
+    item('todo', { text: '새 할 일' }, { id: 'v1' }),
+    item('brief.submitted', { title: '준비서면(3)', date: '2026-10-16' }, { id: 'v2' }),
+  ]);
+  const [{ base, next, guard }] = planBatch(b, cases, ['v1', 'v2'], { today: TODAY });
+  const diff = { ...diffCase(base, next), claude: guard };
+  const baseId = `cl:${b.batchId}:v2`;
+  const others = (m) => ({ ...m, todos: m.todos.filter((t) => t.claude?.itemId !== 'v1') });
+
+  // 그대로면 계획대로 들어간다
+  assert.deepEqual(applyCaseDiff(base, diff), next);
+
+  // 할 일 탭에서 이미 완료해 제출대기 서면으로 옮김 → 서면 제출 항목은 통째로 건너뜀(서면 하나 더 만들지 않음)
+  const moved = {
+    ...base,
+    todos: base.todos.map((t) => (t.id === 42 ? { ...t, done: true, completedDate: '2026-10-15', completedTimelineId: 900, briefId: 901 } : t)),
+    briefs: [...base.briefs, { id: 901, title: '준비서면(3)', status: 'pending', preparedDate: '2026-10-15', submittedDate: '', fromTodoId: 42 }],
+    timeline: [...base.timeline, { id: 900, date: '2026-10-15', content: '할 일 완료: 준비서면(3) 작성', activityType: 'other' }],
+  };
+  const m1 = applyCaseDiff(moved, diff);
+  assert.deepEqual(others(m1), moved);
+  assert.ok(m1.todos.some((t) => t.claude?.itemId === 'v1')); // 다른 항목은 그대로 반영
+  // 다시 붙여넣으면 옮겨진 제출대기 서면을 제출 처리한다
+  const again = planBatch(b, [m1, ...cases.slice(1)], ['v2'], { today: TODAY });
+  assert.equal(again[0].next.briefs.find((x) => x.id === 901).status, 'submitted');
+
+  // 할 일이 지워졌거나, 서면 없이 완료됐거나, 문구가 바뀌었으면 건너뜀
+  for (const server of [
+    { ...base, todos: base.todos.filter((t) => t.id !== 42) },
+    { ...base, todos: base.todos.map((t) => (t.id === 42 ? { ...t, done: true } : t)) },
+    { ...base, todos: base.todos.map((t) => (t.id === 42 ? { ...t, text: '준비서면(3) 작성 — 범위 축소' } : t)) },
+  ]) {
+    assert.deepEqual(others(applyCaseDiff(server, diff)), server);
+  }
+
+  // 다른 기기에서 메모·마감일만 고쳤으면 그 칸은 지금 판본대로 두고 완료 칸만 얹는다
+  const edited = { ...base, todos: base.todos.map((t) => (t.id === 42 ? { ...t, details: '다른 기기 메모', dueDate: '2026-10-22' } : t)) };
+  const m2 = applyCaseDiff(edited, diff);
+  assert.deepEqual(m2.todos.find((t) => t.id === 42), {
+    ...draftTodo(), details: '다른 기기 메모', dueDate: '2026-10-22', done: true, completedDate: '2026-10-16', completedTimelineId: `${baseId}:done`, briefId: baseId,
+  });
+  assert.equal(m2.briefs.find((x) => x.id === baseId).status, 'submitted');
+
+  // 같은 묶음을 다른 기기에서 먼저 반영했으면(서면이 이미 있음) 할 일을 다시 건드리지 않는다
+  const elsewhere = { ...next, todos: next.todos.map((t) => (t.id === 42 ? { ...t, done: false, completedDate: '', completedTimelineId: '', briefId: '' } : t)) };
+  assert.deepEqual(applyCaseDiff(elsewhere, diff).todos.find((t) => t.id === 42), elsewhere.todos.find((t) => t.id === 42));
+});
+
+test('seeded fuzz: brief submissions only touch their own items and the completion fields of one drafting todo', () => {
+  let s = 20261020;
+  const rnd = () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 2 ** 32);
+  const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
+  const T = ['준비서면(3)', '준비서면 (3)', '답변서', '참고서면'];
+  const TODO_TEXTS = ['준비서면(3) 작성', '준비서면 (3) 초안 작성', '답변서 작성', '답변서 검토', '참고서면', '증거목록 정리'];
+  const DONE_FIELDS = ['done', 'completedDate', 'completedTimelineId', 'briefId'];
+  const strip = (t) => Object.fromEntries(Object.entries(t).filter(([k]) => !DONE_FIELDS.includes(k)));
+  const sameTitle = (a, b) => String(a).replace(/\s+/g, '') === String(b).replace(/\s+/g, '');
+  let linkedSeen = 0;
+  for (let iter = 0; iter < 300; iter++) {
+    const cases = makeCases();
+    const nTodos = Math.floor(rnd() * 4);
+    for (let k = 0; k < nTodos; k++) cases[0].todos.push({ id: 60 + k, text: pick(TODO_TEXTS), details: pick(['', '가공 메모']), done: rnd() < 0.2, priority: '보통', dueDate: '' });
+    if (rnd() < 0.3) cases[0].briefs.push({ id: 52, title: pick(T), status: pick(['pending', 'submitted']) });
+    const items = Array.from({ length: 1 + Math.floor(rnd() * 4) }, (_, k) => {
+      const common = { id: `f${k}`, cmCaseId: C1, caseNumber: '2026가단10000', basis: '가공' };
+      if (rnd() < 0.75) return { ...common, op: 'brief.submitted', title: pick(T), date: pick(['2026-10-16', '2026-10-17']) };
+      return rnd() < 0.5 ? { ...common, op: 'todo', text: pick(TODO_TEXTS) } : { ...common, op: 'brief.pending', title: pick(T) };
+    });
+    const b = parseBatch(JSON.stringify(batchOf(items, `fy${iter}`)));
+    const snap = structuredClone({ cases, b });
+    const report = validateBatch(b, cases, null, { today: TODAY });
+    const sel = report.items.filter((r) => ['ok', 'warn'].includes(r.status)).map((r) => r.id).filter(() => rnd() < 0.9);
+    const plan = planBatch(b, cases, sel, { today: TODAY });
+    for (const p of plan) {
+      const own = (key) => p.itemIds.some((id) => key === `id:cl:${b.batchId}:${id}` || key.startsWith(`id:cl:${b.batchId}:${id}:`));
+      const diff = diffCase(p.base, p.next);
+      assert.deepEqual(diff.set, {}, `iter ${iter}`);
+      for (const [field, d] of Object.entries(diff.arrays)) {
+        assert.deepEqual(d.removed, [], `iter ${iter} ${field}`);
+        for (const u of d.upserts) {
+          if (own(u.key)) continue;
+          if (field === 'briefs') { assert.ok(u.items.every((x) => x.status === 'submitted'), `iter ${iter} ${u.key}`); continue; }
+          assert.equal(field, 'todos', `iter ${iter} ${field} ${u.key}`);
+          const before = p.base.todos.find((t) => `id:${t.id}` === u.key);
+          const [t] = u.items;
+          assert.ok(before && !before.done && t.done === true && own(`id:${t.briefId}`), `iter ${iter} ${u.key}`);
+          assert.deepEqual(strip(t), strip(before), `iter ${iter} ${u.key}: only completion fields change`);
+          assert.ok(p.next.briefs.some((x) => x.id === t.briefId && x.fromTodoId === t.id && x.status === 'submitted'), `iter ${iter}`);
+          linkedSeen++;
+        }
+      }
+      for (const t of p.next.todos) assert.ok(p.next.briefs.filter((x) => x.fromTodoId === t.id).length <= 1, `iter ${iter}`);
+      const guarded = { ...diff, claude: p.guard };
+      const once = applyCaseDiff(p.base, guarded);
+      assert.deepEqual(once, applyCaseDiff(p.base, diff), `iter ${iter}: guard changes a fresh save`);
+      assert.deepEqual(applyCaseDiff(once, guarded), once, `iter ${iter}`);
+      // 검토 창 안내와 실제 반영이 맞는다(앞의 고를 수 있는 항목을 모두 골랐고, 같은 제목 서면 항목이 앞에 없을 때 —
+      // 같은 제목을 거듭 보내는 묶음은 「같은 묶음 안에 같은 내용」 경고로 따로 막는다)
+      for (const id of p.itemIds) {
+        const r = report.items.find((x) => x.id === id);
+        const prior = report.items.slice(0, r.index).filter((x) => ['ok', 'warn'].includes(x.status));
+        const sameTitleBefore = report.items.slice(0, r.index).some((x) => x.norm?.title !== undefined && sameTitle(x.norm.title, r.norm.title));
+        if (r.op !== 'brief.submitted' || sameTitleBefore || !prior.every((x) => p.itemIds.includes(x.id))) continue;
+        const linked = p.next.todos.some((t) => t.briefId === `cl:${b.batchId}:${id}`);
+        assert.equal(linked, r.notes.includes('같은 제목의 서면 작성 할 일을 완료 처리하고 제출함'), `iter ${iter} ${id}`);
+      }
+    }
+    const after = cases.map((c) => plan.find((p) => p.base === c)?.next || c);
+    assert.deepEqual(planBatch(b, after, sel, { today: TODAY }), [], `iter ${iter}`);
+    assert.deepEqual({ cases, b }, snap, `iter ${iter}: inputs mutated`);
+  }
+  assert.ok(linkedSeen > 20, `fuzz reached the todo link only ${linkedSeen} times`);
+});

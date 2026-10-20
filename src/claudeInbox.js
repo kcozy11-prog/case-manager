@@ -12,6 +12,7 @@ import { upsertBrief, markBriefSubmitted, upsertTimelineEntry, upsertCaseMemo, b
 import { getTimelineActivity, DEFAULT_TIMELINE_ACTIVITY_TYPE } from "./timelineActivity.js";
 import { CASE_ARRAY_FIELDS, stableStringify, diffCase } from "./caseMerge.js";
 import { MEMO_CATEGORIES } from "./utils.js";
+import { isBriefDraftingTodo, isUnrecognizedBriefTodo, briefTitleFromTodoText, moveTodoToBrief } from "./todoBrief.js";
 
 export const CM_UPDATE_FORMAT = "cm-update-v1";
 export const CM_BINDING_FORMAT = "cm-binding-v1";
@@ -58,6 +59,17 @@ const uniqueIdIn = (list) => (b) => hasId(b) && asArray(list).filter((x) => x &&
 const describeValue = (v) => (typeof v === "string" ? v.slice(0, 60) : v === null ? "null" : Array.isArray(v) ? "배열" : typeof v);
 // 비교용: 공백을 모두 뺀다 ("준비서면 (2)" = "준비서면(2)")
 const compact = (s) => String(s ?? "").replace(/\s+/g, "");
+
+// 서면 제출과 이을 서면 작성 할 일: 미완료이고 id가 하나뿐이며, 서면 작성 할 일로 인식되고 그 서면 제목이 같고,
+// 아직 서면과 이어지지 않은 것. 같은 묶음이 만든 할 일은 뺀다(검토 창은 묶음 반영 전 사건으로 판정하므로).
+function linkableDraftingTodos(caseObj, title, batchId = "") {
+  const todos = asArray(caseObj?.todos);
+  const briefs = asArray(caseObj?.briefs).filter(Boolean);
+  return todos.filter((t) => uniqueIdIn(todos)(t) && !t.done && !t.completedTimelineId
+    && !(batchId && t.claude && t.claude.batchId === batchId)
+    && isBriefDraftingTodo(t.text) && compact(briefTitleFromTodoText(t.text)) === compact(title)
+    && !briefs.some((b) => (t.briefId && b.id === t.briefId) || b.fromTodoId === t.id));
+}
 
 // 항목 내용의 지문(FNV-1a 32비트). 근거·사건번호·항목 id는 넣지 않는다(같은 내용이면 같은 지문).
 export function itemFingerprint(n) {
@@ -332,8 +344,8 @@ function contentKey(n) {
   }
 }
 
-// 사건에 이미 있는 내용과 견준 경고
-function contentWarnings(n, caseObj, { today, batchPendingTitles, batchSubmittedTitles }) {
+// 사건에 이미 있는 내용과 견준 경고. 판정을 바꾸지 않는 안내는 notes 에 넣는다.
+function contentWarnings(n, caseObj, { today, batchPendingTitles, batchSubmittedTitles, batchLinkedTodoIds, notes }) {
   const warns = [];
   const briefs = asArray(caseObj.briefs).filter(Boolean);
   const timeline = asArray(caseObj.timeline).filter(Boolean);
@@ -348,8 +360,18 @@ function contentWarnings(n, caseObj, { today, batchPendingTitles, batchSubmitted
       const submitted = briefs.filter((b) => b.status === "submitted" && sameTitle(b));
       if (pending.length > 1) warns.push(`같은 제목의 제출대기 서면이 ${pending.length}건 — 먼저 등록된 것을 제출 처리함`);
       if (!pending.length) {
+        // 제출대기 서면이 없으면 같은 제목의 미완료 서면 작성 할 일이 하나뿐일 때 그 할 일을 완료하고 서면으로 옮겨 제출 처리한다(applyItem)
+        const ownPending = batchPendingTitles.has(compact(n.title));
+        const todos = ownPending ? [] : linkableDraftingTodos(caseObj, n.title).filter((t) => !batchLinkedTodoIds.has(String(t.id)));
         if (submitted.length) warns.push(`같은 제목 서면이 이미 제출 처리되어 있음(${submitted[0].submittedDate || "제출일 없음"}) — 반영하면 새 서면으로 하나 더 기록됨`);
-        else if (!batchPendingTitles.has(compact(n.title))) warns.push("같은 제목의 제출대기 서면이 없어 새로 만들어 제출 처리함");
+        if (todos.length === 1) {
+          notes.push("같은 제목의 서면 작성 할 일을 완료 처리하고 제출함");
+          batchLinkedTodoIds.add(String(todos[0].id));
+        } else if (todos.length > 1) {
+          warns.push(`같은 제목의 서면 작성 할 일이 ${todos.length}건 — 어느 할 일인지 정할 수 없어 할 일은 그대로 두고 새 서면을 만들어 제출 처리함`);
+        } else if (!submitted.length && !ownPending) {
+          warns.push("같은 제목의 제출대기 서면이 없어 새로 만들어 제출 처리함");
+        }
       }
       if (timeline.some((t) => t.date === n.date && compact(t.content) === compact(`${n.title} 제출`))) {
         warns.push("같은 날짜에 같은 제출 진행경과가 이미 있음");
@@ -373,6 +395,7 @@ function contentWarnings(n, caseObj, { today, batchPendingTitles, batchSubmitted
       if (sameTodos.some((t) => !t.done)) warns.push("같은 내용의 미완료 할 일이 이미 있음");
       else if (sameTodos.length) warns.push("같은 내용의 할 일이 이미 완료되어 있음");
       if (isPast(n.dueDate)) warns.push(`마감일이 이미 지났음(${n.dueDate})`);
+      if (isUnrecognizedBriefTodo(n.text)) warns.push("서면 작성 할 일로 인식되지 않음 — 완료해도 제출대기 서면으로 옮겨지지 않음");
       break;
     }
     case "hearing": {
@@ -419,6 +442,7 @@ export function validateBatch(batch, cases = [], ledger = null, { today = "" } =
   const seenKeys = new Set();
   const pendingTitlesByCase = new Map();
   const submittedTitlesByCase = new Map();
+  const linkedTodoIdsByCase = new Map(); // 같은 묶음 앞 서면 제출이 이미 이은 서면 작성 할 일
   const titleSet = (map, key) => {
     if (!map.has(key)) map.set(key, new Set());
     return map.get(key);
@@ -467,7 +491,8 @@ export function validateBatch(batch, cases = [], ledger = null, { today = "" } =
       const caseKey = String(caseObj.id);
       const batchPendingTitles = titleSet(pendingTitlesByCase, caseKey);
       const batchSubmittedTitles = titleSet(submittedTitlesByCase, caseKey);
-      warnings.push(...contentWarnings(norm, caseObj, { today, batchPendingTitles, batchSubmittedTitles }));
+      const batchLinkedTodoIds = titleSet(linkedTodoIdsByCase, caseKey);
+      warnings.push(...contentWarnings(norm, caseObj, { today, batchPendingTitles, batchSubmittedTitles, batchLinkedTodoIds, notes }));
       const key = `${caseKey}|${contentKey(norm)}`;
       if (seenKeys.has(key)) warnings.push("같은 묶음 안에 같은 내용의 항목이 또 있음");
       seenKeys.add(key);
@@ -532,9 +557,12 @@ export function applyItem(caseObj, n, { batchId, today = "", fp = "" } = {}) {
   const baseId = claudeItemBaseId(batchId, n.id);
   switch (n.op) {
     case "brief.submitted": {
-      // 같은 제목 제출대기 서면이 있으면 그것을 제출 처리, 없으면 새로 만들어 제출 처리 (+ 진행경과 "제목 제출")
+      // 같은 제목 제출대기 서면이 있으면 그것을 제출 처리, 없으면 같은 제목의 미완료 서면 작성 할 일이 하나뿐일 때
+      // 그 할 일을 완료하고 서면으로 옮겨(할 일 탭과 같은 moveTodoToBrief) 제출 처리, 그것도 없으면 새로 만들어 제출 처리
+      // (+ 진행경과 "제목 제출")
       const briefs = asArray(caseObj.briefs);
       const pending = briefs.find((b) => uniqueIdIn(briefs)(b) && b.status !== "submitted" && compact(b.title) === compact(n.title));
+      const todos = pending ? [] : linkableDraftingTodos(caseObj, n.title, batchId);
       let next = caseObj;
       let briefId = pending?.id;
       if (pending) {
@@ -546,6 +574,18 @@ export function applyItem(caseObj, n, { batchId, today = "", fp = "" } = {}) {
             ? { ...b, submittedDate: "", submitTimelineId: "", ...(n.details && !b.details ? { details: n.details } : {}) }
             : b)),
         };
+      } else if (todos.length === 1) {
+        // 서면은 이 항목의 고정 id로 만들고(새 항목), 할 일은 완료 칸(done·completedDate·completedTimelineId·briefId)만 바뀐다.
+        // 완료일·작성일은 제출일로 둔다(파일 값이므로 다른 날 반영해도 같은 결과).
+        const doneTimelineId = `${baseId}:done`;
+        const moved = moveTodoToBrief(caseObj, todos[0].id, n.date, undefined, { briefId: baseId, doneTimelineId });
+        briefId = baseId;
+        next = moved.caseObj;
+        if (n.details && !moved.brief?.details) {
+          next = { ...next, briefs: asArray(next.briefs).map((b) => (b && b.id === briefId ? { ...b, details: n.details } : b)) };
+        }
+        next = markNew(next, "briefs", briefId, mark);
+        next = markNew(next, "timeline", doneTimelineId, mark);
       } else {
         briefId = baseId;
         next = upsertBrief(next, { id: briefId, title: n.title, preparedDate: n.date, ...(n.details ? { details: n.details } : {}) });
@@ -605,13 +645,16 @@ export function applyItem(caseObj, n, { batchId, today = "", fp = "" } = {}) {
   }
 }
 
-// 항목 하나가 사건에 낸 변경을 나눈다: 새로 만든 항목(cl:… id)과, 서면 제출이 기존 제출대기 서면에 얹는 제출 칸.
+// 항목 하나가 사건에 낸 변경을 나눈다: 새로 만든 항목(cl:… id)과, 서면 제출이 기존 제출대기 서면에 얹는 제출 칸,
+// 서면 제출이 이은 기존 서면 작성 할 일의 완료 칸(todoPatch).
 // 그 밖의 변경(기존 항목 수정·삭제, 사건 기본 필드 변경)이 섞이면 unexpected=true.
+const TODO_DONE_FIELDS = ["done", "completedDate", "completedTimelineId", "briefId"];
 function splitItemChange(before, after, r, batchId) {
   const baseId = claudeItemBaseId(batchId, r.id);
   const d = diffCase(before, after);
   const created = [];
   let briefPatch = null;
+  let todoPatch = null;
   let unexpected = Object.keys(d.set).length > 0;
   for (const [field, fd] of Object.entries(d.arrays)) {
     if (fd.removed.length) unexpected = true;
@@ -628,15 +671,28 @@ function splitItemChange(before, after, r, batchId) {
           fillDetails: r.norm.details || "",
           prev,
         };
+      } else if (field === "todos" && r.norm.op === "brief.submitted" && !todoPatch && u.items.length === 1) {
+        // 미완료였던 할 일 하나의 완료 칸만 바뀌어야 한다(문구·메모·마감일 등은 그대로)
+        const t = u.items[0];
+        const prev = asArray(before.todos).find((x) => x && `id:${String(x.id)}` === u.key) || null;
+        const set = Object.fromEntries(TODO_DONE_FIELDS.map((k) => [k, t[k]]));
+        if (!prev || prev.done || stableStringify({ ...prev, ...set }) !== stableStringify(t)) unexpected = true;
+        else todoPatch = { key: u.key, set, prev };
       } else unexpected = true;
     }
   }
-  // 서면 제출은 반드시 「제목 제출」 진행경과를 만들고, 기존 서면을 쓴 경우 그 서면이 제출 상태가 되어야 한다
+  // 서면 제출은 반드시 「제목 제출」 진행경과를 만들고, 기존 서면을 쓴 경우 그 서면이 제출 상태가 되어야 한다.
+  // 할 일을 이은 경우에는 이 항목이 만든 서면(cl:…)과 완료 진행경과(…:done)에 그 할 일이 이어져야 한다.
   if (r.norm.op === "brief.submitted") {
     if (!created.some((c) => c.key === `id:${baseId}:tl`)) unexpected = true;
     if (briefPatch && briefPatch.set.status !== "submitted") unexpected = true;
+    if (todoPatch) {
+      if (briefPatch) unexpected = true;
+      if (todoPatch.set.done !== true || todoPatch.set.briefId !== baseId || todoPatch.set.completedTimelineId !== `${baseId}:done`) unexpected = true;
+      if (!created.some((c) => c.key === `id:${baseId}`) || !created.some((c) => c.key === `id:${baseId}:done`)) unexpected = true;
+    }
   }
-  return { created, briefPatch, unexpected };
+  return { created, briefPatch, todoPatch, unexpected };
 }
 
 // 고른 항목을 사건별 수정본으로 만든다: [{ caseId, base, next, itemIds, fingerprints, guard }]
@@ -661,11 +717,11 @@ export function planBatch(batch, cases = [], selectedItemIds = [], { today = "",
     const guardItems = [];
     for (const r of entries) {
       const after = applyItem(next, r.norm, { batchId: batch.batchId, today, fp: r.fp });
-      const { created, briefPatch, unexpected } = splitItemChange(next, after, r, batch.batchId);
+      const { created, briefPatch, todoPatch, unexpected } = splitItemChange(next, after, r, batch.batchId);
       if (unexpected || (!created.length && !briefPatch)) continue; // 정해진 밖의 변경이 생기는 항목은 넣지 않는다
       next = after;
       done.push(r);
-      guardItems.push({ itemId: r.id, fp: r.fp, created, ...(briefPatch ? { briefPatch } : {}) });
+      guardItems.push({ itemId: r.id, fp: r.fp, created, ...(briefPatch ? { briefPatch } : {}), ...(todoPatch ? { todoPatch } : {}) });
     }
     if (!done.length) continue;
     plan.push({
@@ -691,7 +747,16 @@ export function describeItem(n) {
     case "brief.submitted": return { title: `${n.title} 제출`, meta: join(`제출일 ${n.date}`), body: n.details };
     case "brief.pending": return { title: n.title, meta: join("제출대기 서면 추가", n.date && `작성일 ${n.date}`), body: n.details };
     case "deadline": return { title: n.title, meta: join(`기한 ${n.date}`), body: n.content };
-    case "todo": return { title: n.text, meta: join(`우선순위 ${n.priority}`, n.dueDate && `마감 ${n.dueDate}`), body: n.details };
+    case "todo": return {
+      title: n.text,
+      meta: join(
+        `우선순위 ${n.priority}`,
+        n.dueDate && `마감 ${n.dueDate}`,
+        // 할 일 탭은 서면 작성 할 일을 완료하면 제출대기 서면으로 옮긴다(todoBrief.js)
+        isBriefDraftingTodo(n.text) && `완료 시 제출대기 서면 '${briefTitleFromTodoText(n.text)}'(으)로 이동`,
+      ),
+      body: n.details,
+    };
     case "hearing": return { title: n.type, meta: join(`${n.date}${n.time ? ` ${n.time}` : ""}`, n.place), body: "" };
     case "progress": return { title: n.content, meta: join(n.date, getTimelineActivity(n.activityType)?.label), body: n.detail };
     case "call": return {
