@@ -13,7 +13,7 @@ import { itemKey, stableStringify } from "./caseMerge.js";
 
 export const JOURNAL_LIST_FIELDS = [
   "todayTasks", "tomorrowTasks", "pendingDocItems", "delegatedItems", "learnedItems",
-  "caseProgressItems", "callLogItems",
+  "caseProgressItems", "callLogItems", "workItems",
 ];
 export const JOURNAL_COMPLETION_FIELDS = ["todayTaskCompletions", "pendingDocCompletions", "delegatedCompletions"];
 export const JOURNAL_TEXT_FIELDS = ["arrivalTime", "leaveTime", "todayWork", "callNotes", "writtenDocs", "etc"];
@@ -24,7 +24,7 @@ export const JOURNAL_FIELD_LABELS = {
   arrivalTime: "출근 시각", leaveTime: "퇴근 시각", todayWork: "오늘 업무", callNotes: "통화·상담 메모",
   writtenDocs: "작성 서면", etc: "기타", todayTasks: "오늘 할 일", tomorrowTasks: "내일 할 일",
   pendingDocItems: "제출 예정 서면", delegatedItems: "위임 업무", learnedItems: "배운 점",
-  caseProgressItems: "사건 진행 기록", callLogItems: "통화 상담 기록", submittedDocItems: "제출한 서면",
+  caseProgressItems: "사건 진행 기록", callLogItems: "통화 상담 기록", workItems: "오늘 한 일", submittedDocItems: "제출한 서면",
   eventMemos: "일정 메모", todayTaskCompletions: "오늘 할 일 완료 기록",
   pendingDocCompletions: "제출 예정 서면 완료 기록", delegatedCompletions: "위임 업무 완료 기록",
 };

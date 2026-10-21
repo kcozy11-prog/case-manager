@@ -1,6 +1,7 @@
 // ── Google Calendar API ──────────────────────────────────────────────────────
 
 import { localDateStr } from "./utils.js";
+import { CONSULT_KEYWORDS, isConsultSummary, consultFromEvent } from "./consultations.js";
 
 const LBOX_CAL_ID = "5dd32843ebd4cd2e01b418ad5add2f9dade2e80a033bc6d74742580fdc98d022@group.calendar.google.com";
 
@@ -467,8 +468,12 @@ function buildLinkedEventIndex(cases = []) {
   return index;
 }
 
-export function syncEventsWithCases(events, cases, { ignoredEventIds, today } = {}) {
+// consultEventIds: 이미 「상담 일정」으로 둔 일정 id. 사건번호가 없고 제목에 상담 낱말(consultations.CONSULT_KEYWORDS)이 있는
+// 일정과 함께 수동 확인 목록에 올리지 않고 consultEvents 로 돌려준다(사건에 연결된 일정은 사건 쪽이 먼저).
+export function syncEventsWithCases(events, cases, { ignoredEventIds, today, consultEventIds, consultKeywords = CONSULT_KEYWORDS } = {}) {
   const updates = new Map();
+  const consultEvents = [];
+  const consultIds = consultEventIds instanceof Set ? consultEventIds : new Set(consultEventIds || []);
   let newHearingCount = 0;
   let newCaseCount = 0;
   const skippedEvents = [];
@@ -518,6 +523,10 @@ export function syncEventsWithCases(events, cases, { ignoredEventIds, today } = 
         ignoredCount++;
         continue;
       }
+      if (ev.id && (consultIds.has(ev.id) || (!caseNum && isConsultSummary(summary, consultKeywords)))) {
+        consultEvents.push(consultFromEvent(ev));
+        continue;
+      }
       unmatchedEvents.push(buildManualCalendarEvent(ev, lbox, reason));
       skippedEvents.push(summary);
       continue;
@@ -541,9 +550,9 @@ export function syncEventsWithCases(events, cases, { ignoredEventIds, today } = 
   if (skippedEvents.length > 0) {
     console.warn(`[캘린더 동기화] 수동 확인/매칭 실패 ${skippedEvents.length}건:`, skippedEvents);
   }
-  console.log(`[캘린더 동기화] 완료: 신규 기일 ${newHearingCount}건 추가, 수동 확인 ${unmatchedEvents.length}건, 무시 ${ignoredCount}건`);
+  console.log(`[캘린더 동기화] 완료: 신규 기일 ${newHearingCount}건 추가, 수동 확인 ${unmatchedEvents.length}건, 상담 ${consultEvents.length}건, 무시 ${ignoredCount}건`);
 
-  return { updates, newTodoCount: 0, newHearingCount, newCaseCount, skippedCount: skippedEvents.length, unmatchedEvents, ignoredCount };
+  return { updates, newTodoCount: 0, newHearingCount, newCaseCount, skippedCount: skippedEvents.length, unmatchedEvents, ignoredCount, consultEvents };
 }
 
 // ── Google Tasks API ──────────────────────────────────────────────────────────

@@ -5,19 +5,24 @@ import {
 import { mergeJournalEntries } from "../../journalMerge";
 import { saveJournalDraft, loadJournalDraft, clearJournalDraft, draftDiffersFromForm } from "../../journalDraft";
 import {
-  parseJsonArray, carryForwardTomorrowTasks, carryForwardPendingDocs,
+  parseJsonArray, carryForwardTasks,
   buildLearnedTopicGroups, searchLearnedItems, buildLearnedArchiveStats,
   buildLearnedTopicOptions,
-  diffResolvedItems, createTaskCompletion, createPendingDocCompletion, mergeCompletions, pruneCompletionsForActive,
+  diffResolvedItems, createTaskCompletion, mergeCompletions, pruneCompletionsForActive,
   carryForwardDelegatedTasks, createDelegatedCompletion, rescheduleDelegatedTask,
   dropResurrectedPendingDocs, dropResurrectedTodayTasks, dropResurrectedDelegatedTasks,
-  findStaleCarriedPendingDocs, findStaleCarriedTodayTasks, latestEntryDateBefore,
+  findStaleCarriedTodayTasks, latestEntryDateBefore,
 } from "../../journalLogic";
 import ChecklistEditor from "./ChecklistEditor";
-import CaseNoteEditor from "./CaseNoteEditor";
+import WorkLogEditor from "./WorkLogEditor";
+import LegacyFields, { legacyFieldCount } from "./LegacyFields";
 import JournalMigratePanel from "./JournalMigratePanel";
-import { DEFAULT_TIMELINE_ACTIVITY_TYPE } from "../../timelineActivity";
-import { upsertTimelineEntry, upsertCaseMemo, upsertBrief, buildCallTimelineContent } from "../../caseLink";
+import DelegatedPanel from "./DelegatedPanel";
+import ConsultPanel from "./ConsultPanel";
+import { consultsForDate } from "../../consultations";
+import { frequentAssignees, addDaysToKey } from "../../journalView";
+import { workTimelineEntry, workClientRequestMemo, countUnrecordedWork } from "../../journalWork";
+import { upsertTimelineEntry, upsertCaseMemo } from "../../caseLink";
 
 const DEFAULT_TOPICS = ["법리·판례", "실무 팁", "절차적 교훈", "문서작성", "증거/입증", "상담/수임", "커뮤니케이션", "기타"];
 
@@ -52,6 +57,8 @@ function entryToForm(entry, dateKey) {
     // 사건 연동 기록
     caseProgressItems: parseJsonArray(e.caseProgressItems),
     callLogItems: parseJsonArray(e.callLogItems),
+    // 오늘 한 일(오늘 업무·진행 기록·통화 메모·기타를 합친 목록)
+    workItems: parseJsonArray(e.workItems),
     // 통과 보존 필드
     submittedDocItems: e.submittedDocItems || "",
     pendingDocCompletions: e.pendingDocCompletions || "",
@@ -81,6 +88,7 @@ function formToEntry(form) {
     learned: (form.learnedItems || []).map((i) => `[${i.topic}] ${i.title} — ${i.content}`).join("\n"),
     caseProgressItems: JSON.stringify(form.caseProgressItems || []),
     callLogItems: JSON.stringify(form.callLogItems || []),
+    workItems: JSON.stringify(form.workItems || []),
     submittedDocItems: form.submittedDocItems || "",
     pendingDocCompletions: form.pendingDocCompletions || "",
     eventMemos: form.eventMemos || "",
@@ -90,6 +98,8 @@ function formToEntry(form) {
 function entryPreview(entry) {
   const parts = [];
   if (entry.todayWork) parts.push(entry.todayWork.replace(/\n/g, " "));
+  const work = parseJsonArray(entry.workItems);
+  if (work.length) parts.push(`한 일 ${work.length}`);
   const calls = parseJsonArray(entry.callLogItems);
   if (calls.length) parts.push(`통화 ${calls.length}`);
   const tasks = parseJsonArray(entry.todayTasks);
@@ -104,26 +114,24 @@ function entryPreview(entry) {
   return parts.join(" · ").slice(0, 60) || "(빈 일지)";
 }
 
-const SectionLabel = ({ children, hint }) => (
-  <div className="flex items-baseline gap-2 mb-1.5 mt-4">
-    <h3 className="text-sm font-semibold text-slate-700">{children}</h3>
-    {hint && <span className="text-xs text-slate-400">{hint}</span>}
-  </div>
-);
-
-function daysBetweenDateKeys(startDate, endDate) {
-  if (!startDate || !endDate) return null;
-  const start = Date.parse(`${startDate}T00:00:00+09:00`);
-  const end = Date.parse(`${endDate}T00:00:00+09:00`);
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  return Math.max(0, Math.floor((end - start) / (24 * 60 * 60 * 1000)));
-}
-
-function delegatedBadge(item, currentDate) {
-  if (item?.dueDate && item.dueDate < currentDate) return { text: "기한초과", tone: "red" };
-  const days = daysBetweenDateKeys(item?.sourceDate, currentDate);
-  if (days && days > 0) return { text: `D+${days}`, tone: days >= 3 ? "amber" : "slate" };
-  return { text: "오늘 위임", tone: "slate" };
+// 접을 수 있는 칸: 비어 있으면 접어 두고 건수 배지만 보인다(누르면 펼침).
+// 날짜를 바꾸면 펼침 상태가 처음으로 돌아가도록 부르는 쪽에서 key 에 날짜를 넣는다.
+function Section({ title, hint, count = 0, badge = null, defaultOpen = null, children }) {
+  const [manual, setManual] = useState(null);
+  const open = manual ?? (defaultOpen ?? count > 0);
+  const label = badge ?? (count > 0 ? `${count}` : "");
+  return (
+    <div className="mt-3">
+      <button type="button" onClick={() => setManual(!open)}
+        className="w-full flex items-center gap-2 py-1 text-left group">
+        <span className="text-[10px] text-slate-400 w-3">{open ? "▾" : "▸"}</span>
+        <h3 className="text-sm font-semibold text-slate-700 group-hover:text-slate-900">{title}</h3>
+        {label && <span className="text-[11px] text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-1.5 leading-4">{label}</span>}
+        {open && hint && <span className="text-xs text-slate-400 truncate">{hint}</span>}
+      </button>
+      {open && <div className="mt-1 pl-5">{children}</div>}
+    </div>
+  );
 }
 
 function fmtStamp(iso) {
@@ -177,7 +185,10 @@ function JournalConflictDialog({ conflicts, onResolve, onCancel }) {
   );
 }
 
-export default function JournalApp({ user, cases = [], onPushTask = null, onUpdateCase = null, onDirtyChange = null }) {
+export default function JournalApp({
+  user, cases = [], onPushTask = null, onUpdateCase = null, onDirtyChange = null,
+  consultations = {}, onSaveConsultMemo = null, onCreateCaseFromConsult = null,
+}) {
   const [entries, setEntries] = useState({});
   const [view, setView] = useState("write"); // write | list | search | learned | migrate
   const [currentDate, setCurrentDate] = useState(todayKey());
@@ -310,11 +321,11 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     // (저장된(빈) 일지에는 이월하지 않아, 사용자가 지운 항목이 되살아나지 않음)
     // 위임 업무는 완료/취소 전까지 회수 추적이 필요하므로 저장된 날짜에도 과거 미완료 항목을 병합한다.
     f.delegatedItems = carryForwardDelegatedTasks(entries, currentDate);
+    // 할 일은 직전 일지의 미완료 할 일과 예전 '내일 할 일'을 받는다. 제출 예정 서면 칸은 없앴으므로 이월하지 않는다
+    // (예전 일지의 서면 목록은 「예전 칸」에 그대로 보인다).
     if (!base) {
-      const carriedTasks = carryForwardTomorrowTasks(entries, currentDate);
-      const carriedDocs = carryForwardPendingDocs(entries, currentDate);
+      const carriedTasks = carryForwardTasks(entries, currentDate);
       if (carriedTasks.length) f.todayTasks = carriedTasks;
-      if (carriedDocs.length) f.pendingDocItems = carriedDocs;
     }
     // 이미 처리한(앞선 날짜에 완료 기록이 있는) 항목이 되살아나 저장돼 있으면 목록에서 거둔다
     const docs = dropResurrectedPendingDocs(entries, currentDate, f.pendingDocItems);
@@ -325,10 +336,9 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     f.delegatedItems = delegated.items;
     const cleanedCount = docs.dropped.length + tasks.dropped.length + delegated.dropped.length;
     setCleanedNotice(cleanedCount ? { date: currentDate, count: cleanedCount } : null);
-    const staleDocs = base ? findStaleCarriedPendingDocs(entries, currentDate, f.pendingDocItems) : [];
     const staleTasks = base ? findStaleCarriedTodayTasks(entries, currentDate, f.todayTasks) : [];
-    setStaleSuggestion(staleDocs.length || staleTasks.length
-      ? { date: currentDate, prevDate: latestEntryDateBefore(entries, currentDate), docs: staleDocs, tasks: staleTasks }
+    setStaleSuggestion(staleTasks.length
+      ? { date: currentDate, prevDate: latestEntryDateBefore(entries, currentDate), docs: [], tasks: staleTasks }
       : null);
     setForm(f);
     loadedDateRef.current = currentDate;
@@ -373,18 +383,6 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     setDirty(true);
   }, []);
 
-  // 제출 예정 서면 변경: 동일하게 체크·삭제 항목을 완료 기록(pendingDocCompletions)에 남긴다.
-  const handlePendingDocsChange = useCallback((v) => {
-    const now = new Date().toISOString();
-    setForm((prev) => {
-      const records = diffResolvedItems(prev.pendingDocItems, v)
-        .map((it) => createPendingDocCompletion(it, now, it.sourceDate || currentDate));
-      const merged = mergeCompletions(prev.pendingDocCompletions, records);
-      return { ...prev, pendingDocItems: v, pendingDocCompletions: pruneCompletionsForActive(merged, v) };
-    });
-    setDirty(true);
-  }, [currentDate]);
-
   // 위임 업무 변경: 체크·삭제된 항목을 완료 기록(delegatedCompletions)에 남겨
   // 다음 날 미확인 위임 업무로 되살아나지 않게 한다.
   const handleDelegatedChange = useCallback((v) => {
@@ -418,23 +416,10 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     const sug = staleSuggestion;
     if (!sug) return;
     const cur = formRef.current;
-    const docIds = new Set(sug.docs.map((i) => i.id));
     const taskIds = new Set(sug.tasks.map((i) => i.id));
-    if (docIds.size) handlePendingDocsChange((cur.pendingDocItems || []).filter((i) => !docIds.has(i.id)));
     if (taskIds.size) handleTodayTasksChange((cur.todayTasks || []).filter((i) => !taskIds.has(i.id)));
     setStaleSuggestion(null);
-  }, [staleSuggestion, handlePendingDocsChange, handleTodayTasksChange]);
-
-  const markDelegatedDone = useCallback((id) => {
-    const cur = formRef.current;
-    handleDelegatedChange((cur.delegatedItems || []).map((item) =>
-      item.id === id ? { ...item, done: true } : item));
-  }, [handleDelegatedChange]);
-
-  const cancelDelegated = useCallback((id) => {
-    const cur = formRef.current;
-    handleDelegatedChange((cur.delegatedItems || []).filter((item) => item.id !== id));
-  }, [handleDelegatedChange]);
+  }, [staleSuggestion, handleTodayTasksChange]);
 
   // 이 기기에서 저장할 때 쓸 판본 표시(_savedAt)를 만들어 기억해 둔다
   const nextOwnStamp = useCallback(() => {
@@ -559,57 +544,20 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
       .catch((e) => console.warn("[journal] 사건 기록 후 저장 실패", e));
   }, [onUpdateCase, persist, reportSave]);
 
-  // ① 사건 진행 기록 → 진행경과(timeline)
-  const handleRecordProgress = useCallback(async (item, fieldName) => {
+  // 오늘 한 일 → 사건 진행경과(+ 의뢰인요청 체크 시 의뢰인요청 메모). 다시 누르면 같은 기록을 고친다.
+  const handleRecordWork = useCallback(async (item) => {
     const c = casesRef.current.find((x) => x.id === item.caseId);
     if (!c) throw new Error("선택한 사건을 찾을 수 없습니다.");
     const timelineId = item.timelineId || Date.now();
-    const updated = upsertTimelineEntry(c, {
-      id: timelineId,
-      date: item.date || currentDate,
-      content: item.content,
-      detail: item.detail || "",
-      activityType: item.activityType || DEFAULT_TIMELINE_ACTIVITY_TYPE,
-    });
-    await applyCaseRecord(fieldName, item.id, { timelineId, recordedAt: new Date().toISOString() }, updated, c);
-  }, [applyCaseRecord, currentDate]);
-
-  // ② 통화 상담 기록 → 진행경과(+ 체크 시 의뢰인요청 메모)
-  const handleRecordCall = useCallback(async (item, fieldName) => {
-    const c = casesRef.current.find((x) => x.id === item.caseId);
-    if (!c) throw new Error("선택한 사건을 찾을 수 없습니다.");
-    const timelineId = item.timelineId || Date.now();
-    const content = buildCallTimelineContent({ title: item.title, detail: item.detail });
-    let updated = upsertTimelineEntry(c, {
-      id: timelineId,
-      date: item.date || currentDate,
-      content,
-      activityType: "call",
-    });
+    let updated = upsertTimelineEntry(c, { id: timelineId, ...workTimelineEntry(item, currentDate) });
     const patch = { timelineId, recordedAt: new Date().toISOString() };
-    if (item.asClientRequest) {
+    const memo = workClientRequestMemo(item, currentDate);
+    if (memo) {
       const memoId = item.memoId || Date.now() + 1;
-      updated = upsertCaseMemo(updated, {
-        id: memoId, category: "의뢰인요청",
-        title: item.title || "통화/상담", content: item.detail || "", date: item.date || currentDate,
-      });
+      updated = upsertCaseMemo(updated, { id: memoId, ...memo });
       patch.memoId = memoId;
     }
-    await applyCaseRecord(fieldName, item.id, patch, updated, c);
-  }, [applyCaseRecord, currentDate]);
-
-  // ⑤ 제출 예정 서면 → 사건 제출대기서면(briefs)
-  const handleSendDoc = useCallback(async (item, fieldName) => {
-    const c = casesRef.current.find((x) => x.id === item.cmCaseId);
-    if (!c) throw new Error("선택한 사건을 찾을 수 없습니다.");
-    const briefId = item.cmBriefId || Date.now();
-    const updated = upsertBrief(c, {
-      id: briefId,
-      title: item.text,
-      preparedDate: item.dueDate || item.sourceDate || currentDate,
-      details: item.details || "",
-    });
-    await applyCaseRecord(fieldName, item.id, { cmBriefId: briefId, cmBriefSyncedAt: new Date().toISOString() }, updated, c);
+    await applyCaseRecord("workItems", item.id, patch, updated, c);
   }, [applyCaseRecord, currentDate]);
 
   const removeEntry = useCallback(async (k) => {
@@ -640,7 +588,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     return recentDates
       .map((k) => ({ k, e: entries[k] }))
       .filter(({ e }) => {
-        const hay = [e.todayWork, e.callNotes, e.writtenDocs, e.etc, e.learned,
+        const hay = [e.todayWork, e.callNotes, e.writtenDocs, e.etc, e.learned, e.workItems, e.caseProgressItems, e.callLogItems,
           e.todayTasks, e.tomorrowTasks, e.pendingDocs, e.pendingDocItems, e.delegated, e.delegatedItems]
           .filter(Boolean).join(" ").toLowerCase();
         return hay.includes(q);
@@ -651,20 +599,31 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     (form.delegatedItems || []).filter((item) => item && item.text && !item.done)
   ), [form.delegatedItems]);
 
+  const assigneeOptions = useMemo(() => frequentAssignees(entries), [entries]);
+
+  // 「오늘 일정·상담」: 그 날짜의 사건 기일(보기만) + 수임 전 상담 일정
+  const dayConsults = useMemo(() => consultsForDate(consultations, currentDate), [consultations, currentDate]);
+  const dayHearings = useMemo(() => {
+    const out = [];
+    (cases || []).forEach((c) => (c?.hearings || []).forEach((h, i) => {
+      if (h && h.date === currentDate) out.push({ key: `${c.id}-${h.id ?? i}`, caseTitle: c.title || "", time: h.time || "", type: h.type || "기일", result: h.result || "" });
+    }));
+    return out.sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
+  }, [cases, currentDate]);
+
   const dailyCheckItems = useMemo(() => {
     const items = [];
-    const pendingTodayTasks = (form.todayTasks || []).filter((item) => item && item.text && !item.done).length;
-    const pendingDocs = (form.pendingDocItems || []).filter((item) => item && item.text && !item.done).length;
-    const unrecordedProgress = (form.caseProgressItems || []).filter((item) => item && item.content && !item.recordedAt).length;
-    const unrecordedCalls = (form.callLogItems || []).filter((item) => item && (item.title || item.detail) && !item.recordedAt).length;
+    const dueTasks = (form.todayTasks || [])
+      .filter((item) => item && item.text && !item.done && (!item.dueDate || item.dueDate <= currentDate)).length;
+    const unrecordedWork = countUnrecordedWork(form.workItems);
     if (pendingDelegatedItems.length) items.push(`미확인 위임 업무 ${pendingDelegatedItems.length}건`);
-    if (pendingDocs) items.push(`제출 예정 서면 ${pendingDocs}건`);
-    if (pendingTodayTasks) items.push(`오늘 할 일 미완료 ${pendingTodayTasks}건`);
-    if (unrecordedProgress) items.push(`사건에 미반영된 진행 기록 ${unrecordedProgress}건`);
-    if (unrecordedCalls) items.push(`사건에 미반영된 통화·상담 기록 ${unrecordedCalls}건`);
-    if (!(form.tomorrowTasks || []).some((item) => item && item.text && !item.done)) items.push("내일 할 일이 비어 있음");
+    if (dueTasks) items.push(`오늘까지 할 일(날짜 없는 것 포함) 미완료 ${dueTasks}건`);
+    if (unrecordedWork) items.push(`사건을 골랐지만 사건에 기록하지 않은 오늘 한 일 ${unrecordedWork}건`);
     return items;
-  }, [form, pendingDelegatedItems]);
+  }, [form, pendingDelegatedItems, currentDate]);
+
+  const openTaskCount = (form.todayTasks || []).filter((i) => i && i.text && !i.done).length;
+  const legacyCount = useMemo(() => legacyFieldCount(form), [form]);
 
   const runDailyCloseCheck = useCallback(() => {
     if (!dailyCheckItems.length) {
@@ -693,7 +652,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
           {navBtn("list", "📋", "일지 목록")}
           {navBtn("search", "🔍", "전체 검색")}
           {navBtn("learned", "💡", "배운 점 모아보기")}
-          {navBtn("migrate", "📦", "데이터 가져오기")}
+          {/* 「데이터 가져오기」(옛 일지 앱 이전)는 끝난 일이라 메뉴에서 숨긴다 */}
         </div>
         <div className="px-3 pt-2 pb-1 text-[11px] font-medium text-slate-400 uppercase tracking-wider">최근 일지</div>
         <div className="flex-1 overflow-y-auto px-2 pb-3">
@@ -744,7 +703,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
                 <div className="text-amber-800 mb-1.5">이미 처리한 항목이 예전 이월 방식 때문에 되살아난 것일 수 있습니다. 확인 후 빼면 완료한 것으로 기록되어 다시 나오지 않습니다.</div>
                 <ul className="list-disc pl-5 space-y-0.5 mb-2">
                   {staleSuggestion.docs.map((i) => <li key={`d-${i.id}`}>제출 예정 서면: {i.text}{i.dueDate ? ` (~${i.dueDate})` : ""} <span className="text-amber-600">· {i.sourceDate} 기록</span></li>)}
-                  {staleSuggestion.tasks.map((i) => <li key={`t-${i.id}`}>오늘 할 일: {i.text} <span className="text-amber-600">· {i.sourceDate} 기록</span></li>)}
+                  {staleSuggestion.tasks.map((i) => <li key={`t-${i.id}`}>할 일: {i.text} <span className="text-amber-600">· {i.sourceDate} 기록</span></li>)}
                 </ul>
                 <div className="flex gap-2 flex-wrap">
                   <button onClick={removeStaleItems} className="px-2 py-1 rounded border border-amber-300 bg-white hover:bg-amber-100">이 {staleSuggestion.docs.length + staleSuggestion.tasks.length}건 목록에서 빼기(처리한 것으로 기록)</button>
@@ -793,124 +752,46 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
               </div>
             </div>
 
-            {/* 출퇴근 시간 */}
-            <div className="flex gap-3 mb-2">
-              <label className="text-xs text-slate-500 flex items-center gap-2">
-                출근
-                <input type="time" value={form.arrivalTime}
-                  onChange={(e) => update({ arrivalTime: e.target.value })}
-                  className="input text-xs w-28" />
-              </label>
-              <label className="text-xs text-slate-500 flex items-center gap-2">
-                퇴근
-                <input type="time" value={form.leaveTime}
-                  onChange={(e) => update({ leaveTime: e.target.value })}
-                  className="input text-xs w-28" />
-              </label>
-            </div>
+            {/* 출퇴근 시간은 쓰지 않아 숨긴다(저장된 값은 그대로 둔다) */}
 
-            {pendingDelegatedItems.length > 0 && (
-              <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50/80 p-3 shadow-sm">
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <div>
-                    <div className="text-sm font-semibold text-amber-900">미확인 위임 업무</div>
-                    <div className="text-xs text-amber-700 mt-0.5">완료·취소 처리 전까지 과거 일지에서 자동으로 따라옵니다.</div>
-                  </div>
-                  <span className="text-xs font-semibold text-amber-800 bg-white/70 border border-amber-200 rounded-full px-2 py-0.5">
-                    {pendingDelegatedItems.length}건
-                  </span>
-                </div>
-                <ul className="space-y-1.5">
-                  {pendingDelegatedItems.map((item) => {
-                    const badge = delegatedBadge(item, currentDate);
-                    const badgeClass = badge.tone === "red"
-                      ? "bg-red-100 text-red-700 border-red-200"
-                      : badge.tone === "amber"
-                        ? "bg-amber-100 text-amber-700 border-amber-200"
-                        : "bg-slate-100 text-slate-600 border-slate-200";
-                    return (
-                      <li key={item.id} className="bg-white rounded-lg border border-amber-100 px-2.5 py-2">
-                        <div className="flex items-start gap-2">
-                          <span className={`text-[11px] rounded-full border px-1.5 py-0.5 flex-shrink-0 ${badgeClass}`}>{badge.text}</span>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-sm text-slate-800 leading-snug">
-                              {item.assignee && <span className="font-semibold text-indigo-600 mr-1">@{item.assignee}</span>}
-                              {item.text}
-                            </div>
-                            <div className="text-[11px] text-slate-400 mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5">
-                              {item.sourceDate && <span>위임일 {item.sourceDate}</span>}
-                              {item.dueDate && <span>확인일 {item.dueDate}</span>}
-                              {item.cmCaseTitle && <span>사건 {item.cmCaseTitle}</span>}
-                            </div>
-                            {item.details && <div className="text-xs text-slate-500 mt-1 whitespace-pre-wrap">{item.details}</div>}
-                          </div>
-                          <div className="flex items-center gap-1 flex-shrink-0">
-                            <button onClick={() => markDelegatedDone(item.id)} className="text-[11px] px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100">완료</button>
-                            <button onClick={() => cancelDelegated(item.id)} className="text-[11px] px-2 py-1 rounded bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100">취소</button>
-                          </div>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
+            <DelegatedPanel items={form.delegatedItems} cases={cases} currentDate={currentDate}
+              assignees={assigneeOptions}
+              onChange={handleDelegatedChange} onReschedule={handleDelegatedReschedule}
+              onPushItem={onPushTask ? handlePushItem : null} field="delegatedItems" />
+
+            <Section key={`schedule-${currentDate}`} title="오늘 일정·상담" count={dayHearings.length + dayConsults.length}
+              hint="기일은 보기만 · 상담 메모는 「메모 저장」으로 바로 저장">
+              <ConsultPanel hearings={dayHearings} consults={dayConsults}
+                onSaveMemo={onSaveConsultMemo} onCreateCase={onCreateCaseFromConsult} />
+            </Section>
+
+            <Section key={`tasks-${currentDate}`} title="할 일" count={openTaskCount} defaultOpen
+              hint="날짜를 달면 그날까지 매일 따라옴 · 체크하면 끝">
+              <ChecklistEditor items={form.todayTasks} cases={cases} showCase showDetails
+                field="todayTasks" onPushItem={onPushTask ? handlePushItem : null}
+                today={currentDate}
+                quickDates={[{ label: "오늘", value: currentDate }, { label: "내일", value: addDaysToKey(currentDate, 1) }]}
+                onChange={handleTodayTasksChange} placeholder="할 일 입력 후 Enter (사건 없이도 됨)" emptyHint="남은 할 일이 없습니다." />
+            </Section>
+
+            <Section key={`work-${currentDate}`} title="오늘 한 일" count={(form.workItems || []).length} defaultOpen
+              hint="사건을 고른 것만 '사건에 기록' → 진행경과">
+              <WorkLogEditor items={form.workItems} cases={cases} defaultDate={currentDate}
+                onRecord={onUpdateCase ? handleRecordWork : null}
+                onChange={(v) => update({ workItems: v })} />
+            </Section>
+
+            <Section key={`learned-${currentDate}`} title="배운 점" count={(form.learnedItems || []).length} defaultOpen={false}
+              hint="주제별로 모아 복기">
+              <LearnedEditor items={form.learnedItems} topics={topicOptions}
+                onChange={(v) => update({ learnedItems: v })} />
+            </Section>
+
+            {legacyCount > 0 && (
+              <Section key={`legacy-${currentDate}`} title="예전 칸" count={legacyCount} defaultOpen={false} hint="읽기 전용">
+                <LegacyFields form={form} />
+              </Section>
             )}
-
-            <SectionLabel hint="사건별 진행·서면·회의·행정">오늘 업무</SectionLabel>
-            <textarea value={form.todayWork} onChange={(e) => update({ todayWork: e.target.value })}
-              className="input w-full min-h-[120px] text-sm leading-relaxed"
-              placeholder={"[사건별 진행]\n- 2024가합1234 / 준비서면 초안\n[회의·상담]\n- 14:00 의뢰인 미팅"} />
-
-            <SectionLabel hint="관련 사건 선택 후 '사건에 기록' → 진행경과에 추가">사건 진행 기록</SectionLabel>
-            <CaseNoteEditor variant="progress" items={form.caseProgressItems} cases={cases}
-              field="caseProgressItems" defaultDate={currentDate}
-              onRecord={onUpdateCase ? handleRecordProgress : null}
-              onChange={(v) => update({ caseProgressItems: v })}
-              placeholder="오늘 처리한 사건 진행 내용" />
-
-            <SectionLabel hint="📝 상세 · 📅 캘린더 등록 · 체크 시 이월 안 됨">오늘 할 일</SectionLabel>
-            <ChecklistEditor items={form.todayTasks} cases={cases} showCase showDetails
-              field="todayTasks" onPushItem={onPushTask ? handlePushItem : null}
-              onChange={handleTodayTasksChange} placeholder="오늘 처리할 업무 입력 후 Enter" />
-
-            <SectionLabel hint="미완료 시 다음 날 '오늘 할 일'로 자동 이월">내일 할 일</SectionLabel>
-            <ChecklistEditor items={form.tomorrowTasks} cases={cases} showCase showDetails
-              field="tomorrowTasks" onPushItem={onPushTask ? handlePushItem : null}
-              onChange={(v) => update({ tomorrowTasks: v })} placeholder="내일 할 업무 입력 후 Enter" />
-
-            <SectionLabel hint="상세메모 입력 · 매일 이월 · 사건 선택 · 📄 사건 제출대기서면으로 보내기 · 📅 캘린더">제출 예정 서면</SectionLabel>
-            <ChecklistEditor items={form.pendingDocItems} cases={cases} showCase showDetails
-              showAddDetails addDetailsPlaceholder="상세 내용 메모 (쟁점, 보완할 자료, 제출 전 확인사항 등)"
-              field="pendingDocItems" onPushItem={onPushTask ? handlePushItem : null}
-              onSendToCase={onUpdateCase ? handleSendDoc : null}
-              onChange={handlePendingDocsChange} placeholder="제출 예정 서면 입력 후 Enter" />
-
-            <SectionLabel hint="담당자별 · 미완료 자동 추적 · 확인기한 변경 이력 · 관련 사건·상세·캘린더 등록">위임 업무</SectionLabel>
-            <ChecklistEditor items={form.delegatedItems} cases={cases} showCase showAssignee showDate showDetails
-              allowDueDateEdit onRescheduleItem={handleDelegatedReschedule}
-              field="delegatedItems" onPushItem={onPushTask ? handlePushItem : null}
-              onChange={handleDelegatedChange} placeholder="위임 업무 입력 후 Enter" emptyHint="미확인 위임 업무가 없습니다." />
-
-            <SectionLabel hint="여러 건 추가 · 사건 선택+상세 · '사건에 기록' → 진행경과(+의뢰인요청 메모)">통화·상담 메모</SectionLabel>
-            <CaseNoteEditor variant="call" items={form.callLogItems} cases={cases}
-              field="callLogItems" defaultDate={currentDate}
-              onRecord={onUpdateCase ? handleRecordCall : null}
-              onChange={(v) => update({ callLogItems: v })} />
-
-            {form.callNotes && (
-              <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2">
-                <div className="text-[11px] text-slate-400 mb-1">기존 자유 입력 통화·상담 메모</div>
-                <textarea value={form.callNotes} onChange={(e) => update({ callNotes: e.target.value })}
-                  className="input w-full min-h-[70px] text-sm" placeholder={"[상대방] [시각] [내용] [후속조치]"} />
-              </div>
-            )}
-
-            <LearnedEditor items={form.learnedItems} topics={topicOptions}
-              onChange={(v) => update({ learnedItems: v })} />
-
-            <SectionLabel>기타</SectionLabel>
-            <textarea value={form.etc} onChange={(e) => update({ etc: e.target.value })}
-              className="input w-full min-h-[60px] text-sm" placeholder="기타 메모" />
 
             <div className="flex justify-between items-center mt-6">
               <button onClick={() => removeEntry(currentDate)}
@@ -1037,7 +918,6 @@ function LearnedEditor({ items = [], topics = [], onChange }) {
 
   return (
     <>
-      <SectionLabel hint="주제별로 모아 복기">오늘 배운 점</SectionLabel>
       {items.length > 0 && (
         <div className="space-y-1.5 mb-2">
           {items.map((it) => (

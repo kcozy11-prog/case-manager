@@ -10,31 +10,63 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { markTodoDone, upsertBrief } from "./caseLink.js";
 
-// 서면류: '서면' 또는 서/장으로 끝나는 문서명(답변서, 의견서, 소장, 항소장, 위임장 …)
-const DOC_KEYWORD_RE = /서면|[가-힣]{1,8}[서장](?![가-힣])/;
+// 서면 이름: 확인된 낱말만 인정한다(2026. 10. 21. 변경).
+// 예전에는 「서」·「장」으로 끝나는 말을 모두 서면 이름으로 보아 "원본 저장", "법원에서" 같은 말도 걸렸다.
+//  - 「서면」이 들어간 말(준비서면, 참고서면, 반박서면 …), 「내용증명」
+//  - 아래 이름으로 끝나는 한글 낱말: "증인 신청서", "항소이유서", "사실확인서", "고소장"
+//  - 「소장」은 낱말 전체가 소장일 때만(고소장·반소장·항소장은 목록에 있음. "연구소장" 등은 제외)
+//  예전처럼 이름 뒤에 조사가 붙은 말("답변서를")은 서면 이름으로 보지 않는다.
+export const BRIEF_DOC_SUFFIXES = [
+  // ○○서
+  "의견서", "신청서", "답변서", "진술서", "탄원서", "보정서", "이유서", "소명서", "확인서", "각서", "합의서",
+  "계약서", "설명서", "요지서", "반박서", "신고서", "통지서", "통고서", "최고서", "촉구서", "요청서", "회신서",
+  "명세서", "내역서", "보고서", "청구서", "정정서", "해명서", "경위서", "사유서", "서약서", "확약서", "동의서",
+  "승낙서", "제안서", "의향서", "공탁서",
+  // ○○장
+  "고소장", "고발장", "반소장", "항소장", "상고장", "항고장", "위임장", "신청장", "독촉장", "최고장",
+];
+const BRIEF_DOC_EXACT = ["소장"];
+const BRIEF_DOC_CONTAINS = ["서면", "내용증명"];
 // 작성 계열 동사가 함께 있어야 '서면 작성' 할 일로 본다 (수령·검토·송달만 있는 항목 제외)
 const DRAFT_VERB_RE = /작성|초안|기안|수정|보완/;
+
+// 문구에 서면 이름이 있는지. 한글 낱말(한글이 이어진 덩어리)마다 본다.
+export function hasBriefDocName(text = "") {
+  const clean = String(text || "");
+  if (BRIEF_DOC_CONTAINS.some((w) => clean.includes(w))) return true;
+  const words = clean.match(/[가-힣]+/g) || [];
+  return words.some((w) => BRIEF_DOC_EXACT.includes(w) || BRIEF_DOC_SUFFIXES.some((s) => w.endsWith(s)));
+}
 
 export function isBriefDraftingTodo(text = "") {
   const clean = String(text || "").trim();
   if (!clean) return false;
-  return DOC_KEYWORD_RE.test(clean) && DRAFT_VERB_RE.test(clean);
+  return hasBriefDocName(clean) && DRAFT_VERB_RE.test(clean);
 }
 
 // 서면 이름은 있으나 작성 계열 동사가 없어 서면 작성 할 일로 인식되지 않는 문구 ("준비서면(3)", "답변서 제출")
 export function isUnrecognizedBriefTodo(text = "") {
   const clean = String(text || "").trim();
-  return !!clean && DOC_KEYWORD_RE.test(clean) && !DRAFT_VERB_RE.test(clean);
+  return !!clean && hasBriefDocName(clean) && !DRAFT_VERB_RE.test(clean);
 }
 
+// 끝의 작성 계열 동사 하나(+ "하기"·"할 것"·"완료"·"중"·"필요", 마침표)
+const TRAILING_DRAFT_VERB_RE = /\s*(작성|초안|기안|수정|보완)(\s*(하기|할\s*것|완료|중|필요))?\s*[.。!]?\s*$/u;
+
 // "피고 답변서 반박 준비서면 작성" → "피고 답변서 반박 준비서면"
+// 끝의 작성 계열 동사 다섯 가지(작성, 초안, 기안, 수정, 보완)를 같은 방식으로 떼고, 이어져 있으면 모두 뗀다
+// ("고소장 초안" → "고소장", "의견서 초안 작성" → "의견서", "준비서면 수정 보완" → "준비서면").
+// 끝에서만 떼므로 제목 가운데 낱말은 그대로다("답변서 수정본 검토 의견서 작성" → "답변서 수정본 검토 의견서").
 export function briefTitleFromTodoText(text = "") {
   const clean = String(text || "").replace(/\s+/g, " ").trim();
   if (!clean) return "";
-  const stripped = clean
-    .replace(/\s*(초안\s*)?(작성|기안|수정|보완)(\s*(하기|할\s*것|완료|중|필요))?\s*[.。!]?\s*$/u, "")
-    .replace(/[\s,·\-–—:]+$/u, "")
-    .trim();
+  let stripped = clean;
+  for (;;) {
+    const next = stripped.replace(TRAILING_DRAFT_VERB_RE, "").replace(/[\s,·\-–—:]+$/u, "").trim();
+    if (!next) return clean; // 동사만 있는 문구는 그대로
+    if (next === stripped) break;
+    stripped = next;
+  }
   return stripped || clean;
 }
 

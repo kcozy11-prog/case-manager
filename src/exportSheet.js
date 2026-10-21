@@ -1,3 +1,5 @@
+import { hasWorkBody, workItemExportLine } from "./journalWork.js";
+
 export const EXPORT_SHEET_TITLES = ["사건 목록", "기일", "메모", "진행경과", "할 일", "서면", "업무일지"];
 
 const MAX_SHEETS_CELL_CHARS = 50000;
@@ -164,7 +166,11 @@ function joinCallLog(raw) {
     .join("\n");
 }
 
-const JOURNAL_HEADER = ["날짜", "출근", "퇴근", "오늘 업무", "오늘 할 일", "내일 할 일", "제출 예정 서면", "위임 업무", "통화·상담 메모", "배운 점", "기타", "사건 진행 기록", "통화 상담 기록"];
+function joinWorkLog(raw) {
+  return parseArr(raw).filter(hasWorkBody).map(workItemExportLine).join("\n");
+}
+
+const JOURNAL_HEADER = ["날짜", "출근", "퇴근", "오늘 업무", "오늘 할 일", "내일 할 일", "제출 예정 서면", "위임 업무", "통화·상담 메모", "배운 점", "기타", "사건 진행 기록", "통화 상담 기록", "오늘 한 일"];
 
 export function buildJournalRows(journalEntries = {}) {
   const dates = Object.keys(journalEntries || {}).sort((a, b) => b.localeCompare(a));
@@ -184,6 +190,7 @@ export function buildJournalRows(journalEntries = {}) {
       e.etc || "",
       joinCaseLog(e.caseProgressItems),
       joinCallLog(e.callLogItems),
+      joinWorkLog(e.workItems),
     ];
   });
   return [JOURNAL_HEADER, ...rows];

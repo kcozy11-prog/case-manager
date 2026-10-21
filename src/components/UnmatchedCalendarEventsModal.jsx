@@ -11,11 +11,13 @@ function caseLabel(c) {
 }
 
 // onIgnore(eventId): '다시 보지 않기' — 무시 목록에 영구 저장되어 다음 동기화부터 수동 확인 목록에 오르지 않는다.
-export default function UnmatchedCalendarEventsModal({ events, cases, onAddToCase, onIgnore = null, onClose }) {
+// onMarkConsult(item): '상담(사건 없음)으로 두기' — 수임 전 상담 일정으로 남겨 업무일지 그 날짜에 보이고, 다음 동기화부터 여기 오르지 않는다.
+export default function UnmatchedCalendarEventsModal({ events, cases, onAddToCase, onIgnore = null, onMarkConsult = null, onClose }) {
   const initialSelections = Object.fromEntries(events.map((item, idx) => [eventKey(item, idx), ""]));
   const [selections, setSelections] = useState(initialSelections);
   const [dismissed, setDismissed] = useState(new Set());
   const [savingId, setSavingId] = useState(null);
+  const [errors, setErrors] = useState({});
 
   const remaining = events.filter((item, idx) => !dismissed.has(eventKey(item, idx)));
 
@@ -48,6 +50,20 @@ export default function UnmatchedCalendarEventsModal({ events, cases, onAddToCas
     setDismissed(prev => new Set([...prev, eventKey(item, index)]));
   };
 
+  const handleConsult = async (item, index) => {
+    const key = eventKey(item, index);
+    setSavingId(key);
+    setErrors(prev => ({ ...prev, [key]: "" }));
+    try {
+      await onMarkConsult(item);
+      setDismissed(prev => new Set([...prev, key]));
+    } catch (e) {
+      setErrors(prev => ({ ...prev, [key]: e.message || "상담 일정 저장 실패" }));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
   const skipAll = () => {
     setDismissed(prev => new Set([
       ...prev,
@@ -61,7 +77,7 @@ export default function UnmatchedCalendarEventsModal({ events, cases, onAddToCas
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between" style={{ background: "#1E293B" }}>
           <div>
             <div className="text-white font-semibold">⚖️ 수동 확인 필요한 LBOX 일정</div>
-            <div className="text-slate-400 text-xs">사건번호가 일치하는 사건이 없거나 일정에서 사건번호를 찾을 수 없을 때만 수동 확인합니다. 오늘 이후 일정만 가져옵니다.</div>
+            <div className="text-slate-400 text-xs">사건번호가 일치하는 사건이 없거나 일정에서 사건번호를 찾을 수 없을 때만 수동 확인합니다. 오늘 이후 일정만 가져옵니다. 사건번호 없는 「상담」·「미팅」 일정은 자동으로 상담 일정(업무일지)으로 갑니다.</div>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>
@@ -117,6 +133,16 @@ export default function UnmatchedCalendarEventsModal({ events, cases, onAddToCas
                     >
                       이번엔 건너뛰기
                     </button>
+                    {onMarkConsult && (item.event?.id || item.id) && (
+                      <button
+                        onClick={() => handleConsult(item, idx)}
+                        disabled={savingId === key}
+                        className="text-xs text-violet-600 hover:text-violet-800 border border-violet-200 hover:border-violet-400 bg-white px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap disabled:opacity-50"
+                        title="사건 없이 수임 전 상담 일정으로 남깁니다. 업무일지 그 날짜 「오늘 일정·상담」에 보이고, 다음 동기화부터 여기 오르지 않습니다."
+                      >
+                        상담(사건 없음)으로 두기
+                      </button>
+                    )}
                     {onIgnore && (
                       <button
                         onClick={() => handleIgnore(item, idx)}
@@ -127,6 +153,7 @@ export default function UnmatchedCalendarEventsModal({ events, cases, onAddToCas
                       </button>
                     )}
                   </div>
+                  {errors[key] && <div className="text-[11px] text-rose-600">⚠ {errors[key]}</div>}
                 </div>
               );
             })

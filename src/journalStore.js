@@ -18,6 +18,8 @@ export const JOURNAL_FIELDS = [
   "tomorrowTasks", "etc",
   // 사건 연동: 진행 기록 / 통화 상담 기록 (JSON 배열 문자열)
   "caseProgressItems", "callLogItems",
+  // 오늘 한 일(오늘 업무·진행 기록·통화 메모·기타를 합친 목록, JSON 배열 문자열)
+  "workItems",
 ];
 
 export function emptyJournalEntry(dateKey) {

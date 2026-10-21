@@ -7,6 +7,7 @@
 //  지금 있는 내용은 지우거나 고치지 않는다(추가와 상태 복원만). 적용은 App 이 맡는다.
 // ─────────────────────────────────────────────────────────────────────────────
 import { buildCallTimelineContent } from "./caseLink.js";
+import { hasWorkBody, workTimelineEntry, workClientRequestMemo, workItemFromExportLine } from "./journalWork.js";
 
 export const WORK_SUMMARY_TITLE = "캘린더 업무 요약";
 const ARRAY_LABELS = { hearings: "기일", timeline: "진행경과", memos: "메모", todos: "할 일", briefs: "서면" };
@@ -58,6 +59,7 @@ export function journalEntryFromExportRow(r, date, label = "") {
     const m = body.match(/^(.*)\s\(([^()]*)\)$/);
     return { id: `call_restored_${date}_${i}`, date, title: m ? m[1] : body, detail: "", caseTitle: m ? m[2] : "", recordedAt };
   });
+  const workItems = lines(r["오늘 한 일"]).map((line, i) => workItemFromExportLine(line, date, i));
   const etc = [String(r["기타"] || "").trim(), restoredLists].filter(Boolean).join("\n\n");
   return {
     entryDate: date,
@@ -76,6 +78,7 @@ export function journalEntryFromExportRow(r, date, label = "") {
     learned: learnedItems.map((i) => `[${i.topic}] ${i.title}${i.content ? ` — ${i.content}` : ""}`).join("\n"),
     caseProgressItems: JSON.stringify(caseProgressItems),
     callLogItems: JSON.stringify(callLogItems),
+    workItems: JSON.stringify(workItems),
     writtenDocs: "",
     todayTaskCompletions: "",
     pendingDocCompletions: "",
@@ -307,6 +310,12 @@ export function buildJournalCrossCheck(journal = {}, cases = []) {
       if (it.asClientRequest && it.memoId) {
         push(it.caseId, "memos", { id: it.memoId, category: "의뢰인요청", title: it.title || "통화/상담", content: it.detail || "", date: it.date || date }, date);
       }
+    }
+    for (const it of parse(e.workItems)) {
+      if (!it || !it.caseId || !it.recordedAt || !hasWorkBody(it)) continue;
+      if (it.timelineId) push(it.caseId, "timeline", { id: it.timelineId, ...workTimelineEntry(it, date) }, date);
+      const memo = it.memoId ? workClientRequestMemo(it, date) : null;
+      if (memo) push(it.caseId, "memos", { id: it.memoId, ...memo }, date);
     }
   }
   const result = new Map();

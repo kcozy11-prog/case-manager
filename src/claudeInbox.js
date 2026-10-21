@@ -13,6 +13,7 @@ import { getTimelineActivity, DEFAULT_TIMELINE_ACTIVITY_TYPE } from "./timelineA
 import { CASE_ARRAY_FIELDS, stableStringify, diffCase } from "./caseMerge.js";
 import { MEMO_CATEGORIES } from "./utils.js";
 import { isBriefDraftingTodo, isUnrecognizedBriefTodo, briefTitleFromTodoText, moveTodoToBrief } from "./todoBrief.js";
+import { parseJsonArray, carryForwardTasks, dropResurrectedTodayTasks, carryForwardDelegatedTasks } from "./journalLogic.js";
 
 export const CM_UPDATE_FORMAT = "cm-update-v1";
 export const CM_BINDING_FORMAT = "cm-binding-v1";
@@ -36,7 +37,11 @@ const BATCH_FIELDS = ["format", "batchId", "createdAt", "source", "items"];
 const SOURCE_FIELDS = ["folder", "pc", "session"];
 const COMMON_FIELDS = ["id", "cmCaseId", "caseNumber", "op", "basis"];
 
+// 위임 업무 담당자 기본값 (업무일지 화면과 같음)
+export const DEFAULT_DELEGATED_ASSIGNEE = "정실장";
+
 // 필드 종류: text | date | time | bool | priority | activity | memoCategory, 끝에 "!"가 붙으면 필수
+// target: "journal" 인 op 는 사건이 아니라 반영하는 날(오늘)의 업무일지에 들어간다. cmCaseId 는 고르면 사건 연결만 한다.
 export const OP_SPECS = {
   "brief.submitted": { label: "서면 제출", fields: { title: "text!", date: "date!", details: "text" } },
   "brief.pending": { label: "제출대기 서면", fields: { title: "text!", date: "date", details: "text" } },
@@ -46,7 +51,12 @@ export const OP_SPECS = {
   progress: { label: "진행경과", fields: { date: "date!", content: "text!", detail: "text", activityType: "activity" } },
   call: { label: "통화", fields: { date: "date!", title: "text!", detail: "text", asClientRequest: "bool" } },
   memo: { label: "메모", fields: { category: "memoCategory!", title: "text!", content: "text", date: "date" } },
+  delegated: { label: "위임 업무", target: "journal", fields: { text: "text!", assignee: "text", dueDate: "date", details: "text" } },
 };
+
+export function isJournalOp(op) {
+  return !!(typeof op === "string" && hasOwn(OP_SPECS, op) && OP_SPECS[op].target === "journal");
+}
 
 const isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const asArray = (v) => (Array.isArray(v) ? v : []);
@@ -298,8 +308,9 @@ export function normalizeItem(item, { today = "" } = {}) {
     if (!allowed.includes(key)) errors.push(`알 수 없는 필드: ${key}`);
   }
   const cmCaseId = item.cmCaseId;
-  if (isBlank(cmCaseId)) errors.push("cmCaseId 없음(사건 지정 필요 — 연결 코드로 사건을 지정해 주세요)");
-  else if (typeof cmCaseId !== "string" || cmCaseId.length > 200) errors.push("cmCaseId 형식 오류");
+  if (isBlank(cmCaseId)) {
+    if (spec.target !== "journal") errors.push("cmCaseId 없음(사건 지정 필요 — 연결 코드로 사건을 지정해 주세요)");
+  } else if (typeof cmCaseId !== "string" || cmCaseId.length > 200) errors.push("cmCaseId 형식 오류");
   const caseNumber = checkField("caseNumber", "text", item.caseNumber, errors);
   const basis = checkField("basis", "text", item.basis, errors);
 
@@ -326,6 +337,7 @@ export function normalizeItem(item, { today = "" } = {}) {
   if (item.op === "progress" && !norm.activityType) norm.activityType = DEFAULT_TIMELINE_ACTIVITY_TYPE;
   if (item.op === "memo" && !norm.date) norm.date = today;
   if (item.op === "brief.pending" && !norm.date) norm.date = today;
+  if (item.op === "delegated" && !norm.assignee) norm.assignee = DEFAULT_DELEGATED_ASSIGNEE;
   return { errors, norm, fp };
 }
 
@@ -340,6 +352,7 @@ function contentKey(n) {
     case "progress": return `progress|${n.date}|${compact(n.content)}`;
     case "call": return `call|${n.date}|${compact(buildCallTimelineContent({ title: n.title, detail: n.detail }))}`;
     case "memo": return `memo|${n.category}|${n.date}|${compact(n.title)}`;
+    case "delegated": return `delegated|${compact(n.assignee)}|${compact(n.text)}`;
     default: return "";
   }
 }
@@ -434,7 +447,8 @@ function contentWarnings(n, caseObj, { today, batchPendingTitles, batchSubmitted
 
 // ── 묶음 검증 ───────────────────────────────────────────────────────────────
 // 항목마다 status: ok(정상) | warn(경고, 기본 해제) | error(반영 불가) | applied(이미 반영됨)
-export function validateBatch(batch, cases = [], ledger = null, { today = "" } = {}) {
+// journalEntries: 업무일지 문서들({ 날짜: 일지 }) — 위임 업무(op delegated)가 이미 들어갔는지·겹치는지 볼 때 쓴다.
+export function validateBatch(batch, cases = [], ledger = null, { today = "", journalEntries = null } = {}) {
   const batchId = batch?.batchId || "";
   const byId = new Map(asArray(cases).filter((c) => c && c.id !== undefined).map((c) => [String(c.id), c]));
   const ledgerMap = ledgerItems(ledger, batchId);
@@ -463,7 +477,7 @@ export function validateBatch(batch, cases = [], ledger = null, { today = "" } =
     let applied = false;
     if (!structural) {
       const ledgerHit = hasOwn(ledgerMap, id);
-      const found = findClaudeItem(caseObj, batchId, id);
+      const found = isJournalOp(norm.op) ? findJournalClaudeItem(journalEntries, batchId, id) : findClaudeItem(caseObj, batchId, id);
       const prevFp = (ledgerHit && ledgerFp(ledgerMap[id])) || found?.fp || "";
       if (ledgerHit || found) {
         if (prevFp && prevFp !== fp) {
@@ -471,7 +485,7 @@ export function validateBatch(batch, cases = [], ledger = null, { today = "" } =
           errors.push("같은 묶음·항목 id로 다른 내용이 이미 반영되어 있음(묶음 id 재사용) — Claude에 새 batchId로 다시 만들어 달라고 해 주세요");
         } else {
           applied = true;
-          notes.push(ledgerHit ? "이미 반영됨(반영 기록 있음)" : "이미 반영됨(사건에 이 항목 표시가 있음)");
+          notes.push(ledgerHit ? "이미 반영됨(반영 기록 있음)" : isJournalOp(norm.op) ? "이미 반영됨(업무일지에 이 항목이 있음)" : "이미 반영됨(사건에 이 항목 표시가 있음)");
         }
       }
     }
@@ -485,7 +499,14 @@ export function validateBatch(batch, cases = [], ledger = null, { today = "" } =
       else if (cmp === "app-empty") warnings.push("앱 사건에 사건번호가 없어 대조하지 못함");
     }
 
-    if (!errors.length && !applied && caseObj) {
+    if (!errors.length && !applied && !structural && isJournalOp(norm.op)) {
+      if (caseObj && caseObj.status === "종결") warnings.push("종결 사건임");
+      if (!norm.basis) warnings.push("근거(basis) 없음");
+      warnings.push(...journalWarnings(norm, journalEntries, { today }));
+      const key = `journal|${contentKey(norm)}`;
+      if (seenKeys.has(key)) warnings.push("같은 묶음 안에 같은 내용의 항목이 또 있음");
+      seenKeys.add(key);
+    } else if (!errors.length && !applied && caseObj) {
       if (caseObj.status === "종결") warnings.push("종결 사건임");
       if (!norm.basis) warnings.push("근거(basis) 없음");
       const caseKey = String(caseObj.id);
@@ -511,9 +532,10 @@ export function validateBatch(batch, cases = [], ledger = null, { today = "" } =
   const groups = [];
   const groupMap = new Map();
   for (const r of items) {
-    const key = r.caseObj ? `case:${r.caseObj.id}` : `none:${r.cmCaseId}`;
+    const journal = isJournalOp(r.op);
+    const key = journal ? "journal" : r.caseObj ? `case:${r.caseObj.id}` : `none:${r.cmCaseId}`;
     if (!groupMap.has(key)) {
-      const g = { key, caseObj: r.caseObj, cmCaseId: r.cmCaseId, items: [] };
+      const g = { key, journal, caseObj: journal ? null : r.caseObj, cmCaseId: journal ? "" : r.cmCaseId, items: [] };
       groupMap.set(key, g);
       groups.push(g);
     }
@@ -531,6 +553,93 @@ export function isSelectableStatus(status) {
 // 기본 선택: 정상 항목만 (경고는 사람이 보고 직접 고른다)
 export function defaultSelectedIds(report) {
   return asArray(report?.items).filter((r) => r.status === "ok").map((r) => r.id);
+}
+
+// ── 업무일지 위임 업무(op delegated) ─────────────────────────────────────────
+// 반영하면 반영하는 날(오늘)의 업무일지 위임 업무에 id `cl:<batchId>:<itemId>` 로 들어간다.
+// 미완료면 다음 날부터 과거 일지에서 따라오는 것은 화면에서 넣은 위임 업무와 같다.
+export function findJournalClaudeItem(journalEntries, batchId, itemId) {
+  const id = claudeItemBaseId(batchId, itemId);
+  for (const entry of Object.values(journalEntries || {})) {
+    for (const field of ["delegatedItems", "delegatedCompletions"]) {
+      const hit = parseJsonArray(entry?.[field]).find((x) => x && x.id === id);
+      if (hit) return { fp: String(hit.claude?.fp || "") };
+    }
+  }
+  return null;
+}
+
+function journalWarnings(n, journalEntries, { today }) {
+  const warns = [];
+  if (n.op !== "delegated") return warns;
+  if (today && n.dueDate && n.dueDate < today) warns.push(`확인일이 이미 지났음(${n.dueDate})`);
+  if (journalEntries && today) {
+    const open = carryForwardDelegatedTasks(journalEntries, today).filter((it) => !it.done);
+    if (open.some((it) => compact(it.text) === compact(n.text))) warns.push("같은 내용의 미확인 위임 업무가 이미 있음");
+  }
+  return warns;
+}
+
+// 위임 업무 항목(업무일지 delegatedItems 모양)
+export function buildDelegatedJournalItem(n, { batchId, fp = "", today = "", caseTitle = "", createdAt = "" } = {}) {
+  return {
+    id: claudeItemBaseId(batchId, n.id),
+    text: n.text,
+    done: false,
+    assignee: n.assignee || DEFAULT_DELEGATED_ASSIGNEE,
+    dueDate: n.dueDate || "",
+    details: n.details || "",
+    cmCaseId: n.cmCaseId || "",
+    cmCaseTitle: n.cmCaseId ? caseTitle : "",
+    sourceDate: today,
+    createdAt,
+    claude: { batchId, itemId: n.id, fp: fp || itemFingerprint(n) },
+  };
+}
+
+// 고른 위임 업무를 오늘 업무일지에 넣을 계획: { dateKey, items: [{ itemId, fp, item }] }
+export function planJournalItems(batch, cases = [], selectedItemIds = [], { today = "", ledger = null, seen = null, journalEntries = null, createdAt = "" } = {}) {
+  const selected = new Set((selectedItemIds ? [...selectedItemIds] : []).map(String));
+  const report = validateBatch(batch, cases, ledger, { today, journalEntries });
+  const items = [];
+  for (const r of report.items) {
+    if (!selected.has(r.id) || !isSelectableStatus(r.status) || !isJournalOp(r.op)) continue;
+    if (seen && seen[r.id] === "ok" && r.status !== "ok") continue;
+    items.push({
+      itemId: r.id, fp: r.fp,
+      item: buildDelegatedJournalItem(r.norm, { batchId: batch.batchId, fp: r.fp, today, caseTitle: r.caseObj?.title || "", createdAt }),
+    });
+  }
+  return { dateKey: today, items };
+}
+
+const delegatedSummary = (list) => list
+  .map((i) => `${i.done ? "[완료] " : ""}${i.assignee ? i.assignee + ": " : ""}${i.text}`).join("\n");
+
+// 저장 순간의 그날 일지(latest, 없으면 null)에 위임 업무를 얹은 새 일지를 만든다. 이미 있는 id 는 넣지 않는다.
+//  - 그날 일지가 아직 없으면, 업무일지 화면이 새 날짜에 하는 할 일 이월(직전 일지의 미완료 할 일·내일 할 일)을
+//    같이 넣어 만든다. 그러지 않으면 일지가 먼저 생겨 그날 할 일 이월이 빠진다.
+//  반환: { entry, added: [항목 id] } (넣을 것이 없으면 entry null)
+export function addDelegatedToJournalEntry(journalEntries, dateKey, latest, newItems = []) {
+  const base = latest || null;
+  const current = parseJsonArray(base?.delegatedItems);
+  const completed = new Set(parseJsonArray(base?.delegatedCompletions).map((x) => x && x.id).filter(Boolean));
+  const have = new Set(current.map((x) => x && x.id).filter(Boolean));
+  const add = (newItems || []).filter((it) => it && it.id && !have.has(it.id) && !completed.has(it.id));
+  if (!add.length) return { entry: null, added: [] };
+  const delegatedItems = [...current, ...add];
+  let entry;
+  if (base) {
+    entry = { ...base };
+  } else {
+    const others = { ...(journalEntries || {}) };
+    delete others[dateKey];
+    const carried = dropResurrectedTodayTasks(others, dateKey, carryForwardTasks(others, dateKey)).items;
+    entry = { entryDate: dateKey, todayTasks: JSON.stringify(carried) };
+  }
+  entry.delegatedItems = JSON.stringify(delegatedItems);
+  entry.delegated = delegatedSummary(delegatedItems);
+  return { entry, added: add.map((it) => it.id) };
 }
 
 // ── 반영 ────────────────────────────────────────────────────────────────────
@@ -699,12 +808,12 @@ function splitItemChange(before, after, r, batchId) {
 // 다시 검증해서 오류·이미 반영됨 항목은 골랐더라도 넣지 않는다. 같은 사건의 항목은 묶음 순서대로 얹는다.
 // seen: 사용자가 화면에서 본 판정 { 항목 id: status }. 그 사이 정상 → 경고로 바뀐 항목은 확인 없이 넣지 않는다.
 // guard: 저장 순간 서버 최신본에 맞춰 다시 가리는 보호 정보(claudeGuard.js). App 이 diff 에 붙여 저장한다.
-export function planBatch(batch, cases = [], selectedItemIds = [], { today = "", ledger = null, seen = null } = {}) {
+export function planBatch(batch, cases = [], selectedItemIds = [], { today = "", ledger = null, seen = null, journalEntries = null } = {}) {
   const selected = new Set((selectedItemIds ? [...selectedItemIds] : []).map(String));
-  const report = validateBatch(batch, cases, ledger, { today });
+  const report = validateBatch(batch, cases, ledger, { today, journalEntries });
   const byCase = new Map();
   for (const r of report.items) {
-    if (!selected.has(r.id) || !isSelectableStatus(r.status) || !r.caseObj) continue;
+    if (!selected.has(r.id) || !isSelectableStatus(r.status) || !r.caseObj || isJournalOp(r.op)) continue;
     if (seen && seen[r.id] === "ok" && r.status !== "ok") continue;
     const key = String(r.caseObj.id);
     if (!byCase.has(key)) byCase.set(key, { caseObj: r.caseObj, entries: [] });
@@ -765,6 +874,11 @@ export function describeItem(n) {
       body: n.detail,
     };
     case "memo": return { title: `[${n.category}] ${n.title}`, meta: join(n.date), body: n.content };
+    case "delegated": return {
+      title: `@${n.assignee || DEFAULT_DELEGATED_ASSIGNEE} ${n.text}`,
+      meta: join("오늘 업무일지 위임 업무에 추가", n.dueDate && `확인일 ${n.dueDate}`, n.cmCaseId && "사건 연결"),
+      body: n.details,
+    };
     default: return { title: String(n.op), meta: "", body: "" };
   }
 }

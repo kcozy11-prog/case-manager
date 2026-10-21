@@ -13,12 +13,13 @@ import OverviewTab from "./components/OverviewTab";
 import TodosTab from "./components/TodosTab";
 import AiParseModal from "./components/AiParseModal";
 import ClaudeInboxModal from "./components/ClaudeInboxModal";
-import { planBatch, buildBindingCode, buildLedgerPatch, ledgerBatchesToPrune, ledgerItemIds } from "./claudeInbox";
+import { planBatch, planJournalItems, addDelegatedToJournalEntry, buildBindingCode, buildLedgerPatch, ledgerBatchesToPrune, ledgerItemIds } from "./claudeInbox";
 import { resolveClaudeGuard, claudeLedgerEntries } from "./claudeGuard";
 import CaseFormModal from "./components/CaseFormModal";
 import { fetchCalendarEvents, syncEventsWithCases, mergeCalendarEventIntoCase, fetchWorkCalendarEvents, syncWorkEventsWithCases, inferCaseType, fetchWorkTasks, matchTasksToCases, mergeTaskIntoCaseTodos } from "./calendarSync";
 import UnmatchedTasksModal from "./components/UnmatchedTasksModal";
 import UnmatchedCalendarEventsModal from "./components/UnmatchedCalendarEventsModal";
+import { consultFromEvent, consultPatch, buildCaseFromConsult } from "./consultations";
 import StandaloneTodosModal from "./components/StandaloneTodosModal";
 import { migrateLegacyData, exportToGoogleSheet } from "./migrateLegacy";
 import { openSpreadsheetUrl } from "./exportOpen";
@@ -85,6 +86,26 @@ async function commitClaudeDiff(uid, caseId, diff) {
     return changed ? "saved" : "unchanged";
   });
   return { result, committedDiff };
+}
+
+// Claude 반영의 위임 업무(op delegated): 반영하는 날의 업무일지 문서와 반영 기록을 한 트랜잭션에서 읽고 쓴다.
+//  - 저장 순간의 그날 일지에 없는 항목만 얹는다(다른 기기에서 그 사이 고친 칸은 그대로). 일지가 없으면 할 일 이월을 넣어 만든다.
+//  - 반영 기록에 이미 있는 항목은 건너뛰고, 들어갔거나 이미 있던 항목은 반영 기록에 남긴다.
+async function commitClaudeJournal(uid, batchId, dateKey, planned, journalEntries) {
+  const ref = doc(db, "users", uid, "journal", dateKey);
+  const ledgerRef = doc(db, "users", uid, "meta", "claudeInbox");
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    const ledgerSnap = await tx.get(ledgerRef);
+    const done = ledgerItemIds(ledgerSnap.exists() ? ledgerSnap.data() : null, batchId);
+    const todo = planned.filter((p) => !done.has(p.itemId));
+    const { entry, added } = addDelegatedToJournalEntry(journalEntries, dateKey, snap.exists() ? snap.data() : null, todo.map((p) => p.item));
+    const at = new Date().toISOString();
+    if (entry) tx.set(ref, { ...entry, entryDate: dateKey, _savedAt: at });
+    const entries = Object.fromEntries(todo.map((p) => [p.itemId, { fp: p.fp, caseId: `journal:${dateKey}` }]));
+    if (Object.keys(entries).length) tx.set(ledgerRef, buildLedgerPatch(batchId, entries, at), { merge: true });
+    return { added: added.length };
+  });
 }
 
 // 서버의 최신 사건 문서를 읽어 이번 수정분(diff)만 얹는다.
@@ -173,6 +194,12 @@ export default function App() {
   const [dayChanged, setDayChanged] = useState(false);
   // 업무일지(미완료 오늘·내일 할 일을 사건 화면 '미완료 할 일'에 함께 세기 위해)
   const [journalEntries, setJournalEntries] = useState({});
+  // 업무일지를 서버 판본으로 받았는지(Claude 반영 위임 업무가 기기 사본으로 할 일 이월을 계산하지 않게)
+  const [journalServerSeen, setJournalServerSeen] = useState(false);
+  const journalEntriesRef = useRef(journalEntries);
+  journalEntriesRef.current = journalEntries;
+  // 수임 전 상담 일정(meta/consultations) — 업무일지 「오늘 일정·상담」 칸
+  const [consultations, setConsultations] = useState({});
   // 내보내기 기록(meta/exports) — 마지막 백업 날짜 표시용
   const [exportItems, setExportItems] = useState([]);
   const [backupNoticeHiddenOn, setBackupNoticeHiddenOn] = useState(() => {
@@ -654,15 +681,35 @@ export default function App() {
     if (!casesSynced) throw new Error("서버 데이터를 받기 전에는 반영할 수 없습니다. 잠시 뒤 다시 시도해 주세요.");
     const ledgerState = claudeLedgerRef.current;
     if (!ledgerState?.serverSeen) throw new Error("반영 기록을 서버에서 아직 받지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
-    const plan = planBatch(batch, casesRef.current, selectedIds, { today: todayStr, ledger: ledgerState.data, seen });
-    const planned = plan.reduce((n, ch) => n + ch.itemIds.length, 0);
-    const summary = { cases: 0, items: 0, pendingItems: 0, failedCases: 0, failedItems: 0, skipped: selectedIds.length - planned };
+    const journalEntriesNow = journalEntriesRef.current;
+    const plan = planBatch(batch, casesRef.current, selectedIds, { today: todayStr, ledger: ledgerState.data, seen, journalEntries: journalEntriesNow });
+    const journalPlan = planJournalItems(batch, casesRef.current, selectedIds, {
+      today: todayStr, ledger: ledgerState.data, seen, journalEntries: journalEntriesNow, createdAt: new Date().toISOString(),
+    });
+    if (journalPlan.items.length && !journalServerSeen) throw new Error("업무일지를 서버에서 아직 받지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
+    const planned = plan.reduce((n, ch) => n + ch.itemIds.length, 0) + journalPlan.items.length;
+    const summary = {
+      cases: 0, items: 0, pendingItems: 0, failedCases: 0, failedItems: 0, skipped: selectedIds.length - planned,
+      journalItems: 0, journalPending: 0, journalFailed: 0,
+    };
+    const withTimeout = (work, ms = 25000) => Promise.race([work, new Promise((res) => setTimeout(() => res("pending"), ms))]);
+    // 위임 업무 → 오늘 업무일지 (사건 저장보다 먼저: 같은 반영 기록 문서를 쓰므로 차례로)
+    if (journalPlan.items.length) {
+      const n = journalPlan.items.length;
+      try {
+        const r = await withTimeout(commitClaudeJournal(user.uid, batch.batchId, journalPlan.dateKey, journalPlan.items, journalEntriesNow));
+        if (r === "pending") { summary.journalItems += n; summary.journalPending += n; }
+        else { summary.journalItems += r.added; summary.skipped += n - r.added; }
+      } catch (e) {
+        console.error("Claude 반영(위임 업무) 저장 실패", e);
+        summary.journalFailed += n;
+      }
+    }
     if (!plan.length) return summary;
 
     const SAVED = ["saved", "created", "unchanged"];
     const resultKey = (ch) => `${ch.caseId}|${batch.batchId}`;
     plan.forEach((ch) => claudeCommitResults.delete(resultKey(ch)));
-    const withTimeout = (work, ms = 25000) => Promise.race([work, new Promise((res) => setTimeout(() => res("pending"), ms))]);
     const settle = (p) => p.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
     // 사건마다 차례로 저장한다(사건 저장이 모두 같은 반영 기록 문서를 함께 쓰므로 동시에 보내면 서로 다툰다).
     // 연결이 느려 한 곳이 대기로 넘어가면 나머지는 대기열에 넣고 기다리지 않는다(대기열이 이어서 저장).
@@ -699,7 +746,7 @@ export default function App() {
       updateDoc(doc(db, "users", user.uid, "meta", "claudeInbox"), ...args).catch((e) => console.warn("Claude 반영 기록 정리 실패", e));
     }
     return summary;
-  }, [user, casesSynced, saveCase]);
+  }, [user, casesSynced, saveCase, journalServerSeen]);
 
   // 사건 화면 「연결 코드 복사」: Claude 사건 폴더 세션에 붙여넣을 한 줄 JSON. 클립보드가 막히면 직접 복사하게 보여 준다.
   const copyBindingCode = useCallback(async (c) => {
@@ -746,10 +793,26 @@ export default function App() {
         const snap = await getDoc(doc(db, "users", user.uid, "meta", "calendarSync"));
         if (snap.exists()) ignoredEventIds = new Set(snap.data().ignoredEventIds || []);
       } catch (e) { console.warn("캘린더 무시 목록 로드 실패", e); }
+      // 이미 「상담 일정」으로 둔 일정 (사건번호 없는 상담 일정은 수동 확인 창 대신 여기로 간다)
+      let consultItems = null;
+      try {
+        const snap = await getDoc(doc(db, "users", user.uid, "meta", "consultations"));
+        consultItems = snap.exists() ? (snap.data().items || {}) : {};
+      } catch (e) { console.warn("상담 일정 목록 로드 실패", e); }
 
       // 동기화가 계산에 쓴 판본(base)을 함께 넘겨, 동기화로 바뀐 부분만 서버 최신 문서에 얹는다.
       // (저장은 대기열이 사건별로 순서대로 보내므로 여기서 기다리지 않는다)
-      const { updates, newHearingCount, newCaseCount, skippedCount, unmatchedEvents } = syncEventsWithCases(data.items, cases, { ignoredEventIds });
+      const { updates, newHearingCount, newCaseCount, skippedCount, unmatchedEvents, consultEvents } = syncEventsWithCases(data.items, cases, {
+        ignoredEventIds, consultEventIds: new Set(Object.keys(consultItems || {})),
+      });
+      // 상담 일정 저장: 일정 칸만 고치고 메모·연결 사건은 그대로 둔다. 목록을 읽지 못했으면 덮어쓰지 않도록 건너뛴다.
+      if (consultItems && consultEvents?.length) {
+        const patch = consultPatch(consultItems, consultEvents);
+        if (Object.keys(patch).length) {
+          setDoc(doc(db, "users", user.uid, "meta", "consultations"), { items: patch, updatedAt: new Date().toISOString() }, { merge: true })
+            .catch((e) => console.warn("상담 일정 저장 실패", e));
+        }
+      }
       const baseById = new Map(cases.map(c => [c.id, c]));
       for (const [id, uc] of updates) saveCase(uc, { base: baseById.get(id) || null, select: false });
 
@@ -764,7 +827,7 @@ export default function App() {
         setUnmatchedCalendarEvents(unmatchedEvents);
       }
 
-      setCalResult({ hearings: newHearingCount || 0, newCases: newCaseCount || 0, memos: workResult.newMemoCount || 0, total: data.items.length, skipped: skippedCount || 0, manual: unmatchedEvents?.length || 0 });
+      setCalResult({ hearings: newHearingCount || 0, newCases: newCaseCount || 0, memos: workResult.newMemoCount || 0, total: data.items.length, skipped: skippedCount || 0, manual: unmatchedEvents?.length || 0, consults: consultEvents?.length || 0 });
       setTimeout(() => setCalResult(null), 4000);
     } catch (e) {
       setCalResult({ error: e.message });
@@ -787,6 +850,44 @@ export default function App() {
     const merged = mergeCalendarEventIntoCase({ ...caseObj, hearings: [...(caseObj.hearings || [])], memos: [...(caseObj.memos || [])], timeline: [...(caseObj.timeline || [])] }, ev);
     saveCase(merged.caseObj, { base: caseObj });
   }, [saveCase]);
+
+  // ── 수임 전 상담 일정 (meta/consultations) ─────────────────────────────────
+  useEffect(() => {
+    if (!user) { setConsultations({}); return undefined; }
+    return onSnapshot(doc(db, "users", user.uid, "meta", "consultations"),
+      (snap) => setConsultations(snap.exists() ? (snap.data().items || {}) : {}),
+      (e) => console.warn("상담 일정 구독 오류", e));
+  }, [user]);
+
+  // 수동 확인 창 「상담(사건 없음)으로 두기」: 일정으로 남기고 다음 동기화부터 수동 확인 창에 올리지 않는다
+  const markCalendarEventAsConsult = useCallback(async (calendarItem) => {
+    const rec = consultFromEvent(calendarItem?.event || calendarItem);
+    if (!user || !rec) throw new Error("일정 id가 없어 상담 일정으로 둘 수 없습니다.");
+    const patch = consultPatch(consultations, [rec], { source: "manual" });
+    if (!Object.keys(patch).length) return;
+    await setDoc(doc(db, "users", user.uid, "meta", "consultations"), { items: patch, updatedAt: new Date().toISOString() }, { merge: true });
+  }, [user, consultations]);
+
+  // 상담 일정의 상담 메모·연결 사건 칸만 고친다(다른 칸과 다른 상담은 그대로)
+  const updateConsultFields = useCallback(async (id, fields) => {
+    if (!user || !id) throw new Error("로그인이 필요합니다.");
+    const args = Object.entries(fields).flatMap(([k, v]) => [new FieldPath("items", id, k), v]);
+    await updateDoc(doc(db, "users", user.uid, "meta", "consultations"), ...args,
+      new FieldPath("items", id, "updatedAt"), new Date().toISOString());
+  }, [user]);
+  const saveConsultMemo = useCallback((id, memo) => updateConsultFields(id, { memo }), [updateConsultFields]);
+
+  // 업무일지 「사건 만들기」: 상담 일정으로 새 사건 초안을 만들어 사건 등록 창을 연다.
+  // 저장하면 상담 일정에 그 사건을 연결한다(창을 닫으면 아무것도 바뀌지 않음).
+  const createCaseFromConsult = useCallback((consult) => {
+    const nc = buildCaseFromConsult(consult, {
+      baseCase: emptyCase(), today: todayStr,
+      makeId: () => Date.now() + Math.floor(Math.random() * 10000),
+      mergeEvent: mergeCalendarEventIntoCase,
+    });
+    setEditCase({ ...nc, _isNew: true, _fromConsultId: consult.id });
+    setShowForm(true);
+  }, []);
 
   // ── Google Tasks 동기화 ────────────────────────────────────────────────────
   const syncTasks = useCallback(async () => {
@@ -968,8 +1069,12 @@ export default function App() {
 
   // 업무일지 구독 → 오늘 기준 미완료 오늘·내일 할 일
   useEffect(() => {
+    setJournalServerSeen(false);
     if (!user) { setJournalEntries({}); return undefined; }
-    return subscribeJournal(user.uid, (map) => setJournalEntries(map));
+    return subscribeJournal(user.uid, (map, meta) => {
+      setJournalEntries(map);
+      if (!meta?.fromCache) setJournalServerSeen(true);
+    });
   }, [user]);
   const journalTasks = useMemo(() => journalPendingTasks(journalEntries, journalTodayKey()),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1463,7 +1568,7 @@ export default function App() {
           <div className={`text-xs px-4 py-1.5 text-center font-medium ${
             calResult.error ? "bg-red-500 text-white" : "bg-emerald-500 text-white"
           }`}>
-            {calResult.error || `LBOX ${calResult.total}건 — 기일 ${calResult.hearings}건${calResult.newCases ? `, 신규사건 ${calResult.newCases}건` : ""}${calResult.memos ? `, 업무메모 ${calResult.memos}건` : ""}${calResult.manual ? ` · 수동확인 ${calResult.manual}건` : ""}${calResult.skipped && !calResult.manual ? ` · 미매칭 ${calResult.skipped}건` : ""}`}
+            {calResult.error || `LBOX ${calResult.total}건 — 기일 ${calResult.hearings}건${calResult.newCases ? `, 신규사건 ${calResult.newCases}건` : ""}${calResult.memos ? `, 업무메모 ${calResult.memos}건` : ""}${calResult.consults ? ` · 상담 ${calResult.consults}건` : ""}${calResult.manual ? ` · 수동확인 ${calResult.manual}건` : ""}${calResult.skipped && !calResult.manual ? ` · 미매칭 ${calResult.skipped}건` : ""}`}
           </div>
         )}
 
@@ -1507,7 +1612,8 @@ export default function App() {
 
         {/* 본문 */}
         {appMode === "journal" ? (
-          <JournalApp user={user} cases={cases} onPushTask={pushTaskToCalendar} onUpdateCase={saveCaseFromJournal} onDirtyChange={onJournalDirtyChange} />
+          <JournalApp user={user} cases={cases} onPushTask={pushTaskToCalendar} onUpdateCase={saveCaseFromJournal} onDirtyChange={onJournalDirtyChange}
+            consultations={consultations} onSaveConsultMemo={saveConsultMemo} onCreateCaseFromConsult={createCaseFromConsult} />
         ) : (
         <div className="flex flex-1 min-h-0">
           {/* 좌측 목록 */}
@@ -1662,6 +1768,7 @@ export default function App() {
         <ClaudeInboxModal
           cases={cases}
           ledger={claudeLedger?.data || null}
+          journalEntries={journalEntries}
           ready={casesSynced && !!claudeLedger?.serverSeen}
           notReadyText={!casesSynced ? "서버 데이터를 확인하는 중이라 아직 반영할 수 없습니다." : "반영 기록을 서버에서 받는 중이라 아직 반영할 수 없습니다."}
           onApply={applyClaudeBatch}
@@ -1692,6 +1799,7 @@ export default function App() {
           cases={cases}
           onAddToCase={addUnmatchedCalendarEventToCase}
           onIgnore={ignoreUnmatchedCalendarEvent}
+          onMarkConsult={markCalendarEventAsConsult}
           onClose={() => setUnmatchedCalendarEvents(null)}
         />
       )}
@@ -1710,7 +1818,14 @@ export default function App() {
       {showForm && (
         <CaseFormModal
           initial={editCase}
-          onSave={(form) => saveCase(form, { base: editCase && editCase.id && !editCase._isNew ? editCase : null })}
+          onSave={(form) => {
+            const { _fromConsultId, ...clean } = form;
+            saveCase(clean, { base: editCase && editCase.id && !editCase._isNew ? editCase : null });
+            if (_fromConsultId) {
+              updateConsultFields(_fromConsultId, { caseId: clean.id, caseTitle: clean.title || "", linkedAt: new Date().toISOString() })
+                .catch((e) => console.warn("상담 일정에 사건 연결 실패", e));
+            }
+          }}
           onClose={() => { setShowForm(false); setEditCase(null); }}
         />
       )}
