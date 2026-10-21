@@ -13,7 +13,7 @@ import OverviewTab from "./components/OverviewTab";
 import TodosTab from "./components/TodosTab";
 import AiParseModal from "./components/AiParseModal";
 import ClaudeInboxModal from "./components/ClaudeInboxModal";
-import { planBatch, buildBindingCode, buildLedgerPatch, ledgerBatchesToPrune, ledgerItemIds } from "./claudeInbox";
+import { planBatch, planJournalItems, addDelegatedToJournalEntry, buildBindingCode, buildLedgerPatch, ledgerBatchesToPrune, ledgerItemIds } from "./claudeInbox";
 import { resolveClaudeGuard, claudeLedgerEntries } from "./claudeGuard";
 import CaseFormModal from "./components/CaseFormModal";
 import { fetchCalendarEvents, syncEventsWithCases, mergeCalendarEventIntoCase, fetchWorkCalendarEvents, syncWorkEventsWithCases, inferCaseType, fetchWorkTasks, matchTasksToCases, mergeTaskIntoCaseTodos } from "./calendarSync";
@@ -86,6 +86,26 @@ async function commitClaudeDiff(uid, caseId, diff) {
     return changed ? "saved" : "unchanged";
   });
   return { result, committedDiff };
+}
+
+// Claude 반영의 위임 업무(op delegated): 반영하는 날의 업무일지 문서와 반영 기록을 한 트랜잭션에서 읽고 쓴다.
+//  - 저장 순간의 그날 일지에 없는 항목만 얹는다(다른 기기에서 그 사이 고친 칸은 그대로). 일지가 없으면 할 일 이월을 넣어 만든다.
+//  - 반영 기록에 이미 있는 항목은 건너뛰고, 들어갔거나 이미 있던 항목은 반영 기록에 남긴다.
+async function commitClaudeJournal(uid, batchId, dateKey, planned, journalEntries) {
+  const ref = doc(db, "users", uid, "journal", dateKey);
+  const ledgerRef = doc(db, "users", uid, "meta", "claudeInbox");
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    const ledgerSnap = await tx.get(ledgerRef);
+    const done = ledgerItemIds(ledgerSnap.exists() ? ledgerSnap.data() : null, batchId);
+    const todo = planned.filter((p) => !done.has(p.itemId));
+    const { entry, added } = addDelegatedToJournalEntry(journalEntries, dateKey, snap.exists() ? snap.data() : null, todo.map((p) => p.item));
+    const at = new Date().toISOString();
+    if (entry) tx.set(ref, { ...entry, entryDate: dateKey, _savedAt: at });
+    const entries = Object.fromEntries(todo.map((p) => [p.itemId, { fp: p.fp, caseId: `journal:${dateKey}` }]));
+    if (Object.keys(entries).length) tx.set(ledgerRef, buildLedgerPatch(batchId, entries, at), { merge: true });
+    return { added: added.length };
+  });
 }
 
 // 서버의 최신 사건 문서를 읽어 이번 수정분(diff)만 얹는다.
@@ -174,6 +194,10 @@ export default function App() {
   const [dayChanged, setDayChanged] = useState(false);
   // 업무일지(미완료 오늘·내일 할 일을 사건 화면 '미완료 할 일'에 함께 세기 위해)
   const [journalEntries, setJournalEntries] = useState({});
+  // 업무일지를 서버 판본으로 받았는지(Claude 반영 위임 업무가 기기 사본으로 할 일 이월을 계산하지 않게)
+  const [journalServerSeen, setJournalServerSeen] = useState(false);
+  const journalEntriesRef = useRef(journalEntries);
+  journalEntriesRef.current = journalEntries;
   // 수임 전 상담 일정(meta/consultations) — 업무일지 「오늘 일정·상담」 칸
   const [consultations, setConsultations] = useState({});
   // 내보내기 기록(meta/exports) — 마지막 백업 날짜 표시용
@@ -657,15 +681,35 @@ export default function App() {
     if (!casesSynced) throw new Error("서버 데이터를 받기 전에는 반영할 수 없습니다. 잠시 뒤 다시 시도해 주세요.");
     const ledgerState = claudeLedgerRef.current;
     if (!ledgerState?.serverSeen) throw new Error("반영 기록을 서버에서 아직 받지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
-    const plan = planBatch(batch, casesRef.current, selectedIds, { today: todayStr, ledger: ledgerState.data, seen });
-    const planned = plan.reduce((n, ch) => n + ch.itemIds.length, 0);
-    const summary = { cases: 0, items: 0, pendingItems: 0, failedCases: 0, failedItems: 0, skipped: selectedIds.length - planned };
+    const journalEntriesNow = journalEntriesRef.current;
+    const plan = planBatch(batch, casesRef.current, selectedIds, { today: todayStr, ledger: ledgerState.data, seen, journalEntries: journalEntriesNow });
+    const journalPlan = planJournalItems(batch, casesRef.current, selectedIds, {
+      today: todayStr, ledger: ledgerState.data, seen, journalEntries: journalEntriesNow, createdAt: new Date().toISOString(),
+    });
+    if (journalPlan.items.length && !journalServerSeen) throw new Error("업무일지를 서버에서 아직 받지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
+    const planned = plan.reduce((n, ch) => n + ch.itemIds.length, 0) + journalPlan.items.length;
+    const summary = {
+      cases: 0, items: 0, pendingItems: 0, failedCases: 0, failedItems: 0, skipped: selectedIds.length - planned,
+      journalItems: 0, journalPending: 0, journalFailed: 0,
+    };
+    const withTimeout = (work, ms = 25000) => Promise.race([work, new Promise((res) => setTimeout(() => res("pending"), ms))]);
+    // 위임 업무 → 오늘 업무일지 (사건 저장보다 먼저: 같은 반영 기록 문서를 쓰므로 차례로)
+    if (journalPlan.items.length) {
+      const n = journalPlan.items.length;
+      try {
+        const r = await withTimeout(commitClaudeJournal(user.uid, batch.batchId, journalPlan.dateKey, journalPlan.items, journalEntriesNow));
+        if (r === "pending") { summary.journalItems += n; summary.journalPending += n; }
+        else { summary.journalItems += r.added; summary.skipped += n - r.added; }
+      } catch (e) {
+        console.error("Claude 반영(위임 업무) 저장 실패", e);
+        summary.journalFailed += n;
+      }
+    }
     if (!plan.length) return summary;
 
     const SAVED = ["saved", "created", "unchanged"];
     const resultKey = (ch) => `${ch.caseId}|${batch.batchId}`;
     plan.forEach((ch) => claudeCommitResults.delete(resultKey(ch)));
-    const withTimeout = (work, ms = 25000) => Promise.race([work, new Promise((res) => setTimeout(() => res("pending"), ms))]);
     const settle = (p) => p.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
     // 사건마다 차례로 저장한다(사건 저장이 모두 같은 반영 기록 문서를 함께 쓰므로 동시에 보내면 서로 다툰다).
     // 연결이 느려 한 곳이 대기로 넘어가면 나머지는 대기열에 넣고 기다리지 않는다(대기열이 이어서 저장).
@@ -702,7 +746,7 @@ export default function App() {
       updateDoc(doc(db, "users", user.uid, "meta", "claudeInbox"), ...args).catch((e) => console.warn("Claude 반영 기록 정리 실패", e));
     }
     return summary;
-  }, [user, casesSynced, saveCase]);
+  }, [user, casesSynced, saveCase, journalServerSeen]);
 
   // 사건 화면 「연결 코드 복사」: Claude 사건 폴더 세션에 붙여넣을 한 줄 JSON. 클립보드가 막히면 직접 복사하게 보여 준다.
   const copyBindingCode = useCallback(async (c) => {
@@ -1025,8 +1069,12 @@ export default function App() {
 
   // 업무일지 구독 → 오늘 기준 미완료 오늘·내일 할 일
   useEffect(() => {
+    setJournalServerSeen(false);
     if (!user) { setJournalEntries({}); return undefined; }
-    return subscribeJournal(user.uid, (map) => setJournalEntries(map));
+    return subscribeJournal(user.uid, (map, meta) => {
+      setJournalEntries(map);
+      if (!meta?.fromCache) setJournalServerSeen(true);
+    });
   }, [user]);
   const journalTasks = useMemo(() => journalPendingTasks(journalEntries, journalTodayKey()),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1720,6 +1768,7 @@ export default function App() {
         <ClaudeInboxModal
           cases={cases}
           ledger={claudeLedger?.data || null}
+          journalEntries={journalEntries}
           ready={casesSynced && !!claudeLedger?.serverSeen}
           notReadyText={!casesSynced ? "서버 데이터를 확인하는 중이라 아직 반영할 수 없습니다." : "반영 기록을 서버에서 받는 중이라 아직 반영할 수 없습니다."}
           onApply={applyClaudeBatch}

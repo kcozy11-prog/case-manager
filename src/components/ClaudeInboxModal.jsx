@@ -12,6 +12,7 @@ const STATUS_STYLE = {
 };
 
 function caseHeading(group) {
+  if (group.journal) return { title: "업무일지 · 위임 업무", sub: `반영하면 오늘(${todayStr}) 업무일지 위임 업무에 들어갑니다` };
   const c = group.caseObj;
   if (!c) return { title: group.cmCaseId ? `앱에 없는 사건 (${group.cmCaseId})` : "사건 지정 없음", sub: "" };
   const sub = [c.client && `의뢰인 ${c.client}`, c.court && c.court !== "—" && c.court, c.caseNumber && c.caseNumber !== "—" && c.caseNumber]
@@ -21,7 +22,9 @@ function caseHeading(group) {
 
 function resultMessage(r) {
   if (!r) return null;
-  if (r.items === 0 && r.failedItems === 0) {
+  const journalItems = r.journalItems || 0;
+  const journalFailed = r.journalFailed || 0;
+  if (r.items === 0 && r.failedItems === 0 && journalItems === 0 && journalFailed === 0) {
     return { tone: "warn", text: `반영할 항목이 없었습니다${r.skipped ? `(고른 ${r.skipped}건은 그 사이 이미 반영되었거나 상태가 바뀌어 건너뜀. 다시 확인해 주세요)` : ""}.` };
   }
   const parts = [];
@@ -31,9 +34,15 @@ function resultMessage(r) {
       ? `이 중 ${r.pendingItems}건은 서버 연결이 느려 저장을 이어서 진행합니다(이 기기에 보관되어 연결되면 자동 저장)`
       : "서버 저장 확인");
   }
+  if (journalItems) {
+    parts.push(r.journalPending
+      ? `업무일지 위임 업무 ${journalItems}건은 서버 연결이 느려 저장 확인을 기다리는 중입니다`
+      : `오늘 업무일지 위임 업무에 ${journalItems}건을 넣었습니다`);
+  }
+  if (journalFailed) parts.push(`업무일지 위임 업무 ${journalFailed}건 저장 실패 — 새로고침 뒤 다시 확인해 주세요`);
   if (r.skipped) parts.push(`고른 항목 중 ${r.skipped}건은 상태가 바뀌어 건너뜀(다시 확인해 주세요)`);
   if (r.failedItems) parts.push(`${r.failedCases}곳 ${r.failedItems}건 저장 실패 — 새로고침 뒤 다시 확인해 주세요`);
-  return { tone: r.failedItems ? "err" : r.pendingItems || r.skipped ? "warn" : "ok", text: parts.join(". ") + "." };
+  return { tone: r.failedItems || journalFailed ? "err" : r.pendingItems || r.journalPending || r.skipped ? "warn" : "ok", text: parts.join(". ") + "." };
 }
 
 // ── Claude 반영 검토함 ────────────────────────────────────────────────────────
@@ -41,7 +50,7 @@ function resultMessage(r) {
 //  - ready=false(서버 판본·반영 기록을 아직 못 받음)이면 미리보기만 하고 반영은 막는다.
 //  - onApply(batch, itemIds, seen) → { cases, items, pendingItems, failedCases, failedItems, skipped }
 //    seen: 화면에서 본 판정 { 항목 id: status } — 그 사이 정상 → 경고로 바뀐 항목은 반영하지 않는다
-export default function ClaudeInboxModal({ cases, ledger, ready, notReadyText = "", onApply, onClose }) {
+export default function ClaudeInboxModal({ cases, ledger, journalEntries = null, ready, notReadyText = "", onApply, onClose }) {
   const [text, setText] = useState("");
   const [fileName, setFileName] = useState("");
   const [batch, setBatch] = useState(null);
@@ -54,8 +63,8 @@ export default function ClaudeInboxModal({ cases, ledger, ready, notReadyText = 
   const fileRef = useRef(null);
 
   const report = useMemo(
-    () => (batch ? validateBatch(batch, cases, ledger, { today: todayStr }) : null),
-    [batch, cases, ledger],
+    () => (batch ? validateBatch(batch, cases, ledger, { today: todayStr, journalEntries }) : null),
+    [batch, cases, ledger, journalEntries],
   );
   // 반영 뒤 「이미 반영됨」으로 바뀐 항목 등은 골라 둔 것에서 자동으로 빠진다
   const chosen = useMemo(
@@ -74,7 +83,7 @@ export default function ClaudeInboxModal({ cases, ledger, ready, notReadyText = 
       const b = parseBatch(raw);
       setBatch(b);
       setParseError("");
-      setSelected(new Set(defaultSelectedIds(validateBatch(b, cases, ledger, { today: todayStr }))));
+      setSelected(new Set(defaultSelectedIds(validateBatch(b, cases, ledger, { today: todayStr, journalEntries }))));
     } catch (e) {
       setBatch(null);
       setParseError(e.message || String(e));
@@ -135,7 +144,7 @@ export default function ClaudeInboxModal({ cases, ledger, ready, notReadyText = 
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between" style={{ background: "#1E293B" }}>
           <div>
             <div className="text-white font-semibold">Claude 반영</div>
-            <div className="text-slate-400 text-xs">Claude가 만든 반영 블록(cm-update-v1)을 확인하고, 고른 항목만 사건에 반영합니다.</div>
+            <div className="text-slate-400 text-xs">Claude가 만든 반영 블록(cm-update-v1)을 확인하고, 고른 항목만 사건에 반영합니다(위임 업무는 오늘 업무일지에).</div>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>
@@ -202,7 +211,7 @@ export default function ClaudeInboxModal({ cases, ledger, ready, notReadyText = 
                 return (
                   <div key={g.key} className="space-y-2">
                     <div className="flex items-baseline gap-2 flex-wrap border-b border-slate-100 pb-1">
-                      <span className={`text-sm font-bold ${g.caseObj ? "text-slate-800" : "text-red-600"}`}>{h.title}</span>
+                      <span className={`text-sm font-bold ${g.caseObj || g.journal ? "text-slate-800" : "text-red-600"}`}>{h.title}</span>
                       {h.closed && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 border border-slate-200">종결</span>}
                       {h.sub && <span className="text-[11px] text-slate-400">{h.sub}</span>}
                     </div>
