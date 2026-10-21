@@ -77,7 +77,7 @@ export default function UnmatchedCalendarEventsModal({ events, cases, onAddToCas
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between" style={{ background: "#1E293B" }}>
           <div>
             <div className="text-white font-semibold">⚖️ 수동 확인 필요한 LBOX 일정</div>
-            <div className="text-slate-400 text-xs">사건번호가 일치하는 사건이 없거나 일정에서 사건번호를 찾을 수 없을 때만 수동 확인합니다. 오늘 이후 일정만 가져옵니다. 사건번호 없는 「상담」 일정은 자동으로 상담 일정(업무일지)으로 갑니다.</div>
+            <div className="text-slate-400 text-xs">사건번호가 일치하는 사건이 없거나 일정에서 사건번호를 찾을 수 없을 때만 수동 확인합니다. 오늘 이후 일정만 가져옵니다. 사건번호 없는 「상담」·「미팅」 일정은 자동으로 상담 일정(업무일지)으로 갑니다.</div>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
         </div>

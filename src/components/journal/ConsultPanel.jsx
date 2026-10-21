@@ -6,7 +6,7 @@ import { useState, useEffect } from "react";
 //  - onCreateCase(consult): 수임하면 사건 등록 창을 연다(일정은 기일·진행경과로, 메모는 진행경과로 옮김)
 export default function ConsultPanel({ hearings = [], consults = [], onSaveMemo = null, onCreateCase = null }) {
   if (!hearings.length && !consults.length) {
-    return <div className="text-xs text-slate-300 px-1 py-1">이 날짜에 잡힌 기일이나 상담 일정이 없습니다. LBOX의 사건번호 없는 「상담」 일정은 동기화 때 여기로 옵니다.</div>;
+    return <div className="text-xs text-slate-300 px-1 py-1">이 날짜에 잡힌 기일이나 상담 일정이 없습니다. LBOX의 사건번호 없는 「상담」·「미팅」 일정은 동기화 때 여기로 옵니다.</div>;
   }
   return (
     <div className="space-y-1.5">

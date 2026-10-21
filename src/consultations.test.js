@@ -8,17 +8,18 @@ import {
 
 const lbox = (over) => ({ _src: 'LBOX', start: { dateTime: '2026-10-23T14:00:00+09:00' }, ...over });
 
-test('기본 상담 낱말은 「상담」 하나다(변호사 확인 뒤 확정)', () => {
-  assert.deepEqual(CONSULT_KEYWORDS, ['상담']);
+test('상담 낱말은 「상담」·「미팅」 두 개다(2026. 10. 21. 변호사 확정, 「식사」 등은 넣지 않음)', () => {
+  assert.deepEqual(CONSULT_KEYWORDS, ['상담', '미팅']);
   assert.equal(isConsultSummary('홍길동 상담'), true);
-  assert.equal(isConsultSummary('홍길동 미팅'), false);
-  assert.equal(isConsultSummary('홍길동 미팅', ['상담', '미팅']), true);
+  assert.equal(isConsultSummary('홍길동 미팅'), true);
+  assert.equal(isConsultSummary('홍길동 식사'), false);
+  assert.equal(isConsultSummary('홍길동 식사', ['식사']), true);
 });
 
 test('사건번호 없는 상담 일정은 수동 확인 목록 대신 상담 일정으로 돌려준다', () => {
   const events = [
     lbox({ id: 'ev-c1', summary: '홍길동 상담', location: '사무실' }),
-    lbox({ id: 'ev-m1', summary: '김영희 미팅' }),
+    lbox({ id: 'ev-m1', summary: '김영희 식사' }),
   ];
   const r = syncEventsWithCases(events, [], { today: '2026-10-21' });
   assert.deepEqual(r.consultEvents.map((c) => c.id), ['ev-c1']);
@@ -37,7 +38,7 @@ test('사건번호가 있는 일정은 제목에 상담이 있어도 상담 일�
 });
 
 test('「상담(사건 없음)으로 두기」로 고른 일정은 다음 동기화부터 상담 일정으로 간다', () => {
-  const events = [lbox({ id: 'ev-m1', summary: '김영희 미팅' })];
+  const events = [lbox({ id: 'ev-m1', summary: '김영희 식사' })];
   const r = syncEventsWithCases(events, [], { today: '2026-10-21', consultEventIds: new Set(['ev-m1']) });
   assert.deepEqual(r.consultEvents.map((c) => c.id), ['ev-m1']);
   assert.equal(r.unmatchedEvents.length, 0);
@@ -94,6 +95,7 @@ test('그 날짜 상담 일정은 시각 순(시각 없는 것은 뒤)', () => {
 
 test('사건 만들기: 제목은 상담 낱말을 걷고, 메모는 진행경과로, 앞날 상담은 기일로 연결한다', () => {
   assert.equal(caseTitleFromConsult('홍길동 상담'), '홍길동');
+  assert.equal(caseTitleFromConsult('홍길동 미팅'), '홍길동');
   assert.equal(caseTitleFromConsult('[상담]'), '[상담]');
   const baseCase = { id: 'cNew', title: '', hearings: [], timeline: [], memos: [] };
   let n = 0;

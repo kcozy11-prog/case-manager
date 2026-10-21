@@ -9,8 +9,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // 사건번호 없는 LBOX 일정 중 제목에 이 말이 있으면 상담 일정으로 본다.
-// [변호사 확인 대기] "상담"만 둘지, "미팅"·"식사" 등도 넣을지 정해지면 여기만 고친다.
-export const CONSULT_KEYWORDS = ["상담"];
+// 2026. 10. 21. 변호사 확정: 「상담」·「미팅」 두 낱말(「식사」 등은 넣지 않음).
+export const CONSULT_KEYWORDS = ["상담", "미팅"];
 
 const SCHEDULE_FIELDS = ["summary", "date", "time", "location", "start"];
 
@@ -72,7 +72,7 @@ export function consultsForDate(items = {}, dateKey) {
     .sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99") || String(a.summary).localeCompare(String(b.summary), "ko"));
 }
 
-// 「사건 만들기」 제목 후보: 상담 낱말과 괄호를 걷어 낸다("홍길동 상담" → "홍길동")
+// 「사건 만들기」 제목 후보: 상담 낱말과 괄호를 걷어 낸다("홍길동 상담" → "홍길동", "홍길동 미팅" → "홍길동")
 export function caseTitleFromConsult(summary, keywords = CONSULT_KEYWORDS) {
   let t = String(summary || "");
   for (const k of keywords) if (k) t = t.split(k).join(" ");
