@@ -50,14 +50,23 @@ export function isUnrecognizedBriefTodo(text = "") {
   return !!clean && hasBriefDocName(clean) && !DRAFT_VERB_RE.test(clean);
 }
 
+// 끝의 작성 계열 동사 하나(+ "하기"·"할 것"·"완료"·"중"·"필요", 마침표)
+const TRAILING_DRAFT_VERB_RE = /\s*(작성|초안|기안|수정|보완)(\s*(하기|할\s*것|완료|중|필요))?\s*[.。!]?\s*$/u;
+
 // "피고 답변서 반박 준비서면 작성" → "피고 답변서 반박 준비서면"
+// 끝의 작성 계열 동사 다섯 가지(작성, 초안, 기안, 수정, 보완)를 같은 방식으로 떼고, 이어져 있으면 모두 뗀다
+// ("고소장 초안" → "고소장", "의견서 초안 작성" → "의견서", "준비서면 수정 보완" → "준비서면").
+// 끝에서만 떼므로 제목 가운데 낱말은 그대로다("답변서 수정본 검토 의견서 작성" → "답변서 수정본 검토 의견서").
 export function briefTitleFromTodoText(text = "") {
   const clean = String(text || "").replace(/\s+/g, " ").trim();
   if (!clean) return "";
-  const stripped = clean
-    .replace(/\s*(초안\s*)?(작성|기안|수정|보완)(\s*(하기|할\s*것|완료|중|필요))?\s*[.。!]?\s*$/u, "")
-    .replace(/[\s,·\-–—:]+$/u, "")
-    .trim();
+  let stripped = clean;
+  for (;;) {
+    const next = stripped.replace(TRAILING_DRAFT_VERB_RE, "").replace(/[\s,·\-–—:]+$/u, "").trim();
+    if (!next) return clean; // 동사만 있는 문구는 그대로
+    if (next === stripped) break;
+    stripped = next;
+  }
   return stripped || clean;
 }
 
