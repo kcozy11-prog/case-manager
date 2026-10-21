@@ -143,3 +143,49 @@ test('the guarded diff has no effect on fields it does not name', () => {
   assert.equal(merged.status, '진행중');
   assert.deepEqual(diffCase(latest, merged).set, {});
 });
+
+test('a submission linked to a drafting todo is skipped whole when the todo was deleted, finished, moved or reworded', () => {
+  const tl = (suffix) => ({ id: `cl:${B}:i3:${suffix}`, date: '2026-10-16', content: suffix === 'tl' ? '답변서 제출' : '할 일 완료: 답변서 작성', claude: { batchId: B, itemId: 'i3', fp: 'aaaa0003' } });
+  const todo = { id: 41, text: '답변서 작성', details: '', done: false };
+  const set = { done: true, completedDate: '2026-10-16', completedTimelineId: `cl:${B}:i3:done`, briefId: `cl:${B}:i3` };
+  const brief = { id: `cl:${B}:i3`, title: '답변서', status: 'submitted', preparedDate: '2026-10-16', submittedDate: '2026-10-16', fromTodoId: 41, submitTimelineId: `cl:${B}:i3:tl`, claude: { batchId: B, itemId: 'i3', fp: 'aaaa0003' } };
+  const diff = () => ({
+    set: {},
+    arrays: {
+      todos: { upserts: [{ key: 'id:41', items: [{ ...todo, ...set }] }], removed: [] },
+      timeline: { upserts: [{ key: `id:cl:${B}:i3:done`, items: [tl('done')] }, { key: `id:cl:${B}:i3:tl`, items: [tl('tl')] }], removed: [] },
+      briefs: { upserts: [{ key: `id:cl:${B}:i3`, items: [brief] }], removed: [] },
+    },
+    claude: {
+      batchId: B,
+      items: [{
+        itemId: 'i3', fp: 'aaaa0003',
+        created: [{ field: 'timeline', key: `id:cl:${B}:i3:done` }, { field: 'timeline', key: `id:cl:${B}:i3:tl` }, { field: 'briefs', key: `id:cl:${B}:i3` }],
+        todoPatch: { key: 'id:41', set, prev: todo },
+      }],
+    },
+  });
+  const server = (todos, briefs = []) => serverCase({ todos, briefs });
+
+  const fresh = server([todo]);
+  const ok = resolveClaudeGuard(fresh, diff());
+  assert.deepEqual(ok.applied, ['i3']);
+  assert.deepEqual(applyCaseDiff(fresh, diff()).todos, [{ ...todo, ...set }]);
+
+  for (const [latest, reason] of [
+    [server([]), 'todo-missing'],
+    [server([{ ...todo, done: true }]), 'todo-done'],
+    [server([{ ...todo, briefId: 77 }], [{ id: 77, title: '답변서', status: 'pending' }]), 'todo-done'],
+    [server([todo], [{ id: 78, title: '답변서', status: 'pending', fromTodoId: 41 }]), 'todo-done'],
+    [server([{ ...todo, text: '답변서 작성(보충)' }]), 'todo-changed'],
+  ]) {
+    const r = resolveClaudeGuard(latest, diff());
+    assert.deepEqual(r.applied, [], reason);
+    assert.deepEqual(r.skipped, [{ itemId: 'i3', reason }], reason);
+    assert.deepEqual(applyCaseDiff(latest, diff()), latest, reason); // 서면, 진행경과, 할 일 모두 그대로
+    assert.deepEqual(claudeLedgerEntries(diff().claude, r.applied, r.skipped, 'c1'), {}, reason); // 반영 기록에도 적지 않음
+  }
+  // 반영 기록에 이미 있으면(사용자가 지운 서면) 할 일도 다시 완료하지 않는다
+  const again = resolveClaudeGuard(fresh, diff(), { skipItemIds: ['i3'] });
+  assert.deepEqual(applyCaseDiff(fresh, again.diff), fresh);
+});

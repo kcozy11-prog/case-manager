@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isBriefDraftingTodo, briefTitleFromTodoText, moveTodoToBrief } from './todoBrief.js';
+import { isBriefDraftingTodo, isUnrecognizedBriefTodo, briefTitleFromTodoText, moveTodoToBrief } from './todoBrief.js';
 import { markTodoPending, markBriefSubmitted } from './caseLink.js';
 
 test('isBriefDraftingTodo: 서면류 + 작성 계열 동사가 함께 있을 때만 참', () => {
@@ -95,4 +95,27 @@ test('markTodoPending: 되돌리면 아직 제출 전인 연결 서면만 제거
   const revertedAfterSubmit = markTodoPending(submitted, 1);
   assert.equal(revertedAfterSubmit.briefs.length, 1, '제출된 서면은 보존');
   assert.equal(revertedAfterSubmit.briefs[0].status, 'submitted');
+});
+
+test('isUnrecognizedBriefTodo: 서면 이름은 있으나 작성 계열 동사가 없는 문구만 참', () => {
+  assert.equal(isUnrecognizedBriefTodo('준비서면(3)'), true);
+  assert.equal(isUnrecognizedBriefTodo('원고 준비서면에 대한 반박서면'), true);
+  assert.equal(isUnrecognizedBriefTodo('답변서 제출'), true);
+  assert.equal(isUnrecognizedBriefTodo('피고 답변서 검토'), true); // 옮기지 않는 것이 맞는 할 일도 참(검토 창은 경고만 띄움)
+  assert.equal(isUnrecognizedBriefTodo('준비서면(3) 작성'), false);
+  assert.equal(isUnrecognizedBriefTodo('증거목록 정리'), false);
+  assert.equal(isUnrecognizedBriefTodo(''), false);
+  assert.equal(isUnrecognizedBriefTodo(undefined), false);
+});
+
+test('moveTodoToBrief: 고정 id(ids)를 주면 makeId 대신 그 id로 서면과 완료 진행경과를 만든다', () => {
+  const makeId = () => { throw new Error('makeId 를 부르면 안 됨'); };
+  const { caseObj, brief, created } = moveTodoToBrief(baseCase(), 1, '2026-09-30', makeId, { briefId: 'b-fixed', doneTimelineId: 'tl-fixed' });
+  assert.equal(created, true);
+  assert.equal(brief.id, 'b-fixed');
+  assert.equal(brief.fromTodoId, 1);
+  const todo = caseObj.todos.find((t) => t.id === 1);
+  assert.equal(todo.briefId, 'b-fixed');
+  assert.equal(todo.completedTimelineId, 'tl-fixed');
+  assert.deepEqual(caseObj.timeline.map((t) => t.id), ['tl-fixed']);
 });
