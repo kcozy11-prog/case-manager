@@ -5,23 +5,24 @@ import {
 import { mergeJournalEntries } from "../../journalMerge";
 import { saveJournalDraft, loadJournalDraft, clearJournalDraft, draftDiffersFromForm } from "../../journalDraft";
 import {
-  parseJsonArray, carryForwardTomorrowTasks, carryForwardPendingDocs,
+  parseJsonArray, carryForwardTasks,
   buildLearnedTopicGroups, searchLearnedItems, buildLearnedArchiveStats,
   buildLearnedTopicOptions,
-  diffResolvedItems, createTaskCompletion, createPendingDocCompletion, mergeCompletions, pruneCompletionsForActive,
+  diffResolvedItems, createTaskCompletion, mergeCompletions, pruneCompletionsForActive,
   carryForwardDelegatedTasks, createDelegatedCompletion, rescheduleDelegatedTask,
   dropResurrectedPendingDocs, dropResurrectedTodayTasks, dropResurrectedDelegatedTasks,
-  findStaleCarriedPendingDocs, findStaleCarriedTodayTasks, latestEntryDateBefore,
+  findStaleCarriedTodayTasks, latestEntryDateBefore,
 } from "../../journalLogic";
 import ChecklistEditor from "./ChecklistEditor";
-import CaseNoteEditor from "./CaseNoteEditor";
+import WorkLogEditor from "./WorkLogEditor";
+import LegacyFields, { legacyFieldCount } from "./LegacyFields";
 import JournalMigratePanel from "./JournalMigratePanel";
 import DelegatedPanel from "./DelegatedPanel";
 import ConsultPanel from "./ConsultPanel";
 import { consultsForDate } from "../../consultations";
-import { frequentAssignees } from "../../journalView";
-import { DEFAULT_TIMELINE_ACTIVITY_TYPE } from "../../timelineActivity";
-import { upsertTimelineEntry, upsertCaseMemo, upsertBrief, buildCallTimelineContent } from "../../caseLink";
+import { frequentAssignees, addDaysToKey } from "../../journalView";
+import { workTimelineEntry, workClientRequestMemo, countUnrecordedWork } from "../../journalWork";
+import { upsertTimelineEntry, upsertCaseMemo } from "../../caseLink";
 
 const DEFAULT_TOPICS = ["법리·판례", "실무 팁", "절차적 교훈", "문서작성", "증거/입증", "상담/수임", "커뮤니케이션", "기타"];
 
@@ -56,6 +57,8 @@ function entryToForm(entry, dateKey) {
     // 사건 연동 기록
     caseProgressItems: parseJsonArray(e.caseProgressItems),
     callLogItems: parseJsonArray(e.callLogItems),
+    // 오늘 한 일(오늘 업무·진행 기록·통화 메모·기타를 합친 목록)
+    workItems: parseJsonArray(e.workItems),
     // 통과 보존 필드
     submittedDocItems: e.submittedDocItems || "",
     pendingDocCompletions: e.pendingDocCompletions || "",
@@ -85,6 +88,7 @@ function formToEntry(form) {
     learned: (form.learnedItems || []).map((i) => `[${i.topic}] ${i.title} — ${i.content}`).join("\n"),
     caseProgressItems: JSON.stringify(form.caseProgressItems || []),
     callLogItems: JSON.stringify(form.callLogItems || []),
+    workItems: JSON.stringify(form.workItems || []),
     submittedDocItems: form.submittedDocItems || "",
     pendingDocCompletions: form.pendingDocCompletions || "",
     eventMemos: form.eventMemos || "",
@@ -94,6 +98,8 @@ function formToEntry(form) {
 function entryPreview(entry) {
   const parts = [];
   if (entry.todayWork) parts.push(entry.todayWork.replace(/\n/g, " "));
+  const work = parseJsonArray(entry.workItems);
+  if (work.length) parts.push(`한 일 ${work.length}`);
   const calls = parseJsonArray(entry.callLogItems);
   if (calls.length) parts.push(`통화 ${calls.length}`);
   const tasks = parseJsonArray(entry.todayTasks);
@@ -315,11 +321,11 @@ export default function JournalApp({
     // (저장된(빈) 일지에는 이월하지 않아, 사용자가 지운 항목이 되살아나지 않음)
     // 위임 업무는 완료/취소 전까지 회수 추적이 필요하므로 저장된 날짜에도 과거 미완료 항목을 병합한다.
     f.delegatedItems = carryForwardDelegatedTasks(entries, currentDate);
+    // 할 일은 직전 일지의 미완료 할 일과 예전 '내일 할 일'을 받는다. 제출 예정 서면 칸은 없앴으므로 이월하지 않는다
+    // (예전 일지의 서면 목록은 「예전 칸」에 그대로 보인다).
     if (!base) {
-      const carriedTasks = carryForwardTomorrowTasks(entries, currentDate);
-      const carriedDocs = carryForwardPendingDocs(entries, currentDate);
+      const carriedTasks = carryForwardTasks(entries, currentDate);
       if (carriedTasks.length) f.todayTasks = carriedTasks;
-      if (carriedDocs.length) f.pendingDocItems = carriedDocs;
     }
     // 이미 처리한(앞선 날짜에 완료 기록이 있는) 항목이 되살아나 저장돼 있으면 목록에서 거둔다
     const docs = dropResurrectedPendingDocs(entries, currentDate, f.pendingDocItems);
@@ -330,10 +336,9 @@ export default function JournalApp({
     f.delegatedItems = delegated.items;
     const cleanedCount = docs.dropped.length + tasks.dropped.length + delegated.dropped.length;
     setCleanedNotice(cleanedCount ? { date: currentDate, count: cleanedCount } : null);
-    const staleDocs = base ? findStaleCarriedPendingDocs(entries, currentDate, f.pendingDocItems) : [];
     const staleTasks = base ? findStaleCarriedTodayTasks(entries, currentDate, f.todayTasks) : [];
-    setStaleSuggestion(staleDocs.length || staleTasks.length
-      ? { date: currentDate, prevDate: latestEntryDateBefore(entries, currentDate), docs: staleDocs, tasks: staleTasks }
+    setStaleSuggestion(staleTasks.length
+      ? { date: currentDate, prevDate: latestEntryDateBefore(entries, currentDate), docs: [], tasks: staleTasks }
       : null);
     setForm(f);
     loadedDateRef.current = currentDate;
@@ -378,18 +383,6 @@ export default function JournalApp({
     setDirty(true);
   }, []);
 
-  // 제출 예정 서면 변경: 동일하게 체크·삭제 항목을 완료 기록(pendingDocCompletions)에 남긴다.
-  const handlePendingDocsChange = useCallback((v) => {
-    const now = new Date().toISOString();
-    setForm((prev) => {
-      const records = diffResolvedItems(prev.pendingDocItems, v)
-        .map((it) => createPendingDocCompletion(it, now, it.sourceDate || currentDate));
-      const merged = mergeCompletions(prev.pendingDocCompletions, records);
-      return { ...prev, pendingDocItems: v, pendingDocCompletions: pruneCompletionsForActive(merged, v) };
-    });
-    setDirty(true);
-  }, [currentDate]);
-
   // 위임 업무 변경: 체크·삭제된 항목을 완료 기록(delegatedCompletions)에 남겨
   // 다음 날 미확인 위임 업무로 되살아나지 않게 한다.
   const handleDelegatedChange = useCallback((v) => {
@@ -423,12 +416,10 @@ export default function JournalApp({
     const sug = staleSuggestion;
     if (!sug) return;
     const cur = formRef.current;
-    const docIds = new Set(sug.docs.map((i) => i.id));
     const taskIds = new Set(sug.tasks.map((i) => i.id));
-    if (docIds.size) handlePendingDocsChange((cur.pendingDocItems || []).filter((i) => !docIds.has(i.id)));
     if (taskIds.size) handleTodayTasksChange((cur.todayTasks || []).filter((i) => !taskIds.has(i.id)));
     setStaleSuggestion(null);
-  }, [staleSuggestion, handlePendingDocsChange, handleTodayTasksChange]);
+  }, [staleSuggestion, handleTodayTasksChange]);
 
   // 이 기기에서 저장할 때 쓸 판본 표시(_savedAt)를 만들어 기억해 둔다
   const nextOwnStamp = useCallback(() => {
@@ -553,57 +544,20 @@ export default function JournalApp({
       .catch((e) => console.warn("[journal] 사건 기록 후 저장 실패", e));
   }, [onUpdateCase, persist, reportSave]);
 
-  // ① 사건 진행 기록 → 진행경과(timeline)
-  const handleRecordProgress = useCallback(async (item, fieldName) => {
+  // 오늘 한 일 → 사건 진행경과(+ 의뢰인요청 체크 시 의뢰인요청 메모). 다시 누르면 같은 기록을 고친다.
+  const handleRecordWork = useCallback(async (item) => {
     const c = casesRef.current.find((x) => x.id === item.caseId);
     if (!c) throw new Error("선택한 사건을 찾을 수 없습니다.");
     const timelineId = item.timelineId || Date.now();
-    const updated = upsertTimelineEntry(c, {
-      id: timelineId,
-      date: item.date || currentDate,
-      content: item.content,
-      detail: item.detail || "",
-      activityType: item.activityType || DEFAULT_TIMELINE_ACTIVITY_TYPE,
-    });
-    await applyCaseRecord(fieldName, item.id, { timelineId, recordedAt: new Date().toISOString() }, updated, c);
-  }, [applyCaseRecord, currentDate]);
-
-  // ② 통화 상담 기록 → 진행경과(+ 체크 시 의뢰인요청 메모)
-  const handleRecordCall = useCallback(async (item, fieldName) => {
-    const c = casesRef.current.find((x) => x.id === item.caseId);
-    if (!c) throw new Error("선택한 사건을 찾을 수 없습니다.");
-    const timelineId = item.timelineId || Date.now();
-    const content = buildCallTimelineContent({ title: item.title, detail: item.detail });
-    let updated = upsertTimelineEntry(c, {
-      id: timelineId,
-      date: item.date || currentDate,
-      content,
-      activityType: "call",
-    });
+    let updated = upsertTimelineEntry(c, { id: timelineId, ...workTimelineEntry(item, currentDate) });
     const patch = { timelineId, recordedAt: new Date().toISOString() };
-    if (item.asClientRequest) {
+    const memo = workClientRequestMemo(item, currentDate);
+    if (memo) {
       const memoId = item.memoId || Date.now() + 1;
-      updated = upsertCaseMemo(updated, {
-        id: memoId, category: "의뢰인요청",
-        title: item.title || "통화/상담", content: item.detail || "", date: item.date || currentDate,
-      });
+      updated = upsertCaseMemo(updated, { id: memoId, ...memo });
       patch.memoId = memoId;
     }
-    await applyCaseRecord(fieldName, item.id, patch, updated, c);
-  }, [applyCaseRecord, currentDate]);
-
-  // ⑤ 제출 예정 서면 → 사건 제출대기서면(briefs)
-  const handleSendDoc = useCallback(async (item, fieldName) => {
-    const c = casesRef.current.find((x) => x.id === item.cmCaseId);
-    if (!c) throw new Error("선택한 사건을 찾을 수 없습니다.");
-    const briefId = item.cmBriefId || Date.now();
-    const updated = upsertBrief(c, {
-      id: briefId,
-      title: item.text,
-      preparedDate: item.dueDate || item.sourceDate || currentDate,
-      details: item.details || "",
-    });
-    await applyCaseRecord(fieldName, item.id, { cmBriefId: briefId, cmBriefSyncedAt: new Date().toISOString() }, updated, c);
+    await applyCaseRecord("workItems", item.id, patch, updated, c);
   }, [applyCaseRecord, currentDate]);
 
   const removeEntry = useCallback(async (k) => {
@@ -634,7 +588,7 @@ export default function JournalApp({
     return recentDates
       .map((k) => ({ k, e: entries[k] }))
       .filter(({ e }) => {
-        const hay = [e.todayWork, e.callNotes, e.writtenDocs, e.etc, e.learned,
+        const hay = [e.todayWork, e.callNotes, e.writtenDocs, e.etc, e.learned, e.workItems, e.caseProgressItems, e.callLogItems,
           e.todayTasks, e.tomorrowTasks, e.pendingDocs, e.pendingDocItems, e.delegated, e.delegatedItems]
           .filter(Boolean).join(" ").toLowerCase();
         return hay.includes(q);
@@ -659,18 +613,17 @@ export default function JournalApp({
 
   const dailyCheckItems = useMemo(() => {
     const items = [];
-    const pendingTodayTasks = (form.todayTasks || []).filter((item) => item && item.text && !item.done).length;
-    const pendingDocs = (form.pendingDocItems || []).filter((item) => item && item.text && !item.done).length;
-    const unrecordedProgress = (form.caseProgressItems || []).filter((item) => item && item.content && !item.recordedAt).length;
-    const unrecordedCalls = (form.callLogItems || []).filter((item) => item && (item.title || item.detail) && !item.recordedAt).length;
+    const dueTasks = (form.todayTasks || [])
+      .filter((item) => item && item.text && !item.done && (!item.dueDate || item.dueDate <= currentDate)).length;
+    const unrecordedWork = countUnrecordedWork(form.workItems);
     if (pendingDelegatedItems.length) items.push(`미확인 위임 업무 ${pendingDelegatedItems.length}건`);
-    if (pendingDocs) items.push(`제출 예정 서면 ${pendingDocs}건`);
-    if (pendingTodayTasks) items.push(`오늘 할 일 미완료 ${pendingTodayTasks}건`);
-    if (unrecordedProgress) items.push(`사건에 미반영된 진행 기록 ${unrecordedProgress}건`);
-    if (unrecordedCalls) items.push(`사건에 미반영된 통화·상담 기록 ${unrecordedCalls}건`);
-    if (!(form.tomorrowTasks || []).some((item) => item && item.text && !item.done)) items.push("내일 할 일이 비어 있음");
+    if (dueTasks) items.push(`오늘까지 할 일(날짜 없는 것 포함) 미완료 ${dueTasks}건`);
+    if (unrecordedWork) items.push(`사건을 골랐지만 사건에 기록하지 않은 오늘 한 일 ${unrecordedWork}건`);
     return items;
-  }, [form, pendingDelegatedItems]);
+  }, [form, pendingDelegatedItems, currentDate]);
+
+  const openTaskCount = (form.todayTasks || []).filter((i) => i && i.text && !i.done).length;
+  const legacyCount = useMemo(() => legacyFieldCount(form), [form]);
 
   const runDailyCloseCheck = useCallback(() => {
     if (!dailyCheckItems.length) {
@@ -750,7 +703,7 @@ export default function JournalApp({
                 <div className="text-amber-800 mb-1.5">이미 처리한 항목이 예전 이월 방식 때문에 되살아난 것일 수 있습니다. 확인 후 빼면 완료한 것으로 기록되어 다시 나오지 않습니다.</div>
                 <ul className="list-disc pl-5 space-y-0.5 mb-2">
                   {staleSuggestion.docs.map((i) => <li key={`d-${i.id}`}>제출 예정 서면: {i.text}{i.dueDate ? ` (~${i.dueDate})` : ""} <span className="text-amber-600">· {i.sourceDate} 기록</span></li>)}
-                  {staleSuggestion.tasks.map((i) => <li key={`t-${i.id}`}>오늘 할 일: {i.text} <span className="text-amber-600">· {i.sourceDate} 기록</span></li>)}
+                  {staleSuggestion.tasks.map((i) => <li key={`t-${i.id}`}>할 일: {i.text} <span className="text-amber-600">· {i.sourceDate} 기록</span></li>)}
                 </ul>
                 <div className="flex gap-2 flex-wrap">
                   <button onClick={removeStaleItems} className="px-2 py-1 rounded border border-amber-300 bg-white hover:bg-amber-100">이 {staleSuggestion.docs.length + staleSuggestion.tasks.length}건 목록에서 빼기(처리한 것으로 기록)</button>
@@ -812,69 +765,33 @@ export default function JournalApp({
                 onSaveMemo={onSaveConsultMemo} onCreateCase={onCreateCaseFromConsult} />
             </Section>
 
-            <Section key={`work-${currentDate}`} title="오늘 업무" badge={form.todayWork.trim() ? "작성됨" : null}
-              defaultOpen={!!form.todayWork.trim()} hint="자유 메모">
-              <textarea value={form.todayWork} onChange={(e) => update({ todayWork: e.target.value })}
-                className="input w-full min-h-[120px] text-sm leading-relaxed"
-                placeholder={"[사건별 진행]\n- 2024가합1234 / 준비서면 초안\n[회의·상담]\n- 14:00 의뢰인 미팅"} />
-            </Section>
-
-            <Section key={`progress-${currentDate}`} title="사건 진행 기록" count={(form.caseProgressItems || []).length}
-              hint="'사건에 기록' → 진행경과">
-              <CaseNoteEditor variant="progress" items={form.caseProgressItems} cases={cases}
-                field="caseProgressItems" defaultDate={currentDate}
-                onRecord={onUpdateCase ? handleRecordProgress : null}
-                onChange={(v) => update({ caseProgressItems: v })}
-                placeholder="오늘 처리한 사건 진행 내용" />
-            </Section>
-
-            <Section key={`today-${currentDate}`} title="오늘 할 일" count={(form.todayTasks || []).filter((i) => i && !i.done).length}
-              defaultOpen={(form.todayTasks || []).length > 0} hint="체크하면 이월 안 됨">
+            <Section key={`tasks-${currentDate}`} title="할 일" count={openTaskCount} defaultOpen
+              hint="날짜를 달면 그날까지 매일 따라옴 · 체크하면 끝">
               <ChecklistEditor items={form.todayTasks} cases={cases} showCase showDetails
                 field="todayTasks" onPushItem={onPushTask ? handlePushItem : null}
-                onChange={handleTodayTasksChange} placeholder="오늘 할 일 입력 후 Enter" />
+                today={currentDate}
+                quickDates={[{ label: "오늘", value: currentDate }, { label: "내일", value: addDaysToKey(currentDate, 1) }]}
+                onChange={handleTodayTasksChange} placeholder="할 일 입력 후 Enter (사건 없이도 됨)" emptyHint="남은 할 일이 없습니다." />
             </Section>
 
-            <Section key={`tomorrow-${currentDate}`} title="내일 할 일" count={(form.tomorrowTasks || []).filter((i) => i && !i.done).length}
-              defaultOpen={(form.tomorrowTasks || []).length > 0} hint="남으면 다음 날로 이월">
-              <ChecklistEditor items={form.tomorrowTasks} cases={cases} showCase showDetails
-                field="tomorrowTasks" onPushItem={onPushTask ? handlePushItem : null}
-                onChange={(v) => update({ tomorrowTasks: v })} placeholder="내일 할 일 입력 후 Enter" />
+            <Section key={`work-${currentDate}`} title="오늘 한 일" count={(form.workItems || []).length} defaultOpen
+              hint="사건을 고른 것만 '사건에 기록' → 진행경과">
+              <WorkLogEditor items={form.workItems} cases={cases} defaultDate={currentDate}
+                onRecord={onUpdateCase ? handleRecordWork : null}
+                onChange={(v) => update({ workItems: v })} />
             </Section>
 
-            <Section key={`docs-${currentDate}`} title="제출 예정 서면" count={(form.pendingDocItems || []).filter((i) => i && !i.done).length}
-              defaultOpen={(form.pendingDocItems || []).length > 0} hint="📄 사건 제출대기 서면으로 보내기">
-              <ChecklistEditor items={form.pendingDocItems} cases={cases} showCase showDetails
-                showAddDetails addDetailsPlaceholder="상세 메모(쟁점, 보완 자료 등)"
-                field="pendingDocItems" onPushItem={onPushTask ? handlePushItem : null}
-                onSendToCase={onUpdateCase ? handleSendDoc : null}
-                onChange={handlePendingDocsChange} placeholder="제출 예정 서면 입력 후 Enter" />
-            </Section>
-
-            <Section key={`call-${currentDate}`} title="통화·상담 메모" count={(form.callLogItems || []).length}
-              defaultOpen={(form.callLogItems || []).length > 0 || !!form.callNotes} hint="'사건에 기록' → 진행경과">
-              <CaseNoteEditor variant="call" items={form.callLogItems} cases={cases}
-                field="callLogItems" defaultDate={currentDate}
-                onRecord={onUpdateCase ? handleRecordCall : null}
-                onChange={(v) => update({ callLogItems: v })} />
-              {form.callNotes && (
-                <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2">
-                  <div className="text-[11px] text-slate-400 mb-1">예전 자유 입력 통화·상담 메모</div>
-                  <textarea value={form.callNotes} onChange={(e) => update({ callNotes: e.target.value })}
-                    className="input w-full min-h-[70px] text-sm" placeholder={"[상대방] [시각] [내용] [후속조치]"} />
-                </div>
-              )}
-            </Section>
-
-            <Section key={`learned-${currentDate}`} title="배운 점" count={(form.learnedItems || []).length} hint="주제별로 모아 복기">
+            <Section key={`learned-${currentDate}`} title="배운 점" count={(form.learnedItems || []).length} defaultOpen={false}
+              hint="주제별로 모아 복기">
               <LearnedEditor items={form.learnedItems} topics={topicOptions}
                 onChange={(v) => update({ learnedItems: v })} />
             </Section>
 
-            <Section key={`etc-${currentDate}`} title="기타" badge={form.etc.trim() ? "작성됨" : null} defaultOpen={!!form.etc.trim()}>
-              <textarea value={form.etc} onChange={(e) => update({ etc: e.target.value })}
-                className="input w-full min-h-[60px] text-sm" placeholder="기타 메모" />
-            </Section>
+            {legacyCount > 0 && (
+              <Section key={`legacy-${currentDate}`} title="예전 칸" count={legacyCount} defaultOpen={false} hint="읽기 전용">
+                <LegacyFields form={form} />
+              </Section>
+            )}
 
             <div className="flex justify-between items-center mt-6">
               <button onClick={() => removeEntry(currentDate)}

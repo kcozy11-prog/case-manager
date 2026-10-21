@@ -24,6 +24,8 @@ export default function ChecklistEditor({
   allowDueDateEdit = false,
   onRescheduleItem = null,
   emptyHint = "항목이 없습니다.",
+  today = "", // 주면 기한이 지난 항목은 빨강, 오늘은 주황으로
+  quickDates = [], // [{ label, value }] 입력칸 옆 날짜 빠른 선택(예: 오늘·내일)
 }) {
   const [text, setText] = useState("");
   const [due, setDue] = useState("");
@@ -128,7 +130,10 @@ export default function ChecklistEditor({
                   {it.sourceDate && <span className="ml-1.5 text-[11px] text-amber-500">↪{it.sourceDate.slice(5)}</span>}
                 </span>
                 {it.dueDate && (
-                  <span className="text-[11px] text-slate-400 font-mono flex-shrink-0">{it.dueDate.slice(5)}</span>
+                  <span className={`text-[11px] font-mono flex-shrink-0 ${
+                    today && !it.done && it.dueDate < today ? "text-red-500"
+                    : today && !it.done && it.dueDate === today ? "text-amber-600"
+                    : "text-slate-400"}`}>{it.dueDate.slice(5)}</span>
                 )}
                 {showDate && allowDueDateEdit && (
                   <button
@@ -296,6 +301,12 @@ export default function ChecklistEditor({
               className="input text-xs flex-[0_1_130px] min-w-[112px] font-mono"
             />
           )}
+          {showDate && quickDates.map((q) => (
+            <button key={q.label} type="button" onClick={() => setDue(due === q.value ? "" : q.value)}
+              className={`text-[11px] px-2 rounded border ${due === q.value ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-slate-500 border-slate-200 hover:border-indigo-300"}`}>
+              {q.label}
+            </button>
+          ))}
           <button
             onClick={add}
             className="btn-ghost text-xs whitespace-nowrap px-3">+ 추가</button>

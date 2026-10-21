@@ -17,7 +17,8 @@ test('오늘 일지가 있으면 그 일지의 미완료 오늘 할 일·내일 
   assert.equal(tasks[1].cmCaseId, 'c1');
 });
 
-test('오늘 일지가 없으면 직전 일지의 내일 할 일이 오늘 할 일로 이월된 것을 센다(업무일지 화면과 같은 기준)', () => {
+// 할 일 칸을 하나로 합친 뒤(3단계): 직전 일지의 미완료 할 일도 이월된다(예전에는 내일 할 일만 이월).
+test('오늘 일지가 없으면 직전 일지의 미완료 할 일과 내일 할 일이 이월된 것을 센다(업무일지 화면과 같은 기준)', () => {
   const entries = {
     '2026-10-13': { tomorrowTasks: J([{ id: 'x', text: '옛 일지 할 일' }]) },
     '2026-10-14': {
@@ -25,7 +26,7 @@ test('오늘 일지가 없으면 직전 일지의 내일 할 일이 오늘 할 �
       tomorrowTasks: J([{ id: 'z', text: '오늘로 이월될 일' }, { id: 'w', text: '완료한 내일 일', done: true }]),
     },
   };
-  assert.deepEqual(journalPendingTasks(entries, '2026-10-15').map((t) => [t.text, t.journalList]), [['오늘로 이월될 일', 'today']]);
+  assert.deepEqual(journalPendingTasks(entries, '2026-10-15').map((t) => [t.text, t.journalList]), [['어제 오늘 할 일', 'today'], ['오늘로 이월될 일', 'today']]);
   assert.deepEqual(journalPendingTasks({}, '2026-10-15'), []);
 });
 
@@ -50,7 +51,7 @@ test('사건 화면 미완료 할 일에 업무일지 할 일이 함께 들어�
   assert.deepEqual(list.map((t) => t.text), ['일지 할 일', '사건 할 일', '사건 연결 일지 할 일']);
   assert.equal(list[0].overdue, true);
   assert.equal(list[0].caseTitle, ''); // 사건이 없는 일지 할 일은 표시(sourceLabel)만 단다
-  assert.equal(list[0].sourceLabel, '업무일지 · 오늘 할 일');
+  assert.equal(list[0].sourceLabel, '업무일지 · 할 일');
   assert.equal(list[2].caseTitle, '강남연립 손해배상');
   assert.equal(list[2].journal, true);
   // 업무일지 할 일을 넘기지 않으면 예전과 같다

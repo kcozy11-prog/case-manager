@@ -209,6 +209,40 @@ export function carryForwardTomorrowTasks(entries = {}, targetDate) {
   return sortChecklistByDueDate(current);
 }
 
+// 할 일 이월(오늘 할 일·내일 할 일을 「할 일」 하나로 합친 뒤): 직전 일지에서
+//  ① 미완료 할 일(todayTasks) — 날짜를 단 할 일이 그날까지 따라오도록 체크·삭제 전까지 이월한다.
+//     완료 기록은 id 로만 본다(같은 문구를 다시 적는 반복 업무가 예전 완료 기록에 막히지 않게). id 없는 옛 항목만 문구로 본다.
+//  ② 예전 「내일 할 일」(tomorrowTasks) — carryForwardTomorrowTasks 와 같은 규칙(완료 기록을 id·문구로 본다)
+// 그날 일지에 이미 같은 id·문구가 있으면 받지 않는다. 직전 일지 하나에서만 받는 것은 예전과 같다.
+export function carryForwardTasks(entries = {}, targetDate) {
+  const completedKeys = collectTaskCompletionKeys(entries, targetDate);
+  const current = parseJsonArray(entries[targetDate]?.todayTasks).map((item) => normalizeTaskItem(item, 'today')).filter(Boolean);
+  const existingIds = new Set(current.map((item) => item.id));
+  const existingTexts = new Set(current.map((item) => item.text));
+  const latest = latestEntryDateBefore(entries, targetDate);
+  if (!latest) return sortChecklistByDueDate(current);
+
+  const take = (item) => {
+    existingIds.add(item.id);
+    existingTexts.add(item.text);
+    current.push({ ...item, sourceDate: item.sourceDate || latest, done: false });
+  };
+  parseJsonArray(entries[latest]?.todayTasks).forEach((raw) => {
+    const item = normalizeTaskItem(raw, 'today');
+    if (!item || item.done || existingIds.has(item.id) || existingTexts.has(item.text)) return;
+    const key = raw && raw.id ? `id:${raw.id}` : `text:${item.text}`;
+    if (completedKeys.has(key)) return;
+    take(item);
+  });
+  parseJsonArray(entries[latest]?.tomorrowTasks).forEach((raw) => {
+    const item = normalizeTaskItem(raw, 'tomorrow');
+    if (!item || item.done || existingIds.has(item.id) || existingTexts.has(item.text)) return;
+    if (taskCompletionKeys(item).some((key) => completedKeys.has(key))) return;
+    take(item);
+  });
+  return sortChecklistByDueDate(current);
+}
+
 // 체크리스트 변경(prev→next)에서 '완료(done) 처리됐거나 삭제된' 항목을 골라낸다.
 // (이월된 항목을 나중 날짜에서 체크/삭제했음을 감지 → 완료 기록 생성용)
 export function diffResolvedItems(prevItems = [], nextItems = []) {
@@ -579,10 +613,18 @@ export function findStaleCarriedPendingDocs(entries = {}, targetDate, items = []
     && item.sourceDate < prev && !hasPendingDocIdentity(prevKeys, item, item.sourceDate));
 }
 
+// 할 일은 이제 미완료면 매일 이월되므로(carryForwardTasks), 직전 일지에 같은 항목(id 또는 문구)이 있으면 정상 이월로 본다.
 export function findStaleCarriedTodayTasks(entries = {}, targetDate, items = []) {
   const prev = latestEntryDateBefore(entries, targetDate);
   if (!prev) return [];
-  return (Array.isArray(items) ? items : []).filter((item) => item && !item.done && item.sourceDate && item.sourceDate < prev);
+  const prevIds = new Set();
+  const prevTexts = new Set();
+  [...parseJsonArray(entries[prev]?.todayTasks), ...parseJsonArray(entries[prev]?.tomorrowTasks)].forEach((it) => {
+    if (it && it.id) prevIds.add(it.id);
+    if (it && it.text) prevTexts.add(String(it.text).trim());
+  });
+  return (Array.isArray(items) ? items : []).filter((item) => item && !item.done && item.sourceDate && item.sourceDate < prev
+    && !(item.id && prevIds.has(item.id)) && !prevTexts.has(String(item.text || '').trim()));
 }
 
 export function createDelegatedCompletion(item, completedAt = new Date().toISOString(), fallbackSourceDate = '') {
