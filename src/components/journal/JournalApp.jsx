@@ -17,6 +17,8 @@ import ChecklistEditor from "./ChecklistEditor";
 import CaseNoteEditor from "./CaseNoteEditor";
 import JournalMigratePanel from "./JournalMigratePanel";
 import DelegatedPanel from "./DelegatedPanel";
+import ConsultPanel from "./ConsultPanel";
+import { consultsForDate } from "../../consultations";
 import { frequentAssignees } from "../../journalView";
 import { DEFAULT_TIMELINE_ACTIVITY_TYPE } from "../../timelineActivity";
 import { upsertTimelineEntry, upsertCaseMemo, upsertBrief, buildCallTimelineContent } from "../../caseLink";
@@ -177,7 +179,10 @@ function JournalConflictDialog({ conflicts, onResolve, onCancel }) {
   );
 }
 
-export default function JournalApp({ user, cases = [], onPushTask = null, onUpdateCase = null, onDirtyChange = null }) {
+export default function JournalApp({
+  user, cases = [], onPushTask = null, onUpdateCase = null, onDirtyChange = null,
+  consultations = {}, onSaveConsultMemo = null, onCreateCaseFromConsult = null,
+}) {
   const [entries, setEntries] = useState({});
   const [view, setView] = useState("write"); // write | list | search | learned | migrate
   const [currentDate, setCurrentDate] = useState(todayKey());
@@ -642,6 +647,16 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
 
   const assigneeOptions = useMemo(() => frequentAssignees(entries), [entries]);
 
+  // 「오늘 일정·상담」: 그 날짜의 사건 기일(보기만) + 수임 전 상담 일정
+  const dayConsults = useMemo(() => consultsForDate(consultations, currentDate), [consultations, currentDate]);
+  const dayHearings = useMemo(() => {
+    const out = [];
+    (cases || []).forEach((c) => (c?.hearings || []).forEach((h, i) => {
+      if (h && h.date === currentDate) out.push({ key: `${c.id}-${h.id ?? i}`, caseTitle: c.title || "", time: h.time || "", type: h.type || "기일", result: h.result || "" });
+    }));
+    return out.sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
+  }, [cases, currentDate]);
+
   const dailyCheckItems = useMemo(() => {
     const items = [];
     const pendingTodayTasks = (form.todayTasks || []).filter((item) => item && item.text && !item.done).length;
@@ -790,6 +805,12 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
               assignees={assigneeOptions}
               onChange={handleDelegatedChange} onReschedule={handleDelegatedReschedule}
               onPushItem={onPushTask ? handlePushItem : null} field="delegatedItems" />
+
+            <Section key={`schedule-${currentDate}`} title="오늘 일정·상담" count={dayHearings.length + dayConsults.length}
+              hint="기일은 보기만 · 상담 메모는 「메모 저장」으로 바로 저장">
+              <ConsultPanel hearings={dayHearings} consults={dayConsults}
+                onSaveMemo={onSaveConsultMemo} onCreateCase={onCreateCaseFromConsult} />
+            </Section>
 
             <Section key={`work-${currentDate}`} title="오늘 업무" badge={form.todayWork.trim() ? "작성됨" : null}
               defaultOpen={!!form.todayWork.trim()} hint="자유 메모">
