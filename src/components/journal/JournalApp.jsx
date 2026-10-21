@@ -16,6 +16,8 @@ import {
 import ChecklistEditor from "./ChecklistEditor";
 import CaseNoteEditor from "./CaseNoteEditor";
 import JournalMigratePanel from "./JournalMigratePanel";
+import DelegatedPanel from "./DelegatedPanel";
+import { frequentAssignees } from "../../journalView";
 import { DEFAULT_TIMELINE_ACTIVITY_TYPE } from "../../timelineActivity";
 import { upsertTimelineEntry, upsertCaseMemo, upsertBrief, buildCallTimelineContent } from "../../caseLink";
 
@@ -104,26 +106,24 @@ function entryPreview(entry) {
   return parts.join(" · ").slice(0, 60) || "(빈 일지)";
 }
 
-const SectionLabel = ({ children, hint }) => (
-  <div className="flex items-baseline gap-2 mb-1.5 mt-4">
-    <h3 className="text-sm font-semibold text-slate-700">{children}</h3>
-    {hint && <span className="text-xs text-slate-400">{hint}</span>}
-  </div>
-);
-
-function daysBetweenDateKeys(startDate, endDate) {
-  if (!startDate || !endDate) return null;
-  const start = Date.parse(`${startDate}T00:00:00+09:00`);
-  const end = Date.parse(`${endDate}T00:00:00+09:00`);
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  return Math.max(0, Math.floor((end - start) / (24 * 60 * 60 * 1000)));
-}
-
-function delegatedBadge(item, currentDate) {
-  if (item?.dueDate && item.dueDate < currentDate) return { text: "기한초과", tone: "red" };
-  const days = daysBetweenDateKeys(item?.sourceDate, currentDate);
-  if (days && days > 0) return { text: `D+${days}`, tone: days >= 3 ? "amber" : "slate" };
-  return { text: "오늘 위임", tone: "slate" };
+// 접을 수 있는 칸: 비어 있으면 접어 두고 건수 배지만 보인다(누르면 펼침).
+// 날짜를 바꾸면 펼침 상태가 처음으로 돌아가도록 부르는 쪽에서 key 에 날짜를 넣는다.
+function Section({ title, hint, count = 0, badge = null, defaultOpen = null, children }) {
+  const [manual, setManual] = useState(null);
+  const open = manual ?? (defaultOpen ?? count > 0);
+  const label = badge ?? (count > 0 ? `${count}` : "");
+  return (
+    <div className="mt-3">
+      <button type="button" onClick={() => setManual(!open)}
+        className="w-full flex items-center gap-2 py-1 text-left group">
+        <span className="text-[10px] text-slate-400 w-3">{open ? "▾" : "▸"}</span>
+        <h3 className="text-sm font-semibold text-slate-700 group-hover:text-slate-900">{title}</h3>
+        {label && <span className="text-[11px] text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-1.5 leading-4">{label}</span>}
+        {open && hint && <span className="text-xs text-slate-400 truncate">{hint}</span>}
+      </button>
+      {open && <div className="mt-1 pl-5">{children}</div>}
+    </div>
+  );
 }
 
 function fmtStamp(iso) {
@@ -425,17 +425,6 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     setStaleSuggestion(null);
   }, [staleSuggestion, handlePendingDocsChange, handleTodayTasksChange]);
 
-  const markDelegatedDone = useCallback((id) => {
-    const cur = formRef.current;
-    handleDelegatedChange((cur.delegatedItems || []).map((item) =>
-      item.id === id ? { ...item, done: true } : item));
-  }, [handleDelegatedChange]);
-
-  const cancelDelegated = useCallback((id) => {
-    const cur = formRef.current;
-    handleDelegatedChange((cur.delegatedItems || []).filter((item) => item.id !== id));
-  }, [handleDelegatedChange]);
-
   // 이 기기에서 저장할 때 쓸 판본 표시(_savedAt)를 만들어 기억해 둔다
   const nextOwnStamp = useCallback(() => {
     const stamp = new Date().toISOString();
@@ -651,6 +640,8 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
     (form.delegatedItems || []).filter((item) => item && item.text && !item.done)
   ), [form.delegatedItems]);
 
+  const assigneeOptions = useMemo(() => frequentAssignees(entries), [entries]);
+
   const dailyCheckItems = useMemo(() => {
     const items = [];
     const pendingTodayTasks = (form.todayTasks || []).filter((item) => item && item.text && !item.done).length;
@@ -693,7 +684,7 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
           {navBtn("list", "📋", "일지 목록")}
           {navBtn("search", "🔍", "전체 검색")}
           {navBtn("learned", "💡", "배운 점 모아보기")}
-          {navBtn("migrate", "📦", "데이터 가져오기")}
+          {/* 「데이터 가져오기」(옛 일지 앱 이전)는 끝난 일이라 메뉴에서 숨긴다 */}
         </div>
         <div className="px-3 pt-2 pb-1 text-[11px] font-medium text-slate-400 uppercase tracking-wider">최근 일지</div>
         <div className="flex-1 overflow-y-auto px-2 pb-3">
@@ -793,124 +784,76 @@ export default function JournalApp({ user, cases = [], onPushTask = null, onUpda
               </div>
             </div>
 
-            {/* 출퇴근 시간 */}
-            <div className="flex gap-3 mb-2">
-              <label className="text-xs text-slate-500 flex items-center gap-2">
-                출근
-                <input type="time" value={form.arrivalTime}
-                  onChange={(e) => update({ arrivalTime: e.target.value })}
-                  className="input text-xs w-28" />
-              </label>
-              <label className="text-xs text-slate-500 flex items-center gap-2">
-                퇴근
-                <input type="time" value={form.leaveTime}
-                  onChange={(e) => update({ leaveTime: e.target.value })}
-                  className="input text-xs w-28" />
-              </label>
-            </div>
+            {/* 출퇴근 시간은 쓰지 않아 숨긴다(저장된 값은 그대로 둔다) */}
 
-            {pendingDelegatedItems.length > 0 && (
-              <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50/80 p-3 shadow-sm">
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <div>
-                    <div className="text-sm font-semibold text-amber-900">미확인 위임 업무</div>
-                    <div className="text-xs text-amber-700 mt-0.5">완료·취소 처리 전까지 과거 일지에서 자동으로 따라옵니다.</div>
-                  </div>
-                  <span className="text-xs font-semibold text-amber-800 bg-white/70 border border-amber-200 rounded-full px-2 py-0.5">
-                    {pendingDelegatedItems.length}건
-                  </span>
+            <DelegatedPanel items={form.delegatedItems} cases={cases} currentDate={currentDate}
+              assignees={assigneeOptions}
+              onChange={handleDelegatedChange} onReschedule={handleDelegatedReschedule}
+              onPushItem={onPushTask ? handlePushItem : null} field="delegatedItems" />
+
+            <Section key={`work-${currentDate}`} title="오늘 업무" badge={form.todayWork.trim() ? "작성됨" : null}
+              defaultOpen={!!form.todayWork.trim()} hint="자유 메모">
+              <textarea value={form.todayWork} onChange={(e) => update({ todayWork: e.target.value })}
+                className="input w-full min-h-[120px] text-sm leading-relaxed"
+                placeholder={"[사건별 진행]\n- 2024가합1234 / 준비서면 초안\n[회의·상담]\n- 14:00 의뢰인 미팅"} />
+            </Section>
+
+            <Section key={`progress-${currentDate}`} title="사건 진행 기록" count={(form.caseProgressItems || []).length}
+              hint="'사건에 기록' → 진행경과">
+              <CaseNoteEditor variant="progress" items={form.caseProgressItems} cases={cases}
+                field="caseProgressItems" defaultDate={currentDate}
+                onRecord={onUpdateCase ? handleRecordProgress : null}
+                onChange={(v) => update({ caseProgressItems: v })}
+                placeholder="오늘 처리한 사건 진행 내용" />
+            </Section>
+
+            <Section key={`today-${currentDate}`} title="오늘 할 일" count={(form.todayTasks || []).filter((i) => i && !i.done).length}
+              defaultOpen={(form.todayTasks || []).length > 0} hint="체크하면 이월 안 됨">
+              <ChecklistEditor items={form.todayTasks} cases={cases} showCase showDetails
+                field="todayTasks" onPushItem={onPushTask ? handlePushItem : null}
+                onChange={handleTodayTasksChange} placeholder="오늘 할 일 입력 후 Enter" />
+            </Section>
+
+            <Section key={`tomorrow-${currentDate}`} title="내일 할 일" count={(form.tomorrowTasks || []).filter((i) => i && !i.done).length}
+              defaultOpen={(form.tomorrowTasks || []).length > 0} hint="남으면 다음 날로 이월">
+              <ChecklistEditor items={form.tomorrowTasks} cases={cases} showCase showDetails
+                field="tomorrowTasks" onPushItem={onPushTask ? handlePushItem : null}
+                onChange={(v) => update({ tomorrowTasks: v })} placeholder="내일 할 일 입력 후 Enter" />
+            </Section>
+
+            <Section key={`docs-${currentDate}`} title="제출 예정 서면" count={(form.pendingDocItems || []).filter((i) => i && !i.done).length}
+              defaultOpen={(form.pendingDocItems || []).length > 0} hint="📄 사건 제출대기 서면으로 보내기">
+              <ChecklistEditor items={form.pendingDocItems} cases={cases} showCase showDetails
+                showAddDetails addDetailsPlaceholder="상세 메모(쟁점, 보완 자료 등)"
+                field="pendingDocItems" onPushItem={onPushTask ? handlePushItem : null}
+                onSendToCase={onUpdateCase ? handleSendDoc : null}
+                onChange={handlePendingDocsChange} placeholder="제출 예정 서면 입력 후 Enter" />
+            </Section>
+
+            <Section key={`call-${currentDate}`} title="통화·상담 메모" count={(form.callLogItems || []).length}
+              defaultOpen={(form.callLogItems || []).length > 0 || !!form.callNotes} hint="'사건에 기록' → 진행경과">
+              <CaseNoteEditor variant="call" items={form.callLogItems} cases={cases}
+                field="callLogItems" defaultDate={currentDate}
+                onRecord={onUpdateCase ? handleRecordCall : null}
+                onChange={(v) => update({ callLogItems: v })} />
+              {form.callNotes && (
+                <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2">
+                  <div className="text-[11px] text-slate-400 mb-1">예전 자유 입력 통화·상담 메모</div>
+                  <textarea value={form.callNotes} onChange={(e) => update({ callNotes: e.target.value })}
+                    className="input w-full min-h-[70px] text-sm" placeholder={"[상대방] [시각] [내용] [후속조치]"} />
                 </div>
-                <ul className="space-y-1.5">
-                  {pendingDelegatedItems.map((item) => {
-                    const badge = delegatedBadge(item, currentDate);
-                    const badgeClass = badge.tone === "red"
-                      ? "bg-red-100 text-red-700 border-red-200"
-                      : badge.tone === "amber"
-                        ? "bg-amber-100 text-amber-700 border-amber-200"
-                        : "bg-slate-100 text-slate-600 border-slate-200";
-                    return (
-                      <li key={item.id} className="bg-white rounded-lg border border-amber-100 px-2.5 py-2">
-                        <div className="flex items-start gap-2">
-                          <span className={`text-[11px] rounded-full border px-1.5 py-0.5 flex-shrink-0 ${badgeClass}`}>{badge.text}</span>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-sm text-slate-800 leading-snug">
-                              {item.assignee && <span className="font-semibold text-indigo-600 mr-1">@{item.assignee}</span>}
-                              {item.text}
-                            </div>
-                            <div className="text-[11px] text-slate-400 mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5">
-                              {item.sourceDate && <span>위임일 {item.sourceDate}</span>}
-                              {item.dueDate && <span>확인일 {item.dueDate}</span>}
-                              {item.cmCaseTitle && <span>사건 {item.cmCaseTitle}</span>}
-                            </div>
-                            {item.details && <div className="text-xs text-slate-500 mt-1 whitespace-pre-wrap">{item.details}</div>}
-                          </div>
-                          <div className="flex items-center gap-1 flex-shrink-0">
-                            <button onClick={() => markDelegatedDone(item.id)} className="text-[11px] px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100">완료</button>
-                            <button onClick={() => cancelDelegated(item.id)} className="text-[11px] px-2 py-1 rounded bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100">취소</button>
-                          </div>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            )}
+              )}
+            </Section>
 
-            <SectionLabel hint="사건별 진행·서면·회의·행정">오늘 업무</SectionLabel>
-            <textarea value={form.todayWork} onChange={(e) => update({ todayWork: e.target.value })}
-              className="input w-full min-h-[120px] text-sm leading-relaxed"
-              placeholder={"[사건별 진행]\n- 2024가합1234 / 준비서면 초안\n[회의·상담]\n- 14:00 의뢰인 미팅"} />
+            <Section key={`learned-${currentDate}`} title="배운 점" count={(form.learnedItems || []).length} hint="주제별로 모아 복기">
+              <LearnedEditor items={form.learnedItems} topics={topicOptions}
+                onChange={(v) => update({ learnedItems: v })} />
+            </Section>
 
-            <SectionLabel hint="관련 사건 선택 후 '사건에 기록' → 진행경과에 추가">사건 진행 기록</SectionLabel>
-            <CaseNoteEditor variant="progress" items={form.caseProgressItems} cases={cases}
-              field="caseProgressItems" defaultDate={currentDate}
-              onRecord={onUpdateCase ? handleRecordProgress : null}
-              onChange={(v) => update({ caseProgressItems: v })}
-              placeholder="오늘 처리한 사건 진행 내용" />
-
-            <SectionLabel hint="📝 상세 · 📅 캘린더 등록 · 체크 시 이월 안 됨">오늘 할 일</SectionLabel>
-            <ChecklistEditor items={form.todayTasks} cases={cases} showCase showDetails
-              field="todayTasks" onPushItem={onPushTask ? handlePushItem : null}
-              onChange={handleTodayTasksChange} placeholder="오늘 처리할 업무 입력 후 Enter" />
-
-            <SectionLabel hint="미완료 시 다음 날 '오늘 할 일'로 자동 이월">내일 할 일</SectionLabel>
-            <ChecklistEditor items={form.tomorrowTasks} cases={cases} showCase showDetails
-              field="tomorrowTasks" onPushItem={onPushTask ? handlePushItem : null}
-              onChange={(v) => update({ tomorrowTasks: v })} placeholder="내일 할 업무 입력 후 Enter" />
-
-            <SectionLabel hint="상세메모 입력 · 매일 이월 · 사건 선택 · 📄 사건 제출대기서면으로 보내기 · 📅 캘린더">제출 예정 서면</SectionLabel>
-            <ChecklistEditor items={form.pendingDocItems} cases={cases} showCase showDetails
-              showAddDetails addDetailsPlaceholder="상세 내용 메모 (쟁점, 보완할 자료, 제출 전 확인사항 등)"
-              field="pendingDocItems" onPushItem={onPushTask ? handlePushItem : null}
-              onSendToCase={onUpdateCase ? handleSendDoc : null}
-              onChange={handlePendingDocsChange} placeholder="제출 예정 서면 입력 후 Enter" />
-
-            <SectionLabel hint="담당자별 · 미완료 자동 추적 · 확인기한 변경 이력 · 관련 사건·상세·캘린더 등록">위임 업무</SectionLabel>
-            <ChecklistEditor items={form.delegatedItems} cases={cases} showCase showAssignee showDate showDetails
-              allowDueDateEdit onRescheduleItem={handleDelegatedReschedule}
-              field="delegatedItems" onPushItem={onPushTask ? handlePushItem : null}
-              onChange={handleDelegatedChange} placeholder="위임 업무 입력 후 Enter" emptyHint="미확인 위임 업무가 없습니다." />
-
-            <SectionLabel hint="여러 건 추가 · 사건 선택+상세 · '사건에 기록' → 진행경과(+의뢰인요청 메모)">통화·상담 메모</SectionLabel>
-            <CaseNoteEditor variant="call" items={form.callLogItems} cases={cases}
-              field="callLogItems" defaultDate={currentDate}
-              onRecord={onUpdateCase ? handleRecordCall : null}
-              onChange={(v) => update({ callLogItems: v })} />
-
-            {form.callNotes && (
-              <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2">
-                <div className="text-[11px] text-slate-400 mb-1">기존 자유 입력 통화·상담 메모</div>
-                <textarea value={form.callNotes} onChange={(e) => update({ callNotes: e.target.value })}
-                  className="input w-full min-h-[70px] text-sm" placeholder={"[상대방] [시각] [내용] [후속조치]"} />
-              </div>
-            )}
-
-            <LearnedEditor items={form.learnedItems} topics={topicOptions}
-              onChange={(v) => update({ learnedItems: v })} />
-
-            <SectionLabel>기타</SectionLabel>
-            <textarea value={form.etc} onChange={(e) => update({ etc: e.target.value })}
-              className="input w-full min-h-[60px] text-sm" placeholder="기타 메모" />
+            <Section key={`etc-${currentDate}`} title="기타" badge={form.etc.trim() ? "작성됨" : null} defaultOpen={!!form.etc.trim()}>
+              <textarea value={form.etc} onChange={(e) => update({ etc: e.target.value })}
+                className="input w-full min-h-[60px] text-sm" placeholder="기타 메모" />
+            </Section>
 
             <div className="flex justify-between items-center mt-6">
               <button onClick={() => removeEntry(currentDate)}
@@ -1037,7 +980,6 @@ function LearnedEditor({ items = [], topics = [], onChange }) {
 
   return (
     <>
-      <SectionLabel hint="주제별로 모아 복기">오늘 배운 점</SectionLabel>
       {items.length > 0 && (
         <div className="space-y-1.5 mb-2">
           {items.map((it) => (
